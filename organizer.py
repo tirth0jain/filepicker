@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from . import filename as fn
+import filename as fn
 
 
 @dataclass

@@ -12,18 +12,24 @@ completes.
 
 from __future__ import annotations
 
+import os
 import queue
 import shutil
 import sys
 import threading
 from pathlib import Path
 
+# Ensure the app's own folder is importable no matter the working directory.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 import customtkinter as ctk
 
-from .config import ConfigManager
-from .organizer import OrganizeRequest, organize
-from .popup import FilePickerPopup
-from .watcher import DownloadWatcher
+from config import ConfigManager
+from organizer import OrganizeRequest, organize
+from popup import FilePickerPopup
+from watcher import DownloadWatcher
 
 
 class FilePickerController:

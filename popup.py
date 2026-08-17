@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
-from .config import ConfigManager
+from config import ConfigManager
 
 # A sentinel option shown at the bottom of the Site dropdown.
 ADD_NEW_SITE_OPTION = "[+ Add New Site...]"
@@ -404,7 +404,7 @@ class FilePickerPopup:
     # ------------------------------------------------------------------
     def _refresh_preview(self) -> None:
         """Update the live filename preview as the user edits fields."""
-        from . import filename as fn
+        import filename as fn
 
         ext = self.file_path.suffix.lstrip(".") or "pdf"
         status = "Received" if self._received_var.get() else "Submitted"
