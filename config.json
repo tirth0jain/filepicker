@@ -1,0 +1,16 @@
+{
+  "watch_directory": "C:/Users/<Username>/Downloads",
+  "root_directory": "D:/Company_Data",
+  "doc_types": ["DC", "Tax Invoice", "Purchase Order", "MTC"],
+  "materials": {
+    "Aluminium": "A",
+    "Carbon": "C",
+    "Stainless Steel": "SS",
+    "Mild Steel": "MS",
+    "Galvanized Iron": "GI"
+  },
+  "companies": {
+    "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
+    "Beta Projects": ["Plant Central"]
+  }
+}

@@ -1,0 +1,174 @@
+"""Configuration management for FilePicker.
+
+Loads and persists a ``config.json`` file. The config is written next to the
+application (the directory containing this module) so it travels with the
+utility and survives reinstalls. All dynamic changes made from the popup UI
+(companies, sites, materials, doc types) are saved back to this file.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from copy import deepcopy
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Default configuration used the very first time the app runs.
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "watch_directory": str(Path.home() / "Downloads"),
+    "root_directory": "D:/Company_Data",
+    "doc_types": ["DC", "Tax Invoice", "Purchase Order", "MTC"],
+    "materials": {
+        "Aluminium": "A",
+        "Carbon": "C",
+        "Stainless Steel": "SS",
+        "Mild Steel": "MS",
+        "Galvanized Iron": "GI",
+    },
+    "companies": {
+        "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
+        "Beta Projects": ["Plant Central"],
+    },
+}
+
+
+def default_config_path() -> Path:
+    """Return the path to the config.json file next to this module."""
+    return Path(__file__).resolve().parent / "config.json"
+
+
+class ConfigManager:
+    """Thread-safe wrapper around the persistent config.json file.
+
+    Reads the file lazily, caches the parsed structure in memory, and writes
+    every mutation back to disk so the config is always up to date.
+    """
+
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = Path(path) if path else default_config_path()
+        self._lock = threading.RLock()
+        self._data: Dict[str, Any] = deepcopy(DEFAULT_CONFIG)
+        self._loaded = False
+
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+    def load(self) -> Dict[str, Any]:
+        """Load the config from disk (or defaults), merging any missing keys."""
+        with self._lock:
+            if not self._loaded:
+                self._read_from_disk()
+                self._loaded = True
+            return self._data
+
+    def _read_from_disk(self) -> None:
+        if not self.path.exists():
+            self.save()
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if not isinstance(loaded, dict):
+                raise ValueError("config root must be a JSON object")
+            # Merge defaults so new keys added in later versions appear.
+            merged = deepcopy(DEFAULT_CONFIG)
+            merged.update(loaded)
+            self._data = merged
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            # Fall back to defaults but never crash the watcher.
+            self._data = deepcopy(DEFAULT_CONFIG)
+            print(f"[config] Could not read {self.path}: {exc}")
+
+    def reload(self) -> Dict[str, Any]:
+        """Force a reload from disk (e.g. after external edits)."""
+        with self._lock:
+            self._loaded = False
+            return self.load()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    def save(self) -> None:
+        """Write the current in-memory config to disk atomically."""
+        with self._lock:
+            tmp = self.path.with_suffix(".json.tmp")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(self._data, fh, indent=2, ensure_ascii=False)
+                os.replace(tmp, self.path)
+            except OSError as exc:
+                print(f"[config] Could not write {self.path}: {exc}")
+
+    # ------------------------------------------------------------------
+    # Typed accessors
+    # ------------------------------------------------------------------
+    @property
+    def watch_directory(self) -> str:
+        return str(self.load().get("watch_directory", ""))
+
+    @property
+    def root_directory(self) -> str:
+        return str(self.load().get("root_directory", ""))
+
+    @property
+    def doc_types(self) -> List[str]:
+        return list(self.load().get("doc_types", []))
+
+    @property
+    def materials(self) -> Dict[str, str]:
+        """Return a copy of the {material name -> shortcode} mapping."""
+        return dict(self.load().get("materials", {}))
+
+    @property
+    def companies(self) -> Dict[str, List[str]]:
+        """Return a copy of the {company name -> [sites]} mapping."""
+        companies = self.load().get("companies", {})
+        return {name: list(sites) for name, sites in companies.items()}
+
+    def sites_for(self, company: str) -> List[str]:
+        return list(self.load().get("companies", {}).get(company, []))
+
+    # ------------------------------------------------------------------
+    # Mutators (each persists to disk)
+    # ------------------------------------------------------------------
+    def set_watch_directory(self, value: str) -> None:
+        with self._lock:
+            self.load()["watch_directory"] = value
+            self.save()
+
+    def set_root_directory(self, value: str) -> None:
+        with self._lock:
+            self.load()["root_directory"] = value
+            self.save()
+
+    def add_company(self, company: str, sites: Optional[List[str]] = None) -> None:
+        with self._lock:
+            companies = self.load().setdefault("companies", {})
+            if company not in companies:
+                companies[company] = list(sites or [])
+                self.save()
+
+    def add_site(self, company: str, site: str) -> None:
+        """Add a new site under ``company``; create the company if needed."""
+        with self._lock:
+            companies = self.load().setdefault("companies", {})
+            sites = companies.setdefault(company, [])
+            if site not in sites:
+                sites.append(site)
+                self.save()
+
+    def add_material(self, name: str, shortcode: str) -> None:
+        with self._lock:
+            materials = self.load().setdefault("materials", {})
+            materials[name] = shortcode
+            self.save()
+
+    def add_doc_type(self, doc_type: str) -> None:
+        with self._lock:
+            doc_types = self.load().setdefault("doc_types", [])
+            if doc_type not in doc_types:
+                doc_types.append(doc_type)
+                self.save()
