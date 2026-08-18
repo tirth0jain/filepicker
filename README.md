@@ -146,9 +146,10 @@ No other file needs changing — the rest all import `VERSION`.
 - **Sanitisation** — illegal Windows characters `\ / : * ? " < > |` are removed,
   and trailing dots/spaces are stripped.
 
-## Building a standalone .exe (no Python needed on target)
+## Building a standalone app (no Python needed on target)
 
-Compile with **Nuitka** into a single portable Windows executable:
+Compile with **Nuitka** into a **standalone folder** (not a packed onefile) and
+zip it:
 
 ```bash
 pip install -r requirements.txt
@@ -156,8 +157,30 @@ pip install nuitka
 python build.py        # or run build.bat
 ```
 
-The binary lands in `dist/` with Python embedded, so target machines need no
-Python installation.
+This produces `dist/FilePicker-<version>-win64.zip` — a folder containing
+`FilePicker.exe` + bundled libraries, with Python embedded, so target machines
+need no Python installation. To install: extract the zip and run
+`FilePicker.exe`.
+
+### Why standalone (a folder) instead of onefile?
+
+Nuitka's `--onefile` build is a packed, self-extracting bootstrap that unpacks
+to a temp folder at runtime and runs from there. That behavior matches a common
+malware-dropper signature, so heuristic antivirus engines (Windows Defender,
+VirusTotal) frequently flag it as a **false positive**. A **standalone folder**
+has no self-extractor, which removes that main heuristic trigger and greatly
+reduces false positives. The auto-updater downloads the new zip, extracts it,
+swaps the app folder, and relaunches — the same experience, minus the AV noise.
+
+### Windows SmartScreen / Defender
+
+- On the **first** run of a browser-downloaded exe, SmartScreen may warn
+  ("unknown publisher") because it's unsigned. Click **More info → Run anyway**.
+- **Auto-updates** are downloaded by the app itself (not a browser), so they
+  don't carry the download "Mark of the Web" tag and generally don't re-trigger
+  the warning.
+- The standalone build is the free mitigation for the Defender false positive.
+  For the definitive fix, code-sign the binary (OV/EV certificate).
 
 ## Auto-update via GitHub Releases
 

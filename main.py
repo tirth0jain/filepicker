@@ -89,6 +89,26 @@ class FilePickerController:
         self._root.title(f"FilePicker v{VERSION}")
         self._root.protocol("WM_DELETE_WINDOW", self._root.destroy)
 
+    def _cleanup_old_files(self) -> None:
+        """Remove leftover '.old' files from a previous update swap.
+
+        During an update the running exe/DLLs are renamed to '.old' so the new
+        build can take their place; those leftovers can't be deleted while the
+        old process is alive, so they're cleaned up on the next launch.
+        """
+        try:
+            if getattr(sys, "frozen", False):
+                app_dir = Path(sys.executable).parent
+            else:
+                app_dir = Path(__file__).resolve().parent
+            for old in app_dir.glob("*.old"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
     def _show_update_notice_if_any(self) -> None:
         """Show a popup if the app was just updated (old -> new)."""
         try:
@@ -207,6 +227,7 @@ class FilePickerController:
     # ------------------------------------------------------------------
     def run(self) -> None:
         self._build_root()
+        self._cleanup_old_files()
         self._show_update_notice_if_any()
 
         watch_dir = self.config.watch_directory

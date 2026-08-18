@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -33,7 +34,7 @@ from version import VERSION
 # --- Configuration -----------------------------------------------------
 # GitHub repository that hosts the releases.
 GITHUB_REPO = "tirth0jain/filepicker"
-# Asset name prefix the CI uploads, e.g. "FilePicker-0.1.0-<sha>-win64.exe".
+# Asset name prefix the CI uploads, e.g. "FilePicker-0.1.2-<sha>-win64.zip".
 ASSET_PREFIX = "FilePicker"
 # How often to check for updates (seconds). 5 minutes keeps new releases
 # picked up quickly while staying well within the GitHub API unauthenticated
@@ -115,10 +116,10 @@ def check_for_update() -> Optional[dict]:
         if installed == VERSION or installed == latest_tag:
             return None
 
-    # Find the Windows asset for this app.
+    # Find the Windows zip asset for this app.
     for asset in info.get("assets", []):
         name = asset.get("name", "")
-        if name.startswith(ASSET_PREFIX) and name.lower().endswith(".exe"):
+        if name.startswith(ASSET_PREFIX) and name.lower().endswith(".zip"):
             return {
                 "version": latest_tag,
                 "url": asset["browser_download_url"],
@@ -159,10 +160,10 @@ def consume_update_notice() -> Optional[str]:
 
 
 def download_update(update: dict) -> Optional[Path]:
-    """Download the new binary to a temp location; return its path or None.
+    """Download the new build zip to a temp location; return its path or None.
 
-    This does NOT touch the running exe, so it is safe to do while the app is
-    still processing files. The actual swap happens later in install_update().
+    This does NOT touch the running app, so it is safe to do while files are
+    still being processed. The actual swap happens later in install_update().
     """
     try:
         new_file = Path(tempfile.gettempdir()) / update["name"]
@@ -173,44 +174,86 @@ def download_update(update: dict) -> Optional[Path]:
         return None
 
 
-def install_update(update: dict, new_file: Path) -> bool:
-    """Atomically swap the running exe with the downloaded one and relaunch.
+def _replace_file(src: Path, dst: Path) -> None:
+    """Copy one file; if the destination is locked (in use), rename it aside
+    first (Windows lets you rename a file that's memory-mapped by a running
+    process, but not overwrite it), then copy the new file in."""
+    try:
+        shutil.copy2(src, dst)
+        return
+    except PermissionError:
+        pass
+    old = dst.with_name(dst.name + ".old")
+    try:
+        dst.rename(old)
+    except PermissionError:
+        old.unlink(missing_ok=True)
+        dst.rename(old)
+    shutil.copy2(src, dst)
+
+
+def install_update(update: dict, staged_zip: Path) -> bool:
+    """Replace the running standalone app folder with the new build and relaunch.
 
     Only call this once the app is idle (no files being processed), because it
     replaces the running binary and exits the process. Returns True on success.
     """
-    exe = _current_exe()
+    exe = _current_exe()          # e.g. .../FilePicker/FilePicker.exe
+    app_dir = exe.parent
     old_tag = _installed_tag()
-    old_file = exe.with_suffix(exe.suffix + ".old")
 
+    # 1. Extract the new build to a temp folder.
+    new_dir = Path(tempfile.gettempdir()) / f"FilePicker-new-{update['version'].lstrip('vV')}"
+    if new_dir.exists():
+        shutil.rmtree(new_dir, ignore_errors=True)
     try:
-        # Atomic swap: rename running exe -> .old, move new -> exe, relaunch.
-        if old_file.exists():
-            old_file.unlink()
-        exe.rename(old_file)
-        new_file.rename(exe)
-
-        # Record the installed tag so we don't re-apply the same build.
-        marker = exe.with_name("installed_version.txt")
-        marker.write_text(update["version"], encoding="utf-8")
-
-        # Record the update notice so the relaunched app can show a popup
-        # telling the user what version it was updated from and to.
-        _notice_file().write_text(
-            f"{old_tag} -> {update['version']}", encoding="utf-8"
-        )
-
-        _relaunch(exe)
-        return True
+        with zipfile.ZipFile(staged_zip) as zf:
+            zf.extractall(new_dir)
     except Exception as exc:
-        print(f"[updater] install failed: {exc}")
-        # Try to restore the original binary.
-        try:
-            if not exe.exists() and old_file.exists():
-                old_file.rename(exe)
-        except OSError:
-            pass
+        print(f"[updater] could not extract update: {exc}")
         return False
+
+    new_exe = new_dir / "FilePicker.exe"
+    if not new_exe.exists():
+        print("[updater] new build has no FilePicker.exe; aborting update")
+        return False
+
+    # 2. Rename the running exe out of the way (Windows allows renaming the
+    #    running image, but not deleting it).
+    old_exe = app_dir / "FilePicker.exe.old"
+    if old_exe.exists():
+        old_exe.unlink(missing_ok=True)
+    try:
+        exe.rename(old_exe)
+    except OSError as exc:
+        print(f"[updater] could not rename running exe: {exc}")
+        return False
+
+    # 3. Copy the new build's files over the app folder, handling any locked
+    #    DLLs by renaming them aside first.
+    try:
+        for src in sorted(new_dir.rglob("*")):
+            if src.is_file():
+                rel = src.relative_to(new_dir)
+                dst = app_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _replace_file(src, dst)
+    except Exception as exc:
+        print(f"[updater] failed copying new build: {exc}")
+        return False
+
+    # 4. Record installed tag + update notice.
+    (app_dir / "installed_version.txt").write_text(update["version"], encoding="utf-8")
+    _notice_file().write_text(f"{old_tag} -> {update['version']}", encoding="utf-8")
+
+    # 5. Clean up the temp extraction (leftover .old files are removed on next
+    #    launch by main.py's startup cleanup).
+    shutil.rmtree(new_dir, ignore_errors=True)
+    staged_zip.unlink(missing_ok=True)
+
+    # 6. Relaunch the (now-new) exe and exit this process.
+    _relaunch(exe)
+    return True
 
 
 def apply_update(update: dict, is_busy: Optional[Callable[[], bool]] = None) -> bool:

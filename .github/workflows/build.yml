@@ -54,12 +54,12 @@ jobs:
           SHA=$(git rev-parse --short HEAD)
           VER=$(python -c "from version import VERSION; print(VERSION)")
           echo "tag=v${VER}-${SHA}" >> "$GITHUB_OUTPUT"
-          echo "asset=FilePicker-${VER}-${SHA}-win64.exe" >> "$GITHUB_OUTPUT"
+          echo "asset=FilePicker-${VER}-${SHA}-win64.zip" >> "$GITHUB_OUTPUT"
 
-      - name: Rename binary
+      - name: Rename zip
         shell: bash
         run: |
-          mv dist/*.exe "dist/${{ steps.version.outputs.asset }}"
+          mv dist/FilePicker-*-win64.zip "dist/${{ steps.version.outputs.asset }}"
 
       - name: Create / update Release
         uses: softprops/action-gh-release@v2
