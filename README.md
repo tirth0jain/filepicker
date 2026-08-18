@@ -92,6 +92,11 @@ runs silently in the background (hidden main window) and pops up the metadata
 dialog whenever a download completes. To stop it, close it from Task Manager
 (or add a tray/quit option if you'd like one).
 
+**First-run setup:** on the very first launch the app shows a one-time dialog
+asking for your **watch folder** (where downloads land) and **root folder**
+(where files get organised), pre-filled with the defaults from `config.json`
+so you can just press **Save & Start** to accept them (or Browse to change).
+
 **Auto-start at Windows login:** the app **auto-registers itself on first run**
 — it creates a Startup-folder shortcut automatically (via PowerShell, no extra
 dependencies), so it launches at every login with no manual step. To control it:
@@ -100,6 +105,35 @@ dependencies), so it launches at every login with no manual step. To control it:
 - Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`.
 - Manual alternative: press `Win+R`, type `shell:startup`, and drop a shortcut
   to `FilePicker.exe` in the folder that opens.
+
+## Uninstalling
+
+FilePicker is **portable** — there is no installer and it writes **nothing to
+the Windows registry**. To remove it completely:
+
+1. **Remove it from startup** (so it stops launching at login):
+   `FilePicker.exe --remove-startup`
+   (or press `Win+R`, type `shell:startup`, and delete the `FilePicker.lnk` shortcut).
+2. **Stop it if it's running** — close it from Task Manager.
+3. **Delete the app folder** — the `.exe` and everything next to it
+   (`config.json`, `installed_version.txt`, `last_update.txt` if present).
+4. **Optionally delete the organised data** — the `root_directory` you set in
+   `config.json` (e.g. `D:/Company_Data`) contains all the copied/organised
+   files. Delete it only if you don't want to keep them.
+
+That's it — no registry keys, no services, no leftover system entries.
+
+## Updating the version number
+
+The version lives in **one place**: `version.py` (`VERSION = "0.1.2"`). Every
+window title, the update popup, the Nuitka binary metadata, the release tag and
+the updater all read it from there. To bump the version:
+
+1. Edit `version.py` → change `VERSION = "0.1.2"` to the new value (e.g. `"0.1.3"`).
+2. Commit + push. CI builds a release tagged `v0.1.3-<sha>` automatically, and
+   installed copies auto-update to it.
+
+No other file needs changing — the rest all import `VERSION`.
 
 ## Filename rules
 
@@ -135,9 +169,9 @@ Python installation.
   `.old`, the new one is swapped in, and the app relaunches. If anything fails
   the original binary is restored.
 - **After an update, a popup appears** telling you what version it was updated
-  from and to (e.g. `v0.1.0-aaa -> v0.1.0-bbb`).
+  from and to (e.g. `v0.1.2-aaa -> v0.1.2-bbb`).
 - The current version is shown in the title bar of every window
-  (e.g. `FilePicker v0.1.0 — New Download`).
+  (e.g. `FilePicker v0.1.2 — New Download`).
 
 ## CI: auto-compile on every commit
 
@@ -158,7 +192,8 @@ filepicker/
 ├── organizer.py     # directory routing & file distribution
 ├── updater.py       # GitHub Releases auto-update (check + atomic swap)
 ├── startup.py       # Windows auto-start (Startup-folder shortcut)
-├── version.py       # app version (0.1.0)
+├── setup.py         # one-time first-run setup dialog (watch/root folders)
+├── version.py       # app version (0.1.2)
 ├── build.py         # Nuitka build script
 ├── build.bat        # Windows build shortcut
 ├── config.json      # persistent configuration

@@ -211,7 +211,17 @@ def main() -> None:
         return
 
     config = ConfigManager()
+
+    # First run = the config file doesn't exist yet. Show a one-time setup
+    # dialog asking for the watch/root directories, pre-filled with defaults.
+    first_run = not config.path.exists()
     config.load()
+    if first_run:
+        try:
+            from setup import run_first_time_setup
+            run_first_time_setup(config)
+        except Exception as exc:
+            print(f"[filepicker] first-run setup error: {exc}")
 
     # Auto-register for Windows startup on first run (unless disabled in
     # config.json). Runs in a background thread so it never delays startup.

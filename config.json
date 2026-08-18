@@ -1,5 +1,5 @@
 {
-  "watch_directory": "C:/Users/<Username>/Downloads",
+  "watch_directory": "D:/test",
   "root_directory": "D:/Company_Data",
   "doc_types": ["DC", "Tax Invoice", "Purchase Order", "MTC"],
   "materials": {
