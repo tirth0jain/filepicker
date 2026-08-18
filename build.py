@@ -35,17 +35,16 @@ def main() -> None:
         "--file-version=" + VERSION,
         "--product-version=" + VERSION,
         "--assume-yes-for-downloads",
-        # PyMuPDF compiles into a single huge C file (2.3M+ lines) that makes
-        # MSVC run out of heap ("C1002") when several compilers run at once.
-        # --low-memory forces ONE C-compile job so that file gets the full
-        # memory budget. Slower, but it builds reliably.
-        "--low-memory",
         "main.py",                           # the main module to compile
     ]
 
-    # NOTE: Deliberately NOT using --remove-output (deletes the build dir and
-    # is a known onefile troublemaker) and NOT setting --jobs (Nuitka defaults
-    # to full CPU, which re-introduces the C1002 heap exhaustion).
+    # NOTE: This command matches the FIRST build that succeeded (24m46s) on
+    # Python 3.11 with PyMuPDF included. Do NOT add --jobs (Nuitka defaults to
+    # full CPU anyway) or --remove-output (deletes the build dir needed for
+    # debugging). Do NOT switch to Python 3.13 — its generated C code for
+    # PyMuPDF overflows MSVC's heap ("fatal error C1002"), which --low-memory
+    # does NOT fix (the file is too large for a single pass-2, not a concurrency
+    # issue). The CI workflow pins Python 3.11 for this reason.
 
     print("Running:", " ".join(cmd))
     subprocess.check_call(cmd)

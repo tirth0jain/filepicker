@@ -21,7 +21,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          # Python 3.11 is REQUIRED: this is the version that successfully
+          # compiled PyMuPDF. On 3.13, Nuitka's generated C code for PyMuPDF's
+          # single huge file exceeds MSVC's heap ("fatal error C1002").
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -37,9 +40,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/AppData/Local/Nuitka
-          key: nuitka-${{ runner.os }}-py313-${{ hashFiles('**/*.py', 'requirements.txt') }}
+          key: nuitka-${{ runner.os }}-py311-${{ hashFiles('**/*.py', 'requirements.txt') }}
           restore-keys: |
-            nuitka-${{ runner.os }}-py313-
+            nuitka-${{ runner.os }}-py311-
 
       - name: Build with Nuitka
         run: python build.py
