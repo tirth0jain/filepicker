@@ -78,6 +78,8 @@ class FilePickerController:
         self.config = config
         self._popup_queue: "queue.Queue[Path]" = queue.Queue()
         self._popup_active = False
+        self._organize_active = False
+        self._pending_update = None  # (update_dict, staged_path) awaiting install
         self._root = None
 
     # ------------------------------------------------------------------
@@ -116,6 +118,7 @@ class FilePickerController:
                     print(f"[filepicker] popup error: {exc}")
                 finally:
                     self._popup_active = False
+        self._maybe_install_update()
         self._root.after(100, self._poll_popups)
 
     def _show_popup(self, path: Path) -> None:
@@ -130,8 +133,14 @@ class FilePickerController:
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
+        self._organize_active = True
+
         def run() -> None:
-            self._organize(payload)
+            try:
+                self._organize(payload)
+            finally:
+                self._organize_active = False
+
         threading.Thread(target=run, name="filepicker-organize", daemon=True).start()
 
     def _handle_skip(self) -> None:
@@ -169,6 +178,33 @@ class FilePickerController:
         print(f"[filepicker] {message}")
 
     # ------------------------------------------------------------------
+    def _is_busy(self) -> bool:
+        """True while the app is processing files and must not be interrupted."""
+        return (
+            self._popup_active
+            or self._organize_active
+            or not self._popup_queue.empty()
+        )
+
+    def _maybe_install_update(self) -> None:
+        """Install a staged update once the app is fully idle.
+
+        Called from the main-thread poll loop. A staged update is downloaded
+        immediately when detected, but the swap (which replaces the running exe
+        and exits) only happens after every file has been processed.
+        """
+        if self._pending_update is None or self._is_busy():
+            return
+        update, staged = self._pending_update
+        self._pending_update = None
+        try:
+            from updater import install_update
+            print(f"[filepicker] idle; installing update {update['version']}…")
+            install_update(update, staged)
+        except Exception as exc:
+            print(f"[filepicker] install error: {exc}")
+
+    # ------------------------------------------------------------------
     def run(self) -> None:
         self._build_root()
         self._show_update_notice_if_any()
@@ -189,11 +225,37 @@ class FilePickerController:
             watcher.stop()
 
     def _schedule_update_checks(self) -> None:
-        """Check for updates at startup and periodically (non-blocking)."""
+        """Check for updates periodically; stage downloads, install when idle."""
         try:
-            from updater import run_update_check, schedule_periodic
-            run_update_check()
-            schedule_periodic(self._root)
+            from updater import CHECK_INTERVAL, check_for_update, download_update
+
+            def check() -> None:
+                # If an update is already staged and waiting for idle, skip
+                # re-checking until it has been installed.
+                if self._pending_update is not None:
+                    try:
+                        self._root.after(int(CHECK_INTERVAL * 1000), check)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    update = check_for_update()
+                    if update:
+                        staged = download_update(update)
+                        if staged:
+                            self._pending_update = (update, staged)
+                            print(
+                                f"[filepicker] update {update['version']} downloaded; "
+                                "will install once all files are processed"
+                            )
+                except Exception as exc:
+                    print(f"[filepicker] updater check error: {exc}")
+                try:
+                    self._root.after(int(CHECK_INTERVAL * 1000), check)
+                except Exception:
+                    pass
+
+            self._root.after(1000, check)  # first check shortly after start
         except Exception as exc:
             print(f"[filepicker] updater unavailable: {exc}")
 

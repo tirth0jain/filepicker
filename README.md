@@ -19,8 +19,9 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   Company / Site dropdowns (with an inline *Add New Site* flow), Document Type,
   Material multi-select (with *Add Material*), Serial Number, a *Received Copy*
   checkbox, and a live filename preview.
-- **File preview** — a **👁 Preview** button in the popup opens a lightweight
-  non-modal viewer next to the popup to verify the download before organising:
+- **File preview** — a **👁 Preview** button in the popup expands the window to
+  the right and shows the file preview **embedded in the same window** (no
+  separate window). Click **✕ Close Preview** to collapse it back:
   - **PDFs** (PyMuPDF) — page-by-page with Prev/Next, plus zoom controls
     (**+ / − / Fit Width** or **Ctrl + mouse wheel**). Pages are rendered at a
     low base DPI for fast text loading and PNG-compressed (a 2 MB raw page
@@ -161,13 +162,16 @@ Python installation.
 ## Auto-update via GitHub Releases
 
 - The app checks **GitHub Releases** for a newer binary at startup and every
-  6 hours (`updater.py`). The repository is `tirth0jain/filepicker`.
+  5 minutes (`updater.py`). The repository is `tirth0jain/filepicker`.
 - Each release is tagged `v<version>-<commit-sha>`; the app stores the tag it
   is running in `installed_version.txt` next to the binary, so every new commit
   triggers an update.
-- On update: the new `.exe` is downloaded, the running binary is renamed to
-  `.old`, the new one is swapped in, and the app relaunches. If anything fails
-  the original binary is restored.
+- **Safe update timing:** the new binary is downloaded as soon as an update is
+  detected, but the swap is **deferred until the app is fully idle** — it waits
+  for any open popup, queued file, or in-progress organise operation to finish
+  before replacing the running exe and relaunching. No work is ever interrupted.
+- On update: the new `.exe` is swapped in (running binary renamed to `.old`),
+  and the app relaunches. If anything fails the original binary is restored.
 - **After an update, a popup appears** telling you what version it was updated
   from and to (e.g. `v0.1.2-aaa -> v0.1.2-bbb`).
 - The current version is shown in the title bar of every window

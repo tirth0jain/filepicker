@@ -128,25 +128,44 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]]]:
 
 
 # ----------------------------------------------------------------------
-# GUI window
+# GUI preview (window or embedded pane)
 # ----------------------------------------------------------------------
 class PreviewWindow:
-    """A non-modal Toplevel that previews a file next to the popup."""
+    """Previews a file, either in its own Toplevel or embedded in a container.
 
-    def __init__(self, parent, file_path) -> None:
+    When ``container`` is provided (a CTkFrame), the preview is built into it
+    so it can sit inside another window (e.g. the FilePicker popup's right
+    pane). Otherwise a standalone non-modal Toplevel is created.
+    """
+
+    def __init__(self, parent, file_path, container=None) -> None:
         self.file_path = Path(file_path)
-        self.window = ctk.CTkToplevel(parent)
-        self.window.title(f"FilePicker v{VERSION} — Preview: {self.file_path.name}")
-        self.window.configure(fg_color=_BG)
-        self.window.transient(parent)
-        self.window.attributes("-topmost", True)
-        self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
+        self.parent = parent
 
-        # Position the preview window next to the parent popup.
-        parent.update_idletasks()
-        x = parent.winfo_rootx() + parent.winfo_width() + 8
-        y = parent.winfo_rooty()
-        self.window.geometry(f"820x640+{x}+{y}")
+        if container is not None:
+            # Embedded mode: build into the supplied frame. All preview
+            # widgets pack into self.window, which is now this frame (frames
+            # support pack/configure/after/winfo_* just like windows).
+            self.window = container
+            self.window.configure(fg_color=_BG)
+            self._embedded = True
+        else:
+            # Standalone mode: create a non-modal Toplevel next to the parent.
+            self.window = ctk.CTkToplevel(parent)
+            self.window.title(
+                f"FilePicker v{VERSION} — Preview: {self.file_path.name}"
+            )
+            self.window.configure(fg_color=_BG)
+            self.window.transient(parent)
+            self.window.attributes("-topmost", True)
+            self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
+
+            # Position the preview window next to the parent popup.
+            parent.update_idletasks()
+            x = parent.winfo_rootx() + parent.winfo_width() + 8
+            y = parent.winfo_rooty()
+            self.window.geometry(f"820x640+{x}+{y}")
+            self._embedded = False
 
         kind = classify_ext(self.file_path)
         if not self.file_path.exists():
@@ -163,6 +182,12 @@ class PreviewWindow:
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+    def destroy(self) -> None:
+        """Remove the preview UI (used in embedded mode)."""
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
     def _show_error(self, message: str) -> None:
         ctk.CTkLabel(
             self.window, text=message, text_color=_TEXT_MUTED,

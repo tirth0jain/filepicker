@@ -101,9 +101,36 @@ class FilePickerPopup:
         if self.file_path.suffix.lower() not in _SUPPORTED_PREVIEW_EXTS:
             self.preview_btn.configure(state="disabled")
 
-    def _open_preview(self) -> None:
+    def _toggle_preview(self) -> None:
+        """Open/close the file preview embedded on the right of the popup."""
         from viewer import PreviewWindow
-        PreviewWindow(self.window, self.file_path)
+
+        if self._preview is not None:
+            # --- Close the preview: collapse back to the form only. ---
+            try:
+                self._preview.destroy()
+            except Exception:
+                pass
+            self._preview = None
+            self.preview_pane.pack_forget()
+            self.window.geometry("560x720")
+            self.preview_btn.configure(text="👁 Preview")
+            return
+
+        # --- Open the preview: embed it and expand the window right. ---
+        self.preview_pane.pack(side="left", fill="both", expand=True)
+        try:
+            self._preview = PreviewWindow(
+                self.window, self.file_path, container=self.preview_pane
+            )
+        except Exception as exc:
+            self._preview = None
+            self.preview_pane.pack_forget()
+            self.window.geometry("560x720")
+            print(f"[filepicker] preview error: {exc}")
+            return
+        self.window.geometry("1180x720")
+        self.preview_btn.configure(text="✕ Close Preview")
 
     @staticmethod
     def _human_size(num: float) -> str:
@@ -135,21 +162,37 @@ class FilePickerPopup:
         container = ctk.CTkFrame(self.window, fg_color=_BG, corner_radius=0)
         container.pack(fill="both", expand=True, padx=18, pady=18)
 
+        # Horizontal body: the metadata form on the left, and a preview pane
+        # on the right that the window expands into when Preview is opened.
+        body = ctk.CTkFrame(container, fg_color=_BG)
+        body.pack(fill="both", expand=True)
+
+        self.form_frame = ctk.CTkFrame(body, fg_color=_BG, width=524)
+        self.form_frame.pack(side="left", fill="y")
+        self.form_frame.pack_propagate(False)
+
+        self.preview_pane = ctk.CTkFrame(body, fg_color=_BG)
+        self.preview_pane.pack(side="left", fill="both", expand=True)
+        self.preview_pane.pack_forget()  # hidden until the user opens preview
+        self._preview = None
+
+        f = self.form_frame
+
         # -- Target file banner -----------------------------------------
-        self._banner = ctk.CTkFrame(container, fg_color=_BG_SECONDARY, corner_radius=10)
+        self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
         self._banner.pack(fill="x", pady=(0, 16))
 
         banner_header = ctk.CTkFrame(self._banner, fg_color="transparent")
         banner_header.pack(fill="x", padx=14, pady=(12, 2))
         self._banner_name = ctk.CTkLabel(
             banner_header, text="", font=ctk.CTkFont(size=15, weight="bold"),
-            text_color=_TEXT, wraplength=420, justify="left",
+            text_color=_TEXT, wraplength=380, justify="left",
         )
         self._banner_name.pack(side="left", anchor="w")
         self.preview_btn = ctk.CTkButton(
             banner_header, text="👁 Preview", width=96, height=30,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
-            font=ctk.CTkFont(size=12, weight="bold"), command=self._open_preview,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._toggle_preview,
         )
         self.preview_btn.pack(side="right", anchor="e")
 
@@ -159,64 +202,64 @@ class FilePickerPopup:
         self._banner_size.pack(anchor="w", padx=14, pady=(0, 12))
 
         # -- Company ----------------------------------------------------
-        ctk.CTkLabel(container, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
+        ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
         self.company_combo = ctk.CTkOptionMenu(
-            container, values=[], variable=self._company_var,
+            f, values=[], variable=self._company_var,
             command=self._on_company_change, fg_color=_BG_FIELD,
             button_color=_ACCENT, button_hover_color=_ACCENT,
         )
         self.company_combo.pack(fill="x", pady=(0, 12))
 
         # -- Site -------------------------------------------------------
-        ctk.CTkLabel(container, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
+        ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
         self.site_combo = ctk.CTkOptionMenu(
-            container, values=[], variable=self._site_var,
+            f, values=[], variable=self._site_var,
             command=self._on_site_change, fg_color=_BG_FIELD,
             button_color=_ACCENT, button_hover_color=_ACCENT,
         )
         self.site_combo.pack(fill="x", pady=(0, 12))
 
         # -- Document type ----------------------------------------------
-        ctk.CTkLabel(container, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
+        ctk.CTkLabel(f, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
         self.doc_type_combo = ctk.CTkOptionMenu(
-            container, values=[], variable=self._doc_type_var,
+            f, values=[], variable=self._doc_type_var,
             command=lambda _d: self._refresh_preview(),
             fg_color=_BG_FIELD, button_color=_ACCENT, button_hover_color=_ACCENT,
         )
         self.doc_type_combo.pack(fill="x", pady=(0, 12))
 
         # -- Materials (multi-select) -----------------------------------
-        ctk.CTkLabel(container, text="Material (multi-select)",
+        ctk.CTkLabel(f, text="Material (multi-select)",
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
-        self.material_frame = ctk.CTkFrame(container, fg_color=_BG_SECONDARY, corner_radius=8)
+        self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
         self.material_frame.pack(fill="x", pady=(0, 8))
         self._material_chips: Dict[str, ctk.CTkButton] = {}
         self._render_material_chips()
 
         # -- Serial number ----------------------------------------------
-        ctk.CTkLabel(container, text="Serial Number",
+        ctk.CTkLabel(f, text="Serial Number",
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
         self.serial_entry = ctk.CTkEntry(
-            container, textvariable=self._serial_var, fg_color=_BG_FIELD,
+            f, textvariable=self._serial_var, fg_color=_BG_FIELD,
             border_color=_BG_FIELD, text_color=_TEXT,
         )
         self.serial_entry.pack(fill="x", pady=(0, 12))
 
         # -- Received copy checkbox -------------------------------------
         self.received_check = ctk.CTkCheckBox(
-            container, text="Received Copy (unchecked = Submitted)",
+            f, text="Received Copy (unchecked = Submitted)",
             variable=self._received_var, fg_color=_ACCENT,
             hover_color=_ACCENT, text_color=_TEXT,
         )
         self.received_check.pack(anchor="w", pady=(0, 16))
 
         # -- Buttons ----------------------------------------------------
-        btn_row = ctk.CTkFrame(container, fg_color=_BG)
+        btn_row = ctk.CTkFrame(f, fg_color=_BG)
         btn_row.pack(fill="x", pady=(8, 0))
 
         self.save_btn = ctk.CTkButton(
@@ -235,8 +278,8 @@ class FilePickerPopup:
 
         # -- Live preview ----------------------------------------------
         self.preview_label = ctk.CTkLabel(
-            container, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
-            wraplength=520, justify="left",
+            f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
+            wraplength=500, justify="left",
         )
         self.preview_label.pack(fill="x", pady=(12, 0))
         self._refresh_preview()

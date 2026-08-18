@@ -23,9 +23,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from version import VERSION
 
@@ -34,8 +35,10 @@ from version import VERSION
 GITHUB_REPO = "tirth0jain/filepicker"
 # Asset name prefix the CI uploads, e.g. "FilePicker-0.1.0-<sha>-win64.exe".
 ASSET_PREFIX = "FilePicker"
-# How often to check for updates (seconds).
-CHECK_INTERVAL = 6 * 60 * 60  # every 6 hours
+# How often to check for updates (seconds). 5 minutes keeps new releases
+# picked up quickly while staying well within the GitHub API unauthenticated
+# rate limit (60 req/hr; 12/hr is comfortable).
+CHECK_INTERVAL = 5 * 60  # every 5 minutes
 
 
 def _is_frozen() -> bool:
@@ -155,24 +158,32 @@ def consume_update_notice() -> Optional[str]:
         return None
 
 
-def apply_update(update: dict) -> bool:
-    """Download the new binary and atomically swap it in.
+def download_update(update: dict) -> Optional[Path]:
+    """Download the new binary to a temp location; return its path or None.
 
-    Returns ``True`` if the swap happened (the process is relaunched).
+    This does NOT touch the running exe, so it is safe to do while the app is
+    still processing files. The actual swap happens later in install_update().
     """
-    if not _is_frozen():
-        print("[updater] updates only apply to compiled binaries; skipping.")
-        return False
+    try:
+        new_file = Path(tempfile.gettempdir()) / update["name"]
+        _download(update["url"], new_file)
+        return new_file
+    except Exception as exc:
+        print(f"[updater] download failed: {exc}")
+        return None
 
+
+def install_update(update: dict, new_file: Path) -> bool:
+    """Atomically swap the running exe with the downloaded one and relaunch.
+
+    Only call this once the app is idle (no files being processed), because it
+    replaces the running binary and exits the process. Returns True on success.
+    """
     exe = _current_exe()
     old_tag = _installed_tag()
-    tmp_dir = Path(tempfile.gettempdir())
-    new_file = tmp_dir / update["name"]
     old_file = exe.with_suffix(exe.suffix + ".old")
 
     try:
-        _download(update["url"], new_file)
-
         # Atomic swap: rename running exe -> .old, move new -> exe, relaunch.
         if old_file.exists():
             old_file.unlink()
@@ -192,7 +203,7 @@ def apply_update(update: dict) -> bool:
         _relaunch(exe)
         return True
     except Exception as exc:
-        print(f"[updater] update failed: {exc}")
+        print(f"[updater] install failed: {exc}")
         # Try to restore the original binary.
         try:
             if not exe.exists() and old_file.exists():
@@ -200,6 +211,27 @@ def apply_update(update: dict) -> bool:
         except OSError:
             pass
         return False
+
+
+def apply_update(update: dict, is_busy: Optional[Callable[[], bool]] = None) -> bool:
+    """Download then install, optionally waiting until the app is idle.
+
+    When ``is_busy`` is provided, the swap is deferred (polling every 2s) until
+    it returns False — i.e. until all in-progress file processing completes.
+    """
+    if not _is_frozen():
+        print("[updater] updates only apply to compiled binaries; skipping.")
+        return False
+
+    staged = download_update(update)
+    if staged is None:
+        return False
+
+    if is_busy:
+        while is_busy():
+            time.sleep(2)
+
+    return install_update(update, staged)
 
 
 def run_update_check() -> None:
