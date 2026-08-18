@@ -99,16 +99,22 @@ def resolve_collision(destination_dir, filename: str, replace: bool = False) -> 
 
     If ``replace`` is True the original name is returned so callers can
     overwrite. Otherwise append ``_1``, ``_2``, ... before the extension so no
-    existing file is ever clobbered.
+    existing file is ever clobbered. Handles names with and without an
+    extension (e.g. ``report.pdf`` -> ``report_1.pdf``, ``report`` ->
+    ``report_1``).
     """
     target = destination_dir / filename
     if replace or not target.exists():
         return filename
 
-    stem, _, ext = filename.rpartition(".")
+    if "." in filename:
+        stem, _, ext = filename.rpartition(".")
+        ext = "." + ext
+    else:
+        stem, ext = filename, ""
     counter = 1
     while True:
-        candidate = f"{stem}_{counter}.{ext}" if ext else f"{stem}_{counter}"
+        candidate = f"{stem}_{counter}{ext}"
         if not (destination_dir / candidate).exists():
             return candidate
         counter += 1

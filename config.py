@@ -31,6 +31,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
         "Beta Projects": ["Plant Central"],
     },
+    # Register a Startup-folder shortcut on first run so the app launches
+    # automatically at Windows login. Set to false to disable.
+    "auto_start": True,
 }
 
 
@@ -130,6 +133,11 @@ class ConfigManager:
 
     def sites_for(self, company: str) -> List[str]:
         return list(self.load().get("companies", {}).get(company, []))
+
+    @property
+    def auto_start(self) -> bool:
+        """Whether the app should register itself to launch at Windows login."""
+        return bool(self.load().get("auto_start", True))
 
     # ------------------------------------------------------------------
     # Mutators (each persists to disk)

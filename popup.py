@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional
 import customtkinter as ctk
 
 from config import ConfigManager
+from version import VERSION
 
 # A sentinel option shown at the bottom of the Site dropdown.
 ADD_NEW_SITE_OPTION = "[+ Add New Site...]"
@@ -117,7 +118,7 @@ class FilePickerPopup:
     # ------------------------------------------------------------------
     def _build_window(self) -> None:
         self.window = ctk.CTkToplevel()
-        self.window.title("FilePicker — New Download")
+        self.window.title(f"FilePicker v{VERSION} — New Download")
         self.window.geometry("560x720")
         self.window.configure(fg_color=_BG)
         self.window.resizable(False, False)
@@ -262,6 +263,7 @@ class FilePickerPopup:
         self._doc_type_var.set(doc_types[0] if doc_types else "DC")
 
         self._render_material_chips()
+        self._refresh_preview()
 
     def _populate_sites(self, company: str) -> None:
         sites = self.config.sites_for(company)

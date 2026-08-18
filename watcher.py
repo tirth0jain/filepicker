@@ -101,6 +101,8 @@ class WatcherHandler(FileSystemEventHandler):
     def on_moved(self, event) -> None:
         # A file finished downloading often lands first as a .crdownload then
         # gets renamed to its final name. Handle the destination.
+        if event.is_directory:
+            return
         self._maybe_queue_path(Path(event.dest_path))
 
     def on_deleted(self, event) -> None:
@@ -117,7 +119,7 @@ class WatcherHandler(FileSystemEventHandler):
 
     def _maybe_queue_path(self, path: Path) -> None:
         name = path.name
-        if not name or is_temp_name(name):
+        if not name or is_temp_name(name) or path.is_dir():
             return
 
         # Only hand a file off once; remember it so modified events don't

@@ -28,7 +28,47 @@ import customtkinter as ctk
 from config import ConfigManager
 from organizer import OrganizeRequest, organize
 from popup import FilePickerPopup
+from version import VERSION
 from watcher import DownloadWatcher
+
+
+# Popup palette (matches popup.py / viewer.py).
+_BG = "#15151d"
+_BG_SECONDARY = "#1f1f2b"
+_ACCENT = "#5b8cff"
+_ACCENT_HOVER = "#3f6fe0"
+_TEXT = "#f2f2f7"
+_TEXT_MUTED = "#b6b6c9"
+
+
+def show_update_notice(root, notice: str) -> None:
+    """Show a small popup telling the user the app was updated."""
+    win = ctk.CTkToplevel(root)
+    win.title(f"FilePicker v{VERSION} — Updated")
+    win.geometry("440x200")
+    win.configure(fg_color=_BG)
+    win.transient(root)
+    # Intentionally NOT modal (no grab_set): a modal grab here would conflict
+    # with the download popup's grab if a file completes while this is open.
+    win.attributes("-topmost", True)
+
+    ctk.CTkLabel(
+        win, text="✅ FilePicker has been updated",
+        font=ctk.CTkFont(size=16, weight="bold"), text_color=_TEXT,
+    ).pack(pady=(26, 8))
+    ctk.CTkLabel(
+        win, text=notice, font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
+    ).pack(pady=(0, 6))
+    ctk.CTkLabel(
+        win, text=f"Now running v{VERSION}",
+        font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+    ).pack(pady=(0, 14))
+    ctk.CTkButton(
+        win, text="OK", width=120, command=win.destroy,
+        fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
+    ).pack(pady=(0, 18))
+    win.lift()
+    win.focus_force()
 
 
 class FilePickerController:
@@ -44,8 +84,18 @@ class FilePickerController:
     def _build_root(self) -> None:
         self._root = ctk.CTk()
         self._root.withdraw()  # hidden background window
-        self._root.title("FilePicker")
+        self._root.title(f"FilePicker v{VERSION}")
         self._root.protocol("WM_DELETE_WINDOW", self._root.destroy)
+
+    def _show_update_notice_if_any(self) -> None:
+        """Show a popup if the app was just updated (old -> new)."""
+        try:
+            from updater import consume_update_notice
+            notice = consume_update_notice()
+            if notice:
+                self._root.after(400, lambda: show_update_notice(self._root, notice))
+        except Exception as exc:
+            print(f"[filepicker] update notice error: {exc}")
 
     def _on_file_completed(self, path: Path) -> None:
         """Called from the watcher's worker thread when a file settles."""
@@ -77,7 +127,6 @@ class FilePickerController:
         )
         # Blocking until the modal is dismissed.
         popup.show()
-        self._popup_active = False
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
@@ -122,6 +171,7 @@ class FilePickerController:
     # ------------------------------------------------------------------
     def run(self) -> None:
         self._build_root()
+        self._show_update_notice_if_any()
 
         watch_dir = self.config.watch_directory
         watcher = DownloadWatcher(
@@ -149,8 +199,30 @@ class FilePickerController:
 
 
 def main() -> None:
+    # Handle one-shot CLI flags before starting the background app.
+    args = sys.argv[1:]
+    if "--install-startup" in args:
+        from startup import install
+        print("Auto-start installed." if install() else "Failed to install auto-start.")
+        return
+    if "--remove-startup" in args:
+        from startup import remove
+        print("Auto-start removed." if remove() else "Failed to remove auto-start.")
+        return
+
     config = ConfigManager()
     config.load()
+
+    # Auto-register for Windows startup on first run (unless disabled in
+    # config.json). Runs in a background thread so it never delays startup.
+    if config.auto_start:
+        try:
+            from startup import install, is_installed
+            if not is_installed():
+                threading.Thread(target=install, daemon=True).start()
+        except Exception as exc:
+            print(f"[filepicker] auto-start setup failed: {exc}")
+
     controller = FilePickerController(config)
     controller.run()
 

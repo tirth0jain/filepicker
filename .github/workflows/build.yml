@@ -21,7 +21,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install dependencies
         run: |
@@ -29,7 +29,20 @@ jobs:
           pip install -r requirements.txt
           pip install nuitka
 
+      # Nuitka compiles Python -> C -> machine code, which is slow on a cold
+      # cache. Caching the Nuitka cache dir means only changed files recompile
+      # on subsequent commits, cutting rebuild time dramatically.
+      - name: Cache Nuitka build cache
+        uses: actions/cache@v4
+        with:
+          path: .nuitka-cache
+          key: nuitka-${{ runner.os }}-${{ hashFiles('**/*.py', 'requirements.txt') }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-
+
       - name: Build with Nuitka
+        env:
+          NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
         run: python build.py
 
       - name: Compute version tag

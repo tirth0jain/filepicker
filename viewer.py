@@ -31,6 +31,8 @@ try:
 except ImportError:  # pragma: no cover - headless / non-GUI environments
     ctk = None
 
+from version import VERSION
+
 # Muted dark palette (kept local so this module stays decoupled from popup.py).
 _BG = "#15151d"
 _BG_SECONDARY = "#1f1f2b"
@@ -134,7 +136,7 @@ class PreviewWindow:
     def __init__(self, parent, file_path) -> None:
         self.file_path = Path(file_path)
         self.window = ctk.CTkToplevel(parent)
-        self.window.title(f"Preview — {self.file_path.name}")
+        self.window.title(f"FilePicker v{VERSION} — Preview: {self.file_path.name}")
         self.window.configure(fg_color=_BG)
         self.window.transient(parent)
         self.window.attributes("-topmost", True)
@@ -241,6 +243,9 @@ class PreviewWindow:
         # pre-rendered in background threads so flipping pages is instant.
         self._page_cache = {}
         self._pending = set()  # page indices currently rendering in background
+        # PyMuPDF documents are NOT thread-safe: serialise all page rendering
+        # (main thread + prefetch threads) behind a lock.
+        self._render_lock = threading.Lock()
 
         toolbar = ctk.CTkFrame(self.window, fg_color=_BG_SECONDARY)
         toolbar.pack(fill="x")
@@ -283,12 +288,13 @@ class PreviewWindow:
         from PIL import Image
         import io
 
-        page = self._doc.load_page(idx)
-        dpi = int(_BASE_DPI * zoom)
-        pix = page.get_pixmap(dpi=dpi)
-        # PNG is lossless and compresses text pages extremely well, so pages
-        # load fast and stay light in memory even for 50+ page documents.
-        return Image.open(io.BytesIO(pix.tobytes("png")))
+        with self._render_lock:  # PyMuPDF is not thread-safe
+            page = self._doc.load_page(idx)
+            dpi = int(_BASE_DPI * zoom)
+            pix = page.get_pixmap(dpi=dpi)
+            # PNG is lossless and compresses text pages extremely well, so
+            # pages load fast and stay light in memory even for 50+ page docs.
+            return Image.open(io.BytesIO(pix.tobytes("png")))
 
     def _display_photo(self, photo) -> None:
         self._canvas.delete("all")

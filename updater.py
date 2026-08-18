@@ -30,8 +30,8 @@ from typing import Optional
 from version import VERSION
 
 # --- Configuration -----------------------------------------------------
-# GitHub repository that hosts the releases, e.g. "yourname/filepicker".
-GITHUB_REPO = "yourname/filepicker"
+# GitHub repository that hosts the releases.
+GITHUB_REPO = "tirth0jain/filepicker"
 # Asset name prefix the CI uploads, e.g. "FilePicker-0.1.0-<sha>-win64.exe".
 ASSET_PREFIX = "FilePicker"
 # How often to check for updates (seconds).
@@ -59,6 +59,20 @@ def _installed_tag() -> str:
         return VERSION
 
 
+def _split_tag(tag: str) -> tuple:
+    """Split a tag like ``v0.1.0-abc123`` into ``(version_tuple, build)``."""
+    tag = tag.lstrip("vV")
+    if "-" in tag:
+        ver, build = tag.split("-", 1)
+    else:
+        ver, build = tag, ""
+    parts = []
+    for chunk in ver.split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts), build
+
+
 def _latest_release_info() -> dict:
     """Fetch the latest release metadata from the GitHub API."""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -70,8 +84,11 @@ def _latest_release_info() -> dict:
 def check_for_update() -> Optional[dict]:
     """Return update info if a newer binary exists, else ``None``.
 
-    A newer binary exists when the latest release tag differs from the tag the
-    installed binary was built from (each CI commit gets a unique tag).
+    Comparison rules:
+    - A higher version (e.g. 0.2.0 > 0.1.0) always updates.
+    - A newer build of the same version (e.g. v0.1.0-bbb vs v0.1.0-aaa)
+      updates only when the installed binary has a recorded tag that differs
+      (so a fresh download of the latest build does not re-download itself).
     """
     try:
         info = _latest_release_info()
@@ -82,8 +99,18 @@ def check_for_update() -> Optional[dict]:
     latest_tag = info.get("tag_name", "")
     if not latest_tag:
         return None
-    if latest_tag == _installed_tag():
+
+    latest_ver, _ = _split_tag(latest_tag)
+    current_ver, _ = _split_tag(VERSION)
+    installed = _installed_tag()
+
+    if latest_ver < current_ver:
         return None
+    if latest_ver == current_ver:
+        # Same version line: only update if we have a recorded installed tag
+        # that differs (a newer build of the same version).
+        if installed == VERSION or installed == latest_tag:
+            return None
 
     # Find the Windows asset for this app.
     for asset in info.get("assets", []):
@@ -112,6 +139,22 @@ def _relaunch(new_exe: Path) -> None:
     os._exit(0)
 
 
+def _notice_file() -> Path:
+    """File that records the last update for the post-update popup."""
+    return _current_exe().with_name("last_update.txt")
+
+
+def consume_update_notice() -> Optional[str]:
+    """Return the ``old -> new`` update notice if one exists, then clear it."""
+    notice = _notice_file()
+    try:
+        text = notice.read_text(encoding="utf-8").strip()
+        notice.unlink()
+        return text or None
+    except OSError:
+        return None
+
+
 def apply_update(update: dict) -> bool:
     """Download the new binary and atomically swap it in.
 
@@ -122,6 +165,7 @@ def apply_update(update: dict) -> bool:
         return False
 
     exe = _current_exe()
+    old_tag = _installed_tag()
     tmp_dir = Path(tempfile.gettempdir())
     new_file = tmp_dir / update["name"]
     old_file = exe.with_suffix(exe.suffix + ".old")
@@ -138,6 +182,12 @@ def apply_update(update: dict) -> bool:
         # Record the installed tag so we don't re-apply the same build.
         marker = exe.with_name("installed_version.txt")
         marker.write_text(update["version"], encoding="utf-8")
+
+        # Record the update notice so the relaunched app can show a popup
+        # telling the user what version it was updated from and to.
+        _notice_file().write_text(
+            f"{old_tag} -> {update['version']}", encoding="utf-8"
+        )
 
         _relaunch(exe)
         return True

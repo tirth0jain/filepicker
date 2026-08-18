@@ -80,13 +80,36 @@ to this file automatically.
 
 ## Usage
 
+**From source (dev):**
+
 ```bash
 python main.py
 ```
 
-The app stays resident in the background (hidden main window). When a download
-completes, the popup appears. Fill in the details and press **Save & Organize**,
-or **Skip / Keep Original** to leave the file untouched in the watch folder.
+**Compiled .exe:** double-click `FilePicker.exe`. It was built with
+`--windows-console-mode=disable`, so **no terminal window appears** — the app
+runs silently in the background (hidden main window) and pops up the metadata
+dialog whenever a download completes. To stop it, close it from Task Manager
+(or add a tray/quit option if you'd like one).
+
+**Auto-start at Windows login:** the app **auto-registers itself on first run**
+— it creates a Startup-folder shortcut automatically (via PowerShell, no extra
+dependencies), so it launches at every login with no manual step. To control it:
+
+- Disable auto-start: set `"auto_start": false` in `config.json`.
+- Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`.
+- Manual alternative: press `Win+R`, type `shell:startup`, and drop a shortcut
+  to `FilePicker.exe` in the folder that opens.
+
+## Filename rules
+
+- **Financial Year (FY)** — Indian fiscal year (Apr 1 – Mar 31).
+  - Month ≥ April: `YY-(YY+1)` (e.g. Aug 2026 → `26-27`).
+  - Month < April: `(YY-1)-YY` (e.g. Feb 2026 → `25-26`).
+- **Material shortcodes** — multiple materials joined with `+`, e.g. `A+C`.
+- **Status** — `Received` when *Received Copy* is checked, else `Submitted`.
+- **Sanitisation** — illegal Windows characters `\ / : * ? " < > |` are removed,
+  and trailing dots/spaces are stripped.
 
 ## Building a standalone .exe (no Python needed on target)
 
@@ -104,30 +127,23 @@ Python installation.
 ## Auto-update via GitHub Releases
 
 - The app checks **GitHub Releases** for a newer binary at startup and every
-  6 hours (`updater.py`).
-- Set your repository in `updater.py`: `GITHUB_REPO = "yourname/filepicker"`.
+  6 hours (`updater.py`). The repository is `tirth0jain/filepicker`.
 - Each release is tagged `v<version>-<commit-sha>`; the app stores the tag it
   is running in `installed_version.txt` next to the binary, so every new commit
   triggers an update.
 - On update: the new `.exe` is downloaded, the running binary is renamed to
   `.old`, the new one is swapped in, and the app relaunches. If anything fails
   the original binary is restored.
+- **After an update, a popup appears** telling you what version it was updated
+  from and to (e.g. `v0.1.0-aaa -> v0.1.0-bbb`).
+- The current version is shown in the title bar of every window
+  (e.g. `FilePicker v0.1.0 — New Download`).
 
 ## CI: auto-compile on every commit
 
 `.github/workflows/build.yml` builds the app with Nuitka on every push to
 `main` and uploads the `.exe` to GitHub Releases, so a fresh binary is always
 available and the updater picks it up automatically.
-
-## Filename rules
-
-- **Financial Year (FY)** — Indian fiscal year (Apr 1 – Mar 31).
-  - Month ≥ April: `YY-(YY+1)` (e.g. Aug 2026 → `26-27`).
-  - Month < April: `(YY-1)-YY` (e.g. Feb 2026 → `25-26`).
-- **Material shortcodes** — multiple materials joined with `+`, e.g. `A+C`.
-- **Status** — `Received` when *Received Copy* is checked, else `Submitted`.
-- **Sanitisation** — illegal Windows characters `\ / : * ? " < > |` are removed,
-  and trailing dots/spaces are stripped.
 
 ## Project layout
 
@@ -141,6 +157,7 @@ filepicker/
 ├── filename.py      # filename formatting & collision resolution
 ├── organizer.py     # directory routing & file distribution
 ├── updater.py       # GitHub Releases auto-update (check + atomic swap)
+├── startup.py       # Windows auto-start (Startup-folder shortcut)
 ├── version.py       # app version (0.1.0)
 ├── build.py         # Nuitka build script
 ├── build.bat        # Windows build shortcut
