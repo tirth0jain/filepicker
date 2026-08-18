@@ -1,0 +1,57 @@
+name: Build & Release
+
+# Builds a standalone Windows .exe with Nuitka on every commit to main and
+# uploads it to GitHub Releases. The app's updater (updater.py) checks
+# releases/latest and auto-updates to the newest binary.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nuitka
+
+      - name: Build with Nuitka
+        run: python build.py
+
+      - name: Compute version tag
+        id: version
+        shell: bash
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          VER=$(python -c "from version import VERSION; print(VERSION)")
+          echo "tag=v${VER}-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "asset=FilePicker-${VER}-${SHA}-win64.exe" >> "$GITHUB_OUTPUT"
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          mv dist/*.exe "dist/${{ steps.version.outputs.asset }}"
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: FilePicker ${{ steps.version.outputs.tag }}
+          files: dist/${{ steps.version.outputs.asset }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -19,6 +19,15 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   Company / Site dropdowns (with an inline *Add New Site* flow), Document Type,
   Material multi-select (with *Add Material*), Serial Number, a *Received Copy*
   checkbox, and a live filename preview.
+- **File preview** — a **👁 Preview** button in the popup opens a lightweight
+  non-modal viewer next to the popup to verify the download before organising:
+  - **PDFs** (PyMuPDF) — page-by-page with Prev/Next, plus zoom controls
+    (**+ / − / Fit Width** or **Ctrl + mouse wheel**). Pages are rendered at a
+    low base DPI for fast text loading and PNG-compressed (a 2 MB raw page
+    becomes ~14 KB), so even 50+ page documents stay light in memory. Zooming
+    re-renders at a higher DPI so text stays crisp and readable.
+  - **Images** (Pillow) — zoomable, PNG-compressed, scrollable.
+  - **Excel** (openpyxl/xlrd) — shown as a table with a sheet selector.
 - **Strict filename format** —
   `{Doc Type}-{FY}-{Site Name}-{Material Shortcodes}-{Serial}-{Status}.{ext}`
   e.g. `DC-26-27-Site 1 - Mumbai-A+C-0001-Received.pdf`.
@@ -79,6 +88,37 @@ The app stays resident in the background (hidden main window). When a download
 completes, the popup appears. Fill in the details and press **Save & Organize**,
 or **Skip / Keep Original** to leave the file untouched in the watch folder.
 
+## Building a standalone .exe (no Python needed on target)
+
+Compile with **Nuitka** into a single portable Windows executable:
+
+```bash
+pip install -r requirements.txt
+pip install nuitka
+python build.py        # or run build.bat
+```
+
+The binary lands in `dist/` with Python embedded, so target machines need no
+Python installation.
+
+## Auto-update via GitHub Releases
+
+- The app checks **GitHub Releases** for a newer binary at startup and every
+  6 hours (`updater.py`).
+- Set your repository in `updater.py`: `GITHUB_REPO = "yourname/filepicker"`.
+- Each release is tagged `v<version>-<commit-sha>`; the app stores the tag it
+  is running in `installed_version.txt` next to the binary, so every new commit
+  triggers an update.
+- On update: the new `.exe` is downloaded, the running binary is renamed to
+  `.old`, the new one is swapped in, and the app relaunches. If anything fails
+  the original binary is restored.
+
+## CI: auto-compile on every commit
+
+`.github/workflows/build.yml` builds the app with Nuitka on every push to
+`main` and uploads the `.exe` to GitHub Releases, so a fresh binary is always
+available and the updater picks it up automatically.
+
 ## Filename rules
 
 - **Financial Year (FY)** — Indian fiscal year (Apr 1 – Mar 31).
@@ -97,10 +137,16 @@ filepicker/
 ├── config.py        # ConfigManager (load/save config.json)
 ├── watcher.py       # watchdog-based folder watcher + lock debounce
 ├── popup.py         # customtkinter metadata popup
+├── viewer.py        # lightweight PDF / image / Excel preview window
 ├── filename.py      # filename formatting & collision resolution
 ├── organizer.py     # directory routing & file distribution
+├── updater.py       # GitHub Releases auto-update (check + atomic swap)
+├── version.py       # app version (0.1.0)
+├── build.py         # Nuitka build script
+├── build.bat        # Windows build shortcut
 ├── config.json      # persistent configuration
-└── requirements.txt
+├── requirements.txt
+└── .github/workflows/build.yml   # CI: build + release on every commit
 ```
 # filepicker
 # filepicker

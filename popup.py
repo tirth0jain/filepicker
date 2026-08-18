@@ -14,6 +14,7 @@ captures the metadata needed to rename and route the file:
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -25,13 +26,20 @@ from config import ConfigManager
 ADD_NEW_SITE_OPTION = "[+ Add New Site...]"
 ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 
-# Dark theme colours.
-_BG = "#1e1e2e"
-_BG_SECONDARY = "#2a2a3c"
-_BG_FIELD = "#313244"
-_ACCENT = "#7c9bff"
-_TEXT = "#e6e6ef"
-_TEXT_MUTED = "#a0a0b8"
+# File types the preview viewer can render (see viewer.py).
+_SUPPORTED_PREVIEW_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+    ".pdf", ".xlsx", ".xlsm", ".xls",
+}
+
+# Dark theme colours — muted background, high-contrast buttons/text.
+_BG = "#15151d"
+_BG_SECONDARY = "#1f1f2b"
+_BG_FIELD = "#262633"
+_ACCENT = "#5b8cff"
+_ACCENT_HOVER = "#3f6fe0"
+_TEXT = "#f2f2f7"
+_TEXT_MUTED = "#b6b6c9"
 _SUCCESS = "#7ad17a"
 _DANGER = "#ff6b6b"
 
@@ -88,6 +96,14 @@ class FilePickerPopup:
         self._banner_name.configure(text=self.file_path.name)
         self._banner_size.configure(text=f"{human}  •  {self.file_path}")
 
+        # Disable the preview button for file types the viewer can't render.
+        if self.file_path.suffix.lower() not in _SUPPORTED_PREVIEW_EXTS:
+            self.preview_btn.configure(state="disabled")
+
+    def _open_preview(self) -> None:
+        from viewer import PreviewWindow
+        PreviewWindow(self.window, self.file_path)
+
     @staticmethod
     def _human_size(num: float) -> str:
         for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -121,11 +137,21 @@ class FilePickerPopup:
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(container, fg_color=_BG_SECONDARY, corner_radius=10)
         self._banner.pack(fill="x", pady=(0, 16))
+
+        banner_header = ctk.CTkFrame(self._banner, fg_color="transparent")
+        banner_header.pack(fill="x", padx=14, pady=(12, 2))
         self._banner_name = ctk.CTkLabel(
-            self._banner, text="", font=ctk.CTkFont(size=15, weight="bold"),
-            text_color=_TEXT, wraplength=500, justify="left",
+            banner_header, text="", font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=_TEXT, wraplength=420, justify="left",
         )
-        self._banner_name.pack(anchor="w", padx=14, pady=(12, 2))
+        self._banner_name.pack(side="left", anchor="w")
+        self.preview_btn = ctk.CTkButton(
+            banner_header, text="👁 Preview", width=96, height=30,
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._open_preview,
+        )
+        self.preview_btn.pack(side="right", anchor="e")
+
         self._banner_size = ctk.CTkLabel(
             self._banner, text="", font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
         )
@@ -194,14 +220,14 @@ class FilePickerPopup:
 
         self.save_btn = ctk.CTkButton(
             btn_row, text="Save & Organize", command=self._submit,
-            fg_color=_ACCENT, hover_color="#5c7cf0", height=40,
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=40,
             font=ctk.CTkFont(size=14, weight="bold"), text_color="#ffffff",
         )
         self.save_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
 
         self.skip_btn = ctk.CTkButton(
             btn_row, text="Skip / Keep Original", command=self._skip,
-            fg_color=_BG_FIELD, hover_color="#3d3d52", height=40,
+            fg_color=_BG_FIELD, hover_color="#33334a", height=40,
             font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
         )
         self.skip_btn.pack(side="left", expand=True, fill="x")
@@ -235,7 +261,6 @@ class FilePickerPopup:
         self.doc_type_combo.configure(values=doc_types)
         self._doc_type_var.set(doc_types[0] if doc_types else "DC")
 
-        self._populate_material_options()
         self._render_material_chips()
 
     def _populate_sites(self, company: str) -> None:
@@ -247,10 +272,6 @@ class FilePickerPopup:
         else:
             self._site_var.set(ADD_NEW_SITE_OPTION)
 
-    def _populate_material_options(self) -> None:
-        # Store available material names for the "Add Material" flow.
-        self._available_materials = list(self._materials_map.keys())
-
     # ------------------------------------------------------------------
     # Material chip rendering
     # ------------------------------------------------------------------
@@ -259,34 +280,44 @@ class FilePickerPopup:
             child.destroy()
         self._material_chips.clear()
 
-        row = 0
-        col = 0
+        # Measure text so chips pack tightly with no big gaps between them.
+        measure_font = tkfont.Font(family="Segoe UI", size=13)
+        wrap_width = 500
+        row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
+        row_frame.pack(fill="x", padx=8, pady=8)
+        row_width = 0
+
+        def place_chip(text, fg, hover, txt, command):
+            nonlocal row_frame, row_width
+            chip = ctk.CTkButton(
+                row_frame, text=text, width=0, height=28,
+                fg_color=fg, hover_color=hover, text_color=txt,
+                corner_radius=14, command=command,
+            )
+            est = measure_font.measure(text) + 28  # text + padding
+            if row_width + est > wrap_width:
+                row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
+                row_frame.pack(fill="x", padx=8, pady=(0, 8))
+                row_width = 0
+            chip.pack(side="left", padx=(0, 6))
+            row_width += est + 6
+            return chip
+
         for name in self._materials_map:
             selected = name in self._selected_materials
-            chip = ctk.CTkButton(
-                self.material_frame,
-                text=f"{name} ({self._materials_map[name]})",
-                width=0, height=28,
-                fg_color=_ACCENT if selected else _BG_FIELD,
-                hover_color=_ACCENT if selected else "#3d3d52",
-                text_color="#ffffff" if selected else _TEXT,
-                corner_radius=14,
-                command=lambda n=name: self._toggle_material(n),
+            chip = place_chip(
+                f"{name} ({self._materials_map[name]})",
+                _ACCENT if selected else _BG_FIELD,
+                _ACCENT_HOVER if selected else "#33334a",
+                "#ffffff" if selected else _TEXT,
+                lambda n=name: self._toggle_material(n),
             )
-            chip.grid(row=row, column=col, padx=4, pady=4, sticky="w")
             self._material_chips[name] = chip
-            col += 1
-            if col >= 3:
-                col = 0
-                row += 1
 
-        # "Add Material" button.
-        add_btn = ctk.CTkButton(
-            self.material_frame, text="+ Add Material", width=0, height=28,
-            fg_color=_BG_FIELD, hover_color="#3d3d52", text_color=_ACCENT,
-            corner_radius=14, command=self._prompt_add_material,
+        place_chip(
+            "+ Add Material", _BG_FIELD, "#33334a", _ACCENT,
+            self._prompt_add_material,
         )
-        add_btn.grid(row=row + 1, column=0, padx=4, pady=(6, 4), sticky="w")
 
     def _toggle_material(self, name: str) -> None:
         if name in self._selected_materials:
@@ -313,7 +344,6 @@ class FilePickerPopup:
         shortcode = self._derive_shortcode(name)
         self.config.add_material(name, shortcode)
         self._materials_map = self.config.materials
-        self._populate_material_options()
         if name not in self._selected_materials:
             self._selected_materials.append(name)
         self._render_material_chips()
@@ -370,11 +400,17 @@ class FilePickerPopup:
                   on_ok: Callable[[str], None]) -> None:
         prompt = ctk.CTkToplevel(self.window)
         prompt.title(title)
-        prompt.geometry("380x150")
         prompt.configure(fg_color=_BG)
         prompt.transient(self.window)
         prompt.grab_set()
         prompt.attributes("-topmost", True)
+
+        # Center the prompt over the parent popup instead of the screen corner.
+        self.window.update_idletasks()
+        pw, ph = 380, 150
+        x = self.window.winfo_rootx() + max((self.window.winfo_width() - pw) // 2, 0)
+        y = self.window.winfo_rooty() + max((self.window.winfo_height() - ph) // 2, 0)
+        prompt.geometry(f"{pw}x{ph}+{x}+{y}")
 
         ctk.CTkLabel(prompt, text=label, font=ctk.CTkFont(size=13),
                      text_color=_TEXT).pack(anchor="w", padx=16, pady=(16, 8))

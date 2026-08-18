@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import queue
-import shutil
 import sys
 import threading
 from pathlib import Path
@@ -41,9 +40,6 @@ class FilePickerController:
         self._popup_active = False
         self._root = None
 
-        # Progress/log status shown in the (mostly hidden) root.
-        self._status_var = None
-
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
         self._root = ctk.CTk()
@@ -64,8 +60,13 @@ class FilePickerController:
                 path = None
             if path is not None:
                 self._popup_active = True
-                self._show_popup(path)
-        self._root.after(200, self._poll_popups)
+                try:
+                    self._show_popup(path)
+                except Exception as exc:  # never wedge the popup loop
+                    print(f"[filepicker] popup error: {exc}")
+                finally:
+                    self._popup_active = False
+        self._root.after(100, self._poll_popups)
 
     def _show_popup(self, path: Path) -> None:
         popup = FilePickerPopup(
@@ -130,11 +131,21 @@ class FilePickerController:
         watcher.start()
         self._set_status(f"Watching {watch_dir} for completed downloads…")
 
-        self._root.after(200, self._poll_popups)
+        self._root.after(100, self._poll_popups)
+        self._schedule_update_checks()
         try:
             self._root.mainloop()
         finally:
             watcher.stop()
+
+    def _schedule_update_checks(self) -> None:
+        """Check for updates at startup and periodically (non-blocking)."""
+        try:
+            from updater import run_update_check, schedule_periodic
+            run_update_check()
+            schedule_periodic(self._root)
+        except Exception as exc:
+            print(f"[filepicker] updater unavailable: {exc}")
 
 
 def main() -> None:

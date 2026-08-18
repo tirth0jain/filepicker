@@ -16,7 +16,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional, Set
+from typing import Callable, Dict, Optional
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -26,9 +26,9 @@ _TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".opdownload", ".
 # The default size to assume a file has when only metadata is available.
 _DEFAULT_SIZE = 0
 # Seconds to require a stable size before declaring a file "done".
-_STABLE_WINDOW = 2.0
+_STABLE_WINDOW = 0.4
 # Retry back-off for files that are still locked.
-_LOCK_RETRY_DELAY = 0.5
+_LOCK_RETRY_DELAY = 0.1
 
 
 def is_temp_name(name: str) -> bool:
@@ -87,8 +87,9 @@ class WatcherHandler(FileSystemEventHandler):
         self.on_completed = on_completed
         self.handle_dirs = handle_dirs
         self._tracker = _StableTracker()
-        self._recently_handled: Set[str] = set()
+        self._recently_handled: Dict[str, float] = {}
         self._handled_lock = threading.Lock()
+        self._handled_ttl = 60.0
 
     # -- watchdog overrides --------------------------------------------
     def on_created(self, event) -> None:
@@ -102,6 +103,13 @@ class WatcherHandler(FileSystemEventHandler):
         # gets renamed to its final name. Handle the destination.
         self._maybe_queue_path(Path(event.dest_path))
 
+    def on_deleted(self, event) -> None:
+        # A file was removed (e.g. organised away). Forget it so a later
+        # download with the same name is detected again.
+        key = str(Path(event.src_path))
+        with self._handled_lock:
+            self._recently_handled.pop(key, None)
+
     def _maybe_queue(self, event) -> None:
         if event.is_directory and not self.handle_dirs:
             return
@@ -113,12 +121,19 @@ class WatcherHandler(FileSystemEventHandler):
             return
 
         # Only hand a file off once; remember it so modified events don't
-        # re-trigger after it's moved out of the watch folder.
+        # re-trigger after it's moved out of the watch folder. Prune stale
+        # entries so the map never grows unbounded.
         key = str(path)
+        now = time.monotonic()
         with self._handled_lock:
+            if len(self._recently_handled) > 500:
+                stale = [k for k, t in self._recently_handled.items()
+                         if now - t > self._handled_ttl]
+                for k in stale:
+                    del self._recently_handled[k]
             if key in self._recently_handled:
                 return
-            self._recently_handled.add(key)
+            self._recently_handled[key] = now
 
         self.on_completed(path)
 
@@ -188,8 +203,15 @@ class DownloadWatcher:
         target.mkdir(parents=True, exist_ok=True)
 
         def handler_callback(path: Path) -> None:
-            # Debounce in a dedicated worker, then queue for the consumer.
-            wait_until_stable(path, self._queue.put, self.stable_window)
+            # Debounce in a dedicated worker thread. This MUST NOT run on the
+            # watchdog dispatch thread: wait_until_stable sleeps, and blocking
+            # that thread would stall detection of every subsequent file.
+            threading.Thread(
+                target=wait_until_stable,
+                args=(path, self._queue.put, self.stable_window),
+                name="filepicker-debounce",
+                daemon=True,
+            ).start()
 
         event_handler = WatcherHandler(handler_callback)
         self._observer = Observer()
@@ -206,7 +228,7 @@ class DownloadWatcher:
     def _consume(self) -> None:
         while self._running:
             try:
-                path = self._queue.get(timeout=0.5)
+                path = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:

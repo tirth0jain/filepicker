@@ -1,3 +1,6 @@
 """FilePicker — a lightweight Windows download-folder organiser."""
 
-__version__ = "0.1.0"
+from version import VERSION, APP_NAME
+
+__version__ = VERSION
+__app_name__ = APP_NAME
