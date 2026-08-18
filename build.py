@@ -37,6 +37,7 @@ def main() -> None:
         "--product-version=" + VERSION,
         "--assume-yes-for-downloads",
         "--remove-output",                   # clean intermediate build files
+        "main.py",                           # the main module to compile
     ]
 
     # Parallel C compilation (capped to avoid memory blow-ups).
