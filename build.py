@@ -11,7 +11,6 @@ on every commit and uploads the result to GitHub Releases.
 
 from __future__ import annotations
 
-import multiprocessing
 import subprocess
 import sys
 
@@ -36,17 +35,17 @@ def main() -> None:
         "--file-version=" + VERSION,
         "--product-version=" + VERSION,
         "--assume-yes-for-downloads",
-        "--remove-output",                   # clean intermediate build files
+        # PyMuPDF compiles into a single huge C file (2.3M+ lines) that makes
+        # MSVC run out of heap ("C1002") when several compilers run at once.
+        # --low-memory forces ONE C-compile job so that file gets the full
+        # memory budget. Slower, but it builds reliably.
+        "--low-memory",
         "main.py",                           # the main module to compile
     ]
 
-    # Parallel C compilation (capped to avoid memory blow-ups).
-    jobs = min(multiprocessing.cpu_count(), 4)
-    cmd.append(f"--jobs={jobs}")
-
-    # NOTE: Nuitka has no --cache-dir option; its cache lives at a fixed
-    # location (%LOCALAPPDATA%\Nuitka on Windows, ~/.cache/Nuitka elsewhere).
-    # The CI workflow caches that directory so rebuilds reuse compiled objects.
+    # NOTE: Deliberately NOT using --remove-output (deletes the build dir and
+    # is a known onefile troublemaker) and NOT setting --jobs (Nuitka defaults
+    # to full CPU, which re-introduces the C1002 heap exhaustion).
 
     print("Running:", " ".join(cmd))
     subprocess.check_call(cmd)
