@@ -12,7 +12,6 @@ on every commit and uploads the result to GitHub Releases.
 from __future__ import annotations
 
 import multiprocessing
-import os
 import subprocess
 import sys
 
@@ -44,11 +43,9 @@ def main() -> None:
     jobs = min(multiprocessing.cpu_count(), 4)
     cmd.append(f"--jobs={jobs}")
 
-    # Reuse a persistent Nuitka cache when NUITKA_CACHE_DIR is set (CI uses
-    # this with a GitHub Actions cache so rebuilds are much faster).
-    cache_dir = os.environ.get("NUITKA_CACHE_DIR")
-    if cache_dir:
-        cmd.append("--cache-dir=" + cache_dir)
+    # NOTE: Nuitka has no --cache-dir option; its cache lives at a fixed
+    # location (%LOCALAPPDATA%\Nuitka on Windows, ~/.cache/Nuitka elsewhere).
+    # The CI workflow caches that directory so rebuilds reuse compiled objects.
 
     print("Running:", " ".join(cmd))
     subprocess.check_call(cmd)

@@ -30,19 +30,18 @@ jobs:
           pip install nuitka
 
       # Nuitka compiles Python -> C -> machine code, which is slow on a cold
-      # cache. Caching the Nuitka cache dir means only changed files recompile
-      # on subsequent commits, cutting rebuild time dramatically.
+      # cache. Nuitka's cache lives at a fixed location (%LOCALAPPDATA%\Nuitka
+      # on Windows); caching it means only changed files recompile on
+      # subsequent commits, cutting rebuild time dramatically.
       - name: Cache Nuitka build cache
         uses: actions/cache@v4
         with:
-          path: .nuitka-cache
-          key: nuitka-${{ runner.os }}-${{ hashFiles('**/*.py', 'requirements.txt') }}
+          path: ~/AppData/Local/Nuitka
+          key: nuitka-${{ runner.os }}-py313-${{ hashFiles('**/*.py', 'requirements.txt') }}
           restore-keys: |
-            nuitka-${{ runner.os }}-
+            nuitka-${{ runner.os }}-py313-
 
       - name: Build with Nuitka
-        env:
-          NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
         run: python build.py
 
       - name: Compute version tag
