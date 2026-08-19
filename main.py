@@ -35,10 +35,15 @@ from watcher import DownloadWatcher
 # Popup palette (matches popup.py / viewer.py).
 _BG = "#15151d"
 _BG_SECONDARY = "#1f1f2b"
+_BG_FIELD = "#262633"
 _ACCENT = "#5b8cff"
 _ACCENT_HOVER = "#3f6fe0"
 _TEXT = "#f2f2f7"
 _TEXT_MUTED = "#b6b6c9"
+
+# How long the "updating" notice is shown before the update is applied
+# automatically (the app then swaps the exe and relaunches on its own).
+_UPDATE_APPLY_DELAY_MS = 3000
 
 
 def show_update_notice(root, notice: str) -> None:
@@ -80,6 +85,7 @@ class FilePickerController:
         self._popup_active = False
         self._organize_active = False
         self._pending_update = None  # (update_dict, staged_path) awaiting install
+        self._update_dialog_open = False  # true while the "updating" dialog is up
         self._root = None
 
     # ------------------------------------------------------------------
@@ -207,15 +213,56 @@ class FilePickerController:
         )
 
     def _maybe_install_update(self) -> None:
-        """Install a staged update once the app is fully idle.
+        """Stage an update install once the app is fully idle.
 
         Called from the main-thread poll loop. A staged update is downloaded
         immediately when detected, but the swap (which replaces the running exe
-        and exits) only happens after every file has been processed.
+        and exits) only happens after every file has been processed. The user is
+        shown a brief "updating" notice, then the update is applied
+        automatically.
         """
-        if self._pending_update is None or self._is_busy():
+        if (self._pending_update is None
+                or self._is_busy()
+                or self._update_dialog_open):
             return
         update, staged = self._pending_update
+        self._update_dialog_open = True
+        self._show_updating_dialog(update, staged)
+
+    def _show_updating_dialog(self, update: dict, staged) -> None:
+        """Show a brief informational notice, then auto-apply the update."""
+        win = ctk.CTkToplevel(self._root)
+        win.title(f"FilePicker v{VERSION} — Updating")
+        win.geometry("460x200")
+        win.configure(fg_color=_BG)
+        win.transient(self._root)
+        win.attributes("-topmost", True)
+
+        ctk.CTkLabel(
+            win, text="🔄 Updating FilePicker",
+            font=ctk.CTkFont(size=16, weight="bold"), text_color=_TEXT,
+        ).pack(pady=(26, 10))
+        ctk.CTkLabel(
+            win,
+            text=f"Applying version {update['version']}.\n"
+                 "The app will restart automatically.",
+            font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED, justify="center",
+        ).pack(pady=(0, 8))
+
+        def go() -> None:
+            win.destroy()
+            self._finish_update(update, staged)
+
+        # Auto-apply shortly so the user sees the notice without any click.
+        # Closing the window early also triggers the install.
+        win.after(_UPDATE_APPLY_DELAY_MS, go)
+        win.protocol("WM_DELETE_WINDOW", go)
+        win.lift()
+        win.focus_force()
+
+    def _finish_update(self, update: dict, staged) -> None:
+        """Perform the actual swap + relaunch after the user confirms."""
+        self._update_dialog_open = False
         self._pending_update = None
         try:
             from updater import install_update

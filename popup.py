@@ -522,6 +522,14 @@ class FilePickerPopup:
         self.on_skip()
 
     def _release(self) -> None:
+        # Close the preview first so it releases the file handle; otherwise the
+        # source file stays locked on Windows and can't be deleted afterwards.
+        if self._preview is not None:
+            try:
+                self._preview.destroy()
+            except Exception:
+                pass
+            self._preview = None
         try:
             self.window.grab_release()
         except tk.TclError:

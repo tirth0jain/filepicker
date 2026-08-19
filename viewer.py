@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 # tkinter is only needed for the GUI window; guard the import so the pure
 # helpers below stay importable on headless machines.
@@ -90,11 +90,13 @@ def open_pdf(path) -> "pymupdf.Document":
     return pymupdf.open(str(path))
 
 
-def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]]]:
-    """Return ``(sheet_names, loader)`` for an Excel file.
+def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]], Any]:
+    """Return ``(sheet_names, loader, closeable)`` for an Excel file.
 
     ``loader(name)`` returns up to ``_MAX_EXCEL_ROWS`` rows as lists of raw
-    cell values. Supports .xlsx/.xlsm via openpyxl and legacy .xls via xlrd.
+    cell values. ``closeable`` is the workbook/book object whose ``close()``
+    releases the underlying file handle. Supports .xlsx/.xlsm via openpyxl and
+    legacy .xls via xlrd.
     """
     ext = Path(path).suffix.lower()
     if ext == ".xls":
@@ -109,7 +111,7 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]]]:
                 rows.append([sh.cell_value(r, c) for c in range(sh.ncols)])
             return rows
 
-        return book.sheet_names(), load
+        return book.sheet_names(), load, book
     else:
         import openpyxl
 
@@ -124,7 +126,7 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]]]:
                 rows.append(list(row))
             return rows
 
-        return wb.sheetnames, load
+        return wb.sheetnames, load, wb
 
 
 # ----------------------------------------------------------------------
@@ -183,11 +185,45 @@ class PreviewWindow:
     # Shared helpers
     # ------------------------------------------------------------------
     def destroy(self) -> None:
-        """Remove the preview UI (used in embedded mode)."""
+        """Release the file handle(s) and remove the preview UI."""
+        self._release_resources()
         try:
             self.window.destroy()
         except tk.TclError:
             pass
+
+    def _release_resources(self) -> None:
+        """Close any open file handles so the source file can be deleted on
+        Windows (an open PyMuPDF/Pillow/openpyxl handle keeps the file locked).
+        """
+        # PDF document: close under the render lock so an in-flight prefetch
+        # thread can't touch the document while it is being closed.
+        doc = getattr(self, "_doc", None)
+        if doc is not None:
+            lock = getattr(self, "_render_lock", None)
+            try:
+                if lock is not None:
+                    with lock:
+                        doc.close()
+                else:
+                    doc.close()
+            except Exception:
+                pass
+        # Image
+        img = getattr(self, "_img", None)
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
+        # Excel workbook
+        wb = getattr(self, "_wb", None)
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
     def _show_error(self, message: str) -> None:
         ctk.CTkLabel(
             self.window, text=message, text_color=_TEXT_MUTED,
@@ -480,7 +516,7 @@ class PreviewWindow:
     # ------------------------------------------------------------------
     def _build_excel_view(self) -> None:
         try:
-            self._sheets, self._load_sheet_data = read_excel(self.file_path)
+            self._sheets, self._load_sheet_data, self._wb = read_excel(self.file_path)
         except Exception as exc:
             self._show_error(f"Could not open spreadsheet: {exc}")
             return
