@@ -529,5 +529,11 @@ class FilePickerPopup:
         self.window.destroy()
 
     def show(self) -> None:
-        """Enter the Tk event loop for this modal popup (blocking)."""
-        self.window.mainloop()
+        """Wait for the modal popup to be dismissed (blocking).
+
+        Uses wait_window() instead of a nested mainloop(): a nested mainloop()
+        on a Toplevel never returns once the window is destroyed, which would
+        wedge the controller's popup loop and stop the next queued file from
+        ever being shown.
+        """
+        self.window.wait_window()
