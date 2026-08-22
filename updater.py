@@ -195,6 +195,10 @@ def download_update(update: dict) -> Optional[Path]:
         return None
 
 
+class UpdateError(Exception):
+    """Raised when an update cannot be applied; carries a user-friendly reason."""
+
+
 def _replace_file(src: Path, dst: Path) -> None:
     """Copy one file; if the destination is locked (in use), rename it aside
     first (Windows lets you rename a file that's memory-mapped by a running
@@ -217,7 +221,9 @@ def install_update(update: dict, staged_zip: Path) -> bool:
     """Replace the running standalone app folder with the new build and relaunch.
 
     Only call this once the app is idle (no files being processed), because it
-    replaces the running binary and exits the process. Returns True on success.
+    replaces the running binary and exits the process. Returns True on success,
+    or raises :class:`UpdateError` with a descriptive reason on failure (the
+    caller surfaces it to the user instead of silently doing nothing).
 
     The swap is "mirror to the new build": after it completes, the app folder
     contains exactly the new build's files (plus preserved user files such as
@@ -228,6 +234,9 @@ def install_update(update: dict, staged_zip: Path) -> bool:
     app_dir = exe.parent
     old_tag = _installed_tag()
 
+    def fail(reason: str) -> None:
+        raise UpdateError(reason)
+
     # 1. Extract the new build to a temp folder.
     extract_root = Path(tempfile.gettempdir()) / f"FilePicker-new-{update['version'].lstrip('vV')}"
     if extract_root.exists():
@@ -236,8 +245,7 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         with zipfile.ZipFile(staged_zip) as zf:
             zf.extractall(extract_root)
     except Exception as exc:
-        print(f"[updater] could not extract update: {exc}")
-        return False
+        fail(f"Could not extract the downloaded update: {exc}")
 
     new_dir = extract_root
     new_exe = new_dir / "FilePicker.exe"
@@ -248,8 +256,7 @@ def install_update(update: dict, staged_zip: Path) -> bool:
             new_exe = nested[0]
             new_dir = new_exe.parent
         else:
-            print("[updater] new build has no FilePicker.exe; aborting update")
-            return False
+            fail("The downloaded update has no FilePicker.exe inside it.")
 
     # Read the tag marker shipped inside the new build (if present).
     new_tag_file = new_dir / _INSTALLED_TAG_FILE
@@ -269,21 +276,26 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         shutil.copy2(shipped_config, installed_config)
 
     # 2. Rename the running exe out of the way (Windows allows renaming the
-    #    running image, but not deleting it).
+    #    running image, but not deleting it). If the rename fails the app is
+    #    still intact, so this is a safe early abort.
     old_exe = app_dir / "FilePicker.exe.old"
     if old_exe.exists():
-        old_exe.unlink(missing_ok=True)
+        try:
+            old_exe.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         exe.rename(old_exe)
     except OSError as exc:
-        print(f"[updater] could not rename running exe: {exc}")
-        return False
+        fail(f"Could not rename the running FilePicker.exe "
+             f"(it may be locked): {exc}")
 
-    # 3. Copy the new build's files over the app folder, handling any locked
-    #    DLLs by renaming them aside first. User data (config.json, markers)
-    #    is never overwritten by an update.
-    new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
+    renamed = True
     try:
+        # 3. Copy the new build's files over the app folder, handling any locked
+        #    DLLs by renaming them aside first. User data (config.json, markers)
+        #    is never overwritten by an update.
+        new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
         for src in sorted(new_dir.rglob("*")):
             if src.is_file():
                 rel = src.relative_to(new_dir)
@@ -293,31 +305,39 @@ def install_update(update: dict, staged_zip: Path) -> bool:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _replace_file(src, dst)
     except Exception as exc:
-        print(f"[updater] failed copying new build: {exc}")
-        return False
+        # Roll back: put the old exe back so the app still works.
+        try:
+            if renamed and old_exe.exists() and not exe.exists():
+                old_exe.rename(exe)
+        except OSError:
+            pass
+        fail(f"Failed copying the new build into the app folder: {exc}")
 
     # 4. Remove files that exist in the app folder but are not part of the new
     #    build (and are not user data), so the folder mirrors the new build.
     #    Locked files can't be deleted while running, and the freshly renamed
     #    .old files must survive until the next launch's cleanup, so both are
     #    skipped here.
-    for existing in list(app_dir.iterdir()):
-        name = existing.name
-        if name in _PRESERVE_FILES or name.endswith(".old"):
-            continue
-        rel = Path(name)
-        if rel in new_files:
-            continue
-        try:
-            if existing.is_file():
-                existing.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(existing, ignore_errors=True)
-        except (PermissionError, OSError):
+    try:
+        for existing in list(app_dir.iterdir()):
+            name = existing.name
+            if name in _PRESERVE_FILES or name.endswith(".old"):
+                continue
+            rel = Path(name)
+            if rel in new_files:
+                continue
             try:
-                existing.rename(existing.with_name(existing.name + ".old"))
-            except OSError:
-                pass
+                if existing.is_file():
+                    existing.unlink(missing_ok=True)
+                else:
+                    shutil.rmtree(existing, ignore_errors=True)
+            except (PermissionError, OSError):
+                try:
+                    existing.rename(existing.with_name(existing.name + ".old"))
+                except OSError:
+                    pass
+    except Exception as exc:
+        fail(f"Failed cleaning up the app folder during update: {exc}")
 
     # 5. Record installed tag + update notice.
     (app_dir / _INSTALLED_TAG_FILE).write_text(new_tag, encoding="utf-8")

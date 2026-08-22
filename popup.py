@@ -87,10 +87,17 @@ class SearchableDropdown:
         self.entry.bind("<Escape>", lambda _e: self._close())
         self.entry.bind("<Down>", lambda _e: self._highlight(1))
         self.entry.bind("<Up>", lambda _e: self._highlight(-1))
+        self.entry.bind("<FocusIn>", self._on_focus)
         self.entry.bind("<FocusOut>", lambda _e: self.entry.after(150, self._close))
         self.entry.bind("<Button-1>", lambda _e: self._show_all())
 
         self._highlight_index = -1
+        self._open()
+
+    def _on_focus(self, _e=None) -> None:
+        """Show the dropdown as soon as the field is focused, so typing starts
+        from a visible, live list (no need to press Enter first)."""
+        self._update_menu()
         self._open()
 
     # ------------------------------------------------------------------
@@ -214,6 +221,16 @@ class SearchableDropdown:
     def _on_key(self, _e=None) -> None:
         self._refresh()
 
+    def _on_focus(self, _e=None) -> None:
+        """Show the dropdown as soon as the field is focused, so typing starts
+        from a visible, live list (no need to press Enter first)."""
+        self._update_menu()
+        self._open()
+
+    def _key_pressed(self, _e=None) -> None:
+        """Bound to a <Key> event: same live refresh as typing."""
+        self._refresh()
+
 
 class FilePickerPopup:
     """Modal dialog that gathers metadata and hands it to a callback."""
@@ -284,7 +301,7 @@ class FilePickerPopup:
                 pass
             self._preview = None
             self.preview_pane.pack_forget()
-            self.window.geometry("560x880")
+            self.window.geometry("560x820")
             self.preview_btn.configure(text="👁 Preview")
             return
 
@@ -297,10 +314,10 @@ class FilePickerPopup:
         except Exception as exc:
             self._preview = None
             self.preview_pane.pack_forget()
-            self.window.geometry("560x880")
+            self.window.geometry("560x820")
             print(f"[filepicker] preview error: {exc}")
             return
-        self.window.geometry("1180x880")
+        self.window.geometry("1180x820")
         self.preview_btn.configure(text="✕ Close Preview")
 
     @staticmethod
@@ -317,9 +334,10 @@ class FilePickerPopup:
     def _build_window(self) -> None:
         self.window = ctk.CTkToplevel()
         self.window.title(f"FilePicker v{VERSION} — New Download")
-        self.window.geometry("560x880")
+        self.window.geometry("560x820")
         self.window.configure(fg_color=_BG)
-        self.window.resizable(False, False)
+        self.window.resizable(True, True)  # height adjustable
+        self.window.minsize(560, 700)
         self.window.protocol("WM_DELETE_WINDOW", self._skip)
 
         # Modal behaviour: grab all input until dismissed.
