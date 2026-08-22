@@ -72,6 +72,11 @@ def main() -> None:
     exe.rename(app_dir / "FilePicker.exe")
 
     # Zip the app folder so it can be downloaded as one file and extracted.
+    # Ship the current version tag as a marker file so the updater can record
+    # which build is installed after a swap.
+    marker = app_dir / "installed_version.txt"
+    marker.write_text(f"v{VERSION}", encoding="utf-8")
+
     zip_path = dist_root / f"FilePicker-{VERSION}-win64.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(app_dir.rglob("*")):

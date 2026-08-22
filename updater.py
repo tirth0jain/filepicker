@@ -41,10 +41,19 @@ ASSET_PREFIX = "FilePicker"
 # rate limit (60 req/hr; 12/hr is comfortable).
 CHECK_INTERVAL = 5 * 60  # every 5 minutes
 
+# Marker file the CI build drops next to the exe so the updater can tell which
+# tag a running build corresponds to. Written into the release zip and then
+# extracted into the app folder by install_update().
+_INSTALLED_TAG_FILE = "installed_version.txt"
+
+# Files that live next to the app but are the user's data / runtime state and
+# must never be deleted or overwritten by an update.
+_PRESERVE_FILES = {"config.json", "last_update.txt", _INSTALLED_TAG_FILE}
+
 
 def _is_frozen() -> bool:
-    """True when running from a compiled (Nuitka/PyInstaller) binary."""
-    return getattr(sys, "frozen", False)
+    """True when running from a compiled (Nuitka) binary."""
+    return getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False))
 
 
 def _current_exe() -> Path:
@@ -55,8 +64,11 @@ def _current_exe() -> Path:
 
 
 def _installed_tag() -> str:
-    """The release tag the installed binary was built from."""
-    marker = _current_exe().with_name("installed_version.txt")
+    """The release tag the installed binary was built from.
+
+    Prefers the recorded tag next to the exe, falling back to VERSION.
+    """
+    marker = _current_exe().with_name(_INSTALLED_TAG_FILE)
     try:
         return marker.read_text(encoding="utf-8").strip()
     except OSError:
@@ -197,26 +209,47 @@ def install_update(update: dict, staged_zip: Path) -> bool:
 
     Only call this once the app is idle (no files being processed), because it
     replaces the running binary and exits the process. Returns True on success.
+
+    The swap is "mirror to the new build": after it completes, the app folder
+    contains exactly the new build's files (plus preserved user files such as
+    config.json). Old files that are no longer in the new build are removed,
+    locked ones are renamed to ``.old`` (cleaned up on next launch).
     """
     exe = _current_exe()          # e.g. .../FilePicker/FilePicker.exe
     app_dir = exe.parent
     old_tag = _installed_tag()
 
     # 1. Extract the new build to a temp folder.
-    new_dir = Path(tempfile.gettempdir()) / f"FilePicker-new-{update['version'].lstrip('vV')}"
-    if new_dir.exists():
-        shutil.rmtree(new_dir, ignore_errors=True)
+    extract_root = Path(tempfile.gettempdir()) / f"FilePicker-new-{update['version'].lstrip('vV')}"
+    if extract_root.exists():
+        shutil.rmtree(extract_root, ignore_errors=True)
     try:
         with zipfile.ZipFile(staged_zip) as zf:
-            zf.extractall(new_dir)
+            zf.extractall(extract_root)
     except Exception as exc:
         print(f"[updater] could not extract update: {exc}")
         return False
 
+    new_dir = extract_root
     new_exe = new_dir / "FilePicker.exe"
     if not new_exe.exists():
-        print("[updater] new build has no FilePicker.exe; aborting update")
-        return False
+        # Some releases may carry a "FilePicker.dist" wrapper; unwrap it.
+        nested = sorted(new_dir.glob("**/FilePicker.exe"))
+        if nested:
+            new_exe = nested[0]
+            new_dir = new_exe.parent
+        else:
+            print("[updater] new build has no FilePicker.exe; aborting update")
+            return False
+
+    # Read the tag marker shipped inside the new build (if present).
+    new_tag_file = new_dir / _INSTALLED_TAG_FILE
+    new_tag = update["version"]
+    if new_tag_file.exists():
+        try:
+            new_tag = new_tag_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
 
     # 2. Rename the running exe out of the way (Windows allows renaming the
     #    running image, but not deleting it).
@@ -230,11 +263,15 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         return False
 
     # 3. Copy the new build's files over the app folder, handling any locked
-    #    DLLs by renaming them aside first.
+    #    DLLs by renaming them aside first. User data (config.json, markers)
+    #    is never overwritten by an update.
+    new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
     try:
         for src in sorted(new_dir.rglob("*")):
             if src.is_file():
                 rel = src.relative_to(new_dir)
+                if rel.name in _PRESERVE_FILES:
+                    continue
                 dst = app_dir / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _replace_file(src, dst)
@@ -242,16 +279,39 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         print(f"[updater] failed copying new build: {exc}")
         return False
 
-    # 4. Record installed tag + update notice.
-    (app_dir / "installed_version.txt").write_text(update["version"], encoding="utf-8")
-    _notice_file().write_text(f"{old_tag} -> {update['version']}", encoding="utf-8")
+    # 4. Remove files that exist in the app folder but are not part of the new
+    #    build (and are not user data), so the folder mirrors the new build.
+    #    Locked files can't be deleted while running, and the freshly renamed
+    #    .old files must survive until the next launch's cleanup, so both are
+    #    skipped here.
+    for existing in list(app_dir.iterdir()):
+        name = existing.name
+        if name in _PRESERVE_FILES or name.endswith(".old"):
+            continue
+        rel = Path(name)
+        if rel in new_files:
+            continue
+        try:
+            if existing.is_file():
+                existing.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(existing, ignore_errors=True)
+        except (PermissionError, OSError):
+            try:
+                existing.rename(existing.with_name(existing.name + ".old"))
+            except OSError:
+                pass
 
-    # 5. Clean up the temp extraction (leftover .old files are removed on next
+    # 5. Record installed tag + update notice.
+    (app_dir / _INSTALLED_TAG_FILE).write_text(new_tag, encoding="utf-8")
+    _notice_file().write_text(f"{old_tag} -> {new_tag}", encoding="utf-8")
+
+    # 6. Clean up the temp extraction (leftover .old files are removed on next
     #    launch by main.py's startup cleanup).
-    shutil.rmtree(new_dir, ignore_errors=True)
+    shutil.rmtree(extract_root, ignore_errors=True)
     staged_zip.unlink(missing_ok=True)
 
-    # 6. Relaunch the (now-new) exe and exit this process.
+    # 7. Relaunch the (now-new) exe and exit this process.
     _relaunch(exe)
     return True
 

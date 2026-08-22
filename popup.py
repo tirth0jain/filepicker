@@ -708,7 +708,7 @@ class FilePickerPopup:
             name = fn.build_filename(
                 company=self._company_var.get(),
                 doc_type=self._doc_type_var.get(),
-                site_name=self._site_var.get(),
+                site_name=self._current_site(),
                 selected_materials=self._selected_materials,
                 materials_map=self._materials_map,
                 serial=self._serial_var.get(),
@@ -725,7 +725,7 @@ class FilePickerPopup:
             "file_path": self.file_path,
             "company": self._company_var.get(),
             "client": self._client_var.get(),
-            "site": self._site_var.get(),
+            "site": self._current_site(),
             "doc_type": self._doc_type_var.get(),
             "materials": list(self._selected_materials),
             "serial": self._serial_var.get(),
@@ -733,6 +733,18 @@ class FilePickerPopup:
         }
         self._release()
         self.on_submit(payload)
+
+    def _current_site(self) -> str:
+        """The site to use for a client that has no sites yet.
+
+        Clients with an empty site list show only "[+ Add New Site...]" in the
+        dropdown; that sentinel must never be used as a real folder name, so
+        fall back to the client name so the file still gets organized.
+        """
+        site = self._site_var.get()
+        if site == ADD_NEW_SITE_OPTION:
+            return self._client_var.get() or site
+        return site
 
     def _skip(self) -> None:
         self._release()

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ _ACCENT = "#5b8cff"
 _ACCENT_HOVER = "#3f6fe0"
 _TEXT = "#f2f2f7"
 _TEXT_MUTED = "#b6b6c9"
+_DANGER = "#ff6b6b"
 
 # How long the "updating" notice is shown before the update is applied
 # automatically (the app then swaps the exe and relaunches on its own).
@@ -112,7 +114,10 @@ class FilePickerController:
                 app_dir = Path(__file__).resolve().parent
             for old in app_dir.glob("*.old"):
                 try:
-                    old.unlink()
+                    if old.is_dir():
+                        shutil.rmtree(old, ignore_errors=True)
+                    else:
+                        old.unlink()
                 except OSError:
                     pass
         except Exception:
@@ -301,9 +306,47 @@ class FilePickerController:
         try:
             from updater import install_update
             print(f"[filepicker] idle; installing update {update['version']}…")
-            install_update(update, staged)
+            ok = install_update(update, staged)
+            if not ok:
+                # install_update aborted (e.g. the exe is locked); never leave
+                # the user thinking it worked.
+                print(f"[filepicker] update install FAILED ({update['version']}).")
+                self._show_update_failed(update)
         except Exception as exc:
             print(f"[filepicker] install error: {exc}")
+            try:
+                self._show_update_failed(update, str(exc))
+            except Exception:
+                pass
+
+    def _show_update_failed(self, update: dict, detail: str = "") -> None:
+        """Surface a failed update so it is never a silent no-op."""
+        win = ctk.CTkToplevel(self._root)
+        win.title(f"FilePicker v{VERSION} — Update Failed")
+        win.geometry("460x220")
+        win.configure(fg_color=_BG)
+        win.transient(self._root)
+        win.attributes("-topmost", True)
+
+        msg = (f"Could not install {update['version']}.\n"
+               "The app is still on the current version.")
+        if detail:
+            msg += f"\n\n{detail}"
+
+        ctk.CTkLabel(
+            win, text="⚠ Update Failed", font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=_DANGER,
+        ).pack(pady=(24, 8))
+        ctk.CTkLabel(
+            win, text=msg, font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
+            justify="center", wraplength=400,
+        ).pack(pady=(0, 12))
+        ctk.CTkButton(
+            win, text="OK", width=120, height=34, command=win.destroy,
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
+        ).pack(pady=(0, 16))
+        win.lift()
+        win.focus_force()
 
     # ------------------------------------------------------------------
     def run(self) -> None:
