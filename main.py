@@ -16,6 +16,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from pathlib import Path
 
 # Ensure the app's own folder is importable no matter the working directory.
@@ -86,6 +87,8 @@ class FilePickerController:
         self._organize_active = False
         self._pending_update = None  # (update_dict, staged_path) awaiting install
         self._update_dialog_open = False  # true while the "updating" dialog is up
+        self._ui_commands: "queue.Queue[str]" = queue.Queue()  # tray -> main thread
+        self._tray = None
         self._root = None
 
     # ------------------------------------------------------------------
@@ -131,6 +134,17 @@ class FilePickerController:
 
     def _poll_popups(self) -> None:
         """Main-thread polling loop that shows one popup at a time."""
+        # Drain tray/background commands on the main thread.
+        while True:
+            try:
+                cmd = self._ui_commands.get_nowait()
+            except queue.Empty:
+                break
+            if cmd == "check_update":
+                self._check_update_now()
+            elif cmd == "quit":
+                self._root.destroy()
+
         if not self._popup_active:
             try:
                 path = self._popup_queue.get_nowait()
@@ -177,6 +191,7 @@ class FilePickerController:
         request = OrganizeRequest(
             source=source,
             company=payload["company"],
+            client=payload["client"],
             site=payload["site"],
             doc_type=payload["doc_type"],
             materials=payload["materials"],
@@ -189,16 +204,35 @@ class FilePickerController:
 
         if result.success:
             # Original temporary download is deleted only after all copies
-            # succeeded.
-            try:
-                source.unlink(missing_ok=True)
-            except OSError as exc:
-                self._set_status(f"Organized but could not delete original: {exc}")
+            # succeeded. On Windows the file may briefly be "in use" by another
+            # program, so retry for a short while before giving up.
+            if not self._delete_original(source):
                 return
             n = len(result.destinations)
             self._set_status(f"Saved to {n} folder(s): {', '.join(str(d) for d in result.destinations)}")
         else:
             self._set_status("ERROR: " + "; ".join(result.errors))
+
+    @staticmethod
+    def _delete_original(source: Path) -> bool:
+        """Delete the watch-folder original, retrying while it is in use.
+
+        Returns True when deleted (or already gone). If it is still locked
+        after retries (e.g. another program has it open), the copy has already
+        been made, so the user can delete it manually.
+        """
+        for _ in range(5):
+            try:
+                source.unlink(missing_ok=True)
+                return True
+            except PermissionError:
+                time.sleep(0.3)  # wait for the lock to be released
+            except OSError as exc:
+                print(f"[filepicker] could not delete original: {exc}")
+                return False
+        print(f"[filepicker] original still in use by another program; "
+              f"left in watch folder: {source}")
+        return False
 
     def _set_status(self, message: str) -> None:
         print(f"[filepicker] {message}")
@@ -287,10 +321,58 @@ class FilePickerController:
 
         self._root.after(100, self._poll_popups)
         self._schedule_update_checks()
+        self._start_tray()
         try:
             self._root.mainloop()
         finally:
             watcher.stop()
+            self._stop_tray()
+
+    # ------------------------------------------------------------------
+    # Tray icon + manual update
+    # ------------------------------------------------------------------
+    def _start_tray(self) -> None:
+        try:
+            from tray import TrayIcon
+            self._tray = TrayIcon(
+                on_check_update=self._tray_check_update,
+                on_quit=self._tray_quit,
+            )
+            self._tray.start()
+        except Exception as exc:
+            print(f"[filepicker] tray start error: {exc}")
+
+    def _stop_tray(self) -> None:
+        if self._tray is not None:
+            try:
+                self._tray.stop()
+            except Exception:
+                pass
+
+    def _tray_check_update(self) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put("check_update")
+
+    def _tray_quit(self) -> None:
+        self._ui_commands.put("quit")
+
+    def _check_update_now(self) -> None:
+        """Manual 'Check for updates' from the tray (runs on the main thread)."""
+        try:
+            from updater import check_for_update, download_update
+            update = check_for_update()
+            if not update:
+                self._set_status("Already up to date.")
+                return
+            staged = download_update(update)
+            if staged:
+                self._pending_update = (update, staged)
+                print(f"[filepicker] update {update['version']} downloaded; installing…")
+                self._maybe_install_update()
+            else:
+                self._set_status("Update download failed.")
+        except Exception as exc:
+            print(f"[filepicker] manual update error: {exc}")
 
     def _schedule_update_checks(self) -> None:
         """Check for updates periodically; stage downloads, install when idle."""
@@ -339,6 +421,11 @@ def main() -> None:
         from startup import remove
         print("Auto-start removed." if remove() else "Failed to remove auto-start.")
         return
+    if "--check-startup" in args:
+        from startup import verify
+        print("Auto-start verified and ready." if verify()
+              else "Auto-start NOT working (shortcut missing or stale).")
+        return
 
     config = ConfigManager()
 
@@ -353,13 +440,24 @@ def main() -> None:
         except Exception as exc:
             print(f"[filepicker] first-run setup error: {exc}")
 
-    # Auto-register for Windows startup on first run (unless disabled in
-    # config.json). Runs in a background thread so it never delays startup.
+    # Verify auto-start will actually work at next login (unless disabled in
+    # config.json): the Startup shortcut must exist, point at the currently
+    # running app, and its target must still exist — otherwise reinstall it.
+    # Runs in a background thread so it never delays startup.
     if config.auto_start:
         try:
-            from startup import install, is_installed
-            if not is_installed():
-                threading.Thread(target=install, daemon=True).start()
+            from startup import ensure, verify
+
+            def _ensure_startup() -> None:
+                if verify():
+                    print("[filepicker] Auto-start verified.")
+                    return
+                print("[filepicker] Auto-start shortcut missing or stale; reinstalling…")
+                ok = ensure()
+                print("[filepicker] Auto-start repaired." if ok
+                      else "[filepicker] Auto-start repair FAILED.")
+
+            threading.Thread(target=_ensure_startup, daemon=True).start()
         except Exception as exc:
             print(f"[filepicker] auto-start setup failed: {exc}")
 

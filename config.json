@@ -1,7 +1,7 @@
 {
   "watch_directory": "D:/test",
   "root_directory": "D:/Company_Data",
-  "doc_types": ["DC", "Tax Invoice", "Purchase Order", "MTC"],
+  "doc_types": ["DC"],
   "materials": {
     "Aluminium": "A",
     "Carbon": "C",
@@ -9,7 +9,8 @@
     "Mild Steel": "MS",
     "Galvanized Iron": "GI"
   },
-  "companies": {
+  "companies": ["Company A", "Company B"],
+  "clients": {
     "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
     "Beta Projects": ["Plant Central"]
   }

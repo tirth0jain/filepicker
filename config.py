@@ -3,7 +3,7 @@
 Loads and persists a ``config.json`` file. The config is written next to the
 application (the directory containing this module) so it travels with the
 utility and survives reinstalls. All dynamic changes made from the popup UI
-(companies, sites, materials, doc types) are saved back to this file.
+(companies, clients, sites, materials, doc types) are saved back to this file.
 """
 
 from __future__ import annotations
@@ -27,7 +27,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Mild Steel": "MS",
         "Galvanized Iron": "GI",
     },
-    "companies": {
+    # Top-level company names (shown as a dropdown; the first is the default).
+    "companies": ["Company A", "Company B"],
+    # Each client owns a list of sites.
+    "clients": {
         "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
         "Beta Projects": ["Plant Central"],
     },
@@ -126,13 +129,18 @@ class ConfigManager:
         return dict(self.load().get("materials", {}))
 
     @property
-    def companies(self) -> Dict[str, List[str]]:
-        """Return a copy of the {company name -> [sites]} mapping."""
-        companies = self.load().get("companies", {})
-        return {name: list(sites) for name, sites in companies.items()}
+    def companies(self) -> List[str]:
+        """Return the list of top-level company names."""
+        return list(self.load().get("companies", []))
 
-    def sites_for(self, company: str) -> List[str]:
-        return list(self.load().get("companies", {}).get(company, []))
+    @property
+    def clients(self) -> Dict[str, List[str]]:
+        """Return a copy of the {client name -> [sites]} mapping."""
+        clients = self.load().get("clients", {})
+        return {name: list(sites) for name, sites in clients.items()}
+
+    def sites_for(self, client: str) -> List[str]:
+        return list(self.load().get("clients", {}).get(client, []))
 
     @property
     def auto_start(self) -> bool:
@@ -152,18 +160,25 @@ class ConfigManager:
             self.load()["root_directory"] = value
             self.save()
 
-    def add_company(self, company: str, sites: Optional[List[str]] = None) -> None:
+    def add_company(self, company: str) -> None:
         with self._lock:
-            companies = self.load().setdefault("companies", {})
+            companies = self.load().setdefault("companies", [])
             if company not in companies:
-                companies[company] = list(sites or [])
+                companies.append(company)
                 self.save()
 
-    def add_site(self, company: str, site: str) -> None:
-        """Add a new site under ``company``; create the company if needed."""
+    def add_client(self, client: str, sites: Optional[List[str]] = None) -> None:
         with self._lock:
-            companies = self.load().setdefault("companies", {})
-            sites = companies.setdefault(company, [])
+            clients = self.load().setdefault("clients", {})
+            if client not in clients:
+                clients[client] = list(sites or [])
+                self.save()
+
+    def add_site(self, client: str, site: str) -> None:
+        """Add a new site under ``client``; create the client if needed."""
+        with self._lock:
+            clients = self.load().setdefault("clients", {})
+            sites = clients.setdefault(client, [])
             if site not in sites:
                 sites.append(site)
                 self.save()

@@ -73,21 +73,32 @@ def classify_ext(path) -> Optional[str]:
 
 
 def open_image(path) -> "Image.Image":
-    """Open and downscale an image with Pillow (raises on failure)."""
-    from PIL import Image
+    """Open and downscale an image with Pillow (raises on failure).
 
-    img = Image.open(path)
+    The bytes are read into memory first, so the source file is never held
+    open (it stays deletable while the preview is visible on Windows).
+    """
+    from PIL import Image
+    import io
+
+    data = Path(path).read_bytes()
+    img = Image.open(io.BytesIO(data))
     img.thumbnail((_MAX_IMAGE_DIM, _MAX_IMAGE_DIM))
     return img
 
 
 def open_pdf(path) -> "pymupdf.Document":
-    """Open a PDF with PyMuPDF (raises on failure)."""
+    """Open a PDF with PyMuPDF from an in-memory buffer (raises on failure).
+
+    Reading into memory means the source file is never locked while the
+    preview is open on Windows.
+    """
     try:
         import pymupdf  # PyMuPDF >= 1.24 (modern name)
     except ImportError:
         import fitz as pymupdf  # older PyMuPDF releases
-    return pymupdf.open(str(path))
+    data = Path(path).read_bytes()
+    return pymupdf.open(stream=data, filetype="pdf")
 
 
 def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]], Any]:
@@ -96,13 +107,17 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]], Any]:
     ``loader(name)`` returns up to ``_MAX_EXCEL_ROWS`` rows as lists of raw
     cell values. ``closeable`` is the workbook/book object whose ``close()``
     releases the underlying file handle. Supports .xlsx/.xlsm via openpyxl and
-    legacy .xls via xlrd.
+    legacy .xls via xlrd. The file is read into memory first so the source is
+    never held open while the preview is visible.
     """
+    import io
+
     ext = Path(path).suffix.lower()
+    data = Path(path).read_bytes()
     if ext == ".xls":
         import xlrd
 
-        book = xlrd.open_workbook(str(path))
+        book = xlrd.open_workbook(file_contents=data)
 
         def load(name: str) -> List[list]:
             sh = book.sheet_by_name(name)
@@ -115,7 +130,7 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]], Any]:
     else:
         import openpyxl
 
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
 
         def load(name: str) -> List[list]:
             ws = wb[name]

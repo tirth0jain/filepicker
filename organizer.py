@@ -1,13 +1,13 @@
 """Directory routing & file distribution for FilePicker.
 
-Given the metadata chosen in the popup, a completed file is copied into each
-selected material folder under::
+Given the metadata chosen in the popup, a completed file is copied (once) into
+the destination folder::
 
-    [root]/[Company]/[Site]/[Doc Type]/[Material Name]/[Received or Submitted]/[Formatted Filename]
+    [root]/[Company]/[Client]/[Site]/[Doc Type]/[Received or Submitted]/[Formatted Filename]
 
 And, when the Doc Type is ``DC``, an extra copy is placed into::
 
-    [root]/All DC/[Received or Submitted]/[Formatted Filename]
+    [root]/[Company]/All DC/[Received or Submitted]/[Formatted Filename]
 """
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ class OrganizeRequest:
     """Metadata describing how a file should be organized."""
 
     source: Path
-    company: str
+    company: str            # top-level company folder
+    client: str             # client that owns the site
     site: str
     doc_type: str
     materials: List[str]           # selected material *names*
@@ -49,14 +50,14 @@ class OrganizeRequest:
     replace: bool = False          # overwrite existing destination files
 
 
-def _destination_for(root: Path, company: str, site: str, doc_type: str,
-                     material: str, status: str) -> Path:
+def _destination_for(root: Path, company: str, client: str, site: str,
+                     doc_type: str, status: str) -> Path:
     return (
         root
         / fn.sanitize(company)
+        / fn.sanitize(client)
         / fn.sanitize(site)
         / fn.sanitize(doc_type)
-        / fn.sanitize(material)
         / fn.sanitize(status)
     )
 
@@ -75,6 +76,7 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
 
     ext = request.source.suffix.lstrip(".").lower()
     base_name = fn.build_filename(
+        company=request.company,
         doc_type=request.doc_type,
         site_name=request.site,
         selected_materials=request.materials,
@@ -84,28 +86,27 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
         extension=ext,
     )
 
-    # --- Per-material folders ------------------------------------------
-    for material in request.materials:
-        dest_dir = _destination_for(
-            request.root, request.company, request.site,
-            request.doc_type, material, request.status,
-        )
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            result.errors.append(f"Cannot create {dest_dir}: {exc}")
-            continue
+    # --- Destination folder (single copy; no per-material subfolders) ----
+    dest_dir = _destination_for(
+        request.root, request.company, request.client,
+        request.site, request.doc_type, request.status,
+    )
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        result.errors.append(f"Cannot create {dest_dir}: {exc}")
+        return result
 
-        safe_name = fn.resolve_collision(dest_dir, base_name, request.replace)
-        try:
-            shutil.copy2(request.source, dest_dir / safe_name)
-            result.destinations.append(dest_dir / safe_name)
-        except OSError as exc:
-            result.errors.append(f"Cannot copy to {dest_dir / safe_name}: {exc}")
+    safe_name = fn.resolve_collision(dest_dir, base_name, request.replace)
+    try:
+        shutil.copy2(request.source, dest_dir / safe_name)
+        result.destinations.append(dest_dir / safe_name)
+    except OSError as exc:
+        result.errors.append(f"Cannot copy to {dest_dir / safe_name}: {exc}")
 
     # --- Global "All DC" folder (only when Doc Type == "DC") ------------
     if request.doc_type.strip().upper() == "DC":
-        all_dc_dir = request.root / "All DC" / fn.sanitize(request.status)
+        all_dc_dir = request.root / fn.sanitize(request.company) / "All DC" / fn.sanitize(request.status)
         try:
             all_dc_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

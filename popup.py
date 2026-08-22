@@ -3,7 +3,7 @@
 A top-most modal window that appears when a completed download is detected. It
 captures the metadata needed to rename and route the file:
 
-- Company / Site (with an inline "Add New Site" flow)
+- Company / Client / Site (with an inline "Add New Site" and "Add New Company")
 - Document Type
 - Material multi-select (with "Add Material")
 - Serial number
@@ -23,8 +23,9 @@ import customtkinter as ctk
 from config import ConfigManager
 from version import VERSION
 
-# A sentinel option shown at the bottom of the Site dropdown.
+# Sentinel options shown at the bottom of the Site / Company dropdowns.
 ADD_NEW_SITE_OPTION = "[+ Add New Site...]"
+ADD_NEW_COMPANY_OPTION = "[+ Add New Company...]"
 ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 
 # File types the preview viewer can render (see viewer.py).
@@ -62,6 +63,7 @@ class FilePickerPopup:
 
         # Internal UI state.
         self._company_var = tk.StringVar()
+        self._client_var = tk.StringVar()
         self._site_var = tk.StringVar()
         self._doc_type_var = tk.StringVar(value="DC")
         self._serial_var = tk.StringVar()
@@ -211,6 +213,16 @@ class FilePickerPopup:
         )
         self.company_combo.pack(fill="x", pady=(0, 12))
 
+        # -- Client -----------------------------------------------------
+        ctk.CTkLabel(f, text="Client", font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        self.client_combo = ctk.CTkOptionMenu(
+            f, values=[], variable=self._client_var,
+            command=self._on_client_change, fg_color=_BG_FIELD,
+            button_color=_ACCENT, button_hover_color=_ACCENT,
+        )
+        self.client_combo.pack(fill="x", pady=(0, 12))
+
         # -- Site -------------------------------------------------------
         ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
@@ -289,17 +301,28 @@ class FilePickerPopup:
     # ------------------------------------------------------------------
     def _reload_config_state(self) -> None:
         data = self.config.load()
-        companies = data.get("companies", {})
+        companies = data.get("companies", [])
+        clients = data.get("clients", {})
         self._materials_map = dict(data.get("materials", {}))
 
-        company_names = list(companies.keys())
+        # Company dropdown (first entry is the default).
+        company_names = list(companies)
         if company_names:
-            self.company_combo.configure(values=company_names)
+            self.company_combo.configure(values=company_names + [ADD_NEW_COMPANY_OPTION])
             self._company_var.set(company_names[0])
-            self._populate_sites(company_names[0])
         else:
-            self.company_combo.configure(values=["(no companies)"])
-            self._company_var.set("(no companies)")
+            self.company_combo.configure(values=[ADD_NEW_COMPANY_OPTION])
+            self._company_var.set(ADD_NEW_COMPANY_OPTION)
+
+        # Client dropdown drives the site list.
+        client_names = list(clients.keys())
+        if client_names:
+            self.client_combo.configure(values=client_names)
+            self._client_var.set(client_names[0])
+            self._populate_sites(client_names[0])
+        else:
+            self.client_combo.configure(values=["(no clients)"])
+            self._client_var.set("(no clients)")
 
         doc_types = data.get("doc_types", ["DC"])
         self.doc_type_combo.configure(values=doc_types)
@@ -308,8 +331,8 @@ class FilePickerPopup:
         self._render_material_chips()
         self._refresh_preview()
 
-    def _populate_sites(self, company: str) -> None:
-        sites = self.config.sites_for(company)
+    def _populate_sites(self, client: str) -> None:
+        sites = self.config.sites_for(client)
         values = sites + [ADD_NEW_SITE_OPTION]
         self.site_combo.configure(values=values)
         if sites:
@@ -410,15 +433,46 @@ class FilePickerPopup:
     def _on_company_change(self, company: str) -> None:
         if not company or company == "(no companies)":
             return
-        self._populate_sites(company)
+        if company == ADD_NEW_COMPANY_OPTION:
+            self._ask_text(
+                "Add New Company",
+                "New company name:",
+                default="",
+                placeholder="e.g. Acme Corp",
+                on_ok=self._add_new_company,
+            )
+            return
+        self._refresh_preview()
+
+    def _add_new_company(self, company: str) -> None:
+        company = company.strip()
+        if not company:
+            # Nothing entered; revert to the previously selected company.
+            self._reload_company_options()
+            return
+        self.config.add_company(company)
+        self._reload_company_options()
+        self._company_var.set(company)
+        self._refresh_preview()
+
+    def _reload_company_options(self) -> None:
+        companies = self.config.companies
+        self.company_combo.configure(values=companies + [ADD_NEW_COMPANY_OPTION])
+        if companies:
+            self._company_var.set(companies[0])
+
+    def _on_client_change(self, client: str) -> None:
+        if not client or client == "(no clients)":
+            return
+        self._populate_sites(client)
         self._refresh_preview()
 
     def _on_site_change(self, site: str) -> None:
         if site == ADD_NEW_SITE_OPTION:
-            company = self._company_var.get()
+            client = self._client_var.get()
             self._ask_text(
                 "Add New Site",
-                f"New site name for {company}:",
+                f"New site name for {client}:",
                 default="",
                 placeholder="e.g. Site 3 - Delhi",
                 on_ok=self._add_new_site,
@@ -430,11 +484,11 @@ class FilePickerPopup:
         site = site.strip()
         if not site:
             # Nothing entered; revert to previous selection.
-            self._populate_sites(self._company_var.get())
+            self._populate_sites(self._client_var.get())
             return
-        company = self._company_var.get()
-        self.config.add_site(company, site)
-        self._populate_sites(company)
+        client = self._client_var.get()
+        self.config.add_site(client, site)
+        self._populate_sites(client)
         self._site_var.set(site)
         self._refresh_preview()
 
@@ -491,6 +545,7 @@ class FilePickerPopup:
         status = "Received" if self._received_var.get() else "Submitted"
         try:
             name = fn.build_filename(
+                company=self._company_var.get(),
                 doc_type=self._doc_type_var.get(),
                 site_name=self._site_var.get(),
                 selected_materials=self._selected_materials,
@@ -508,6 +563,7 @@ class FilePickerPopup:
         payload = {
             "file_path": self.file_path,
             "company": self._company_var.get(),
+            "client": self._client_var.get(),
             "site": self._site_var.get(),
             "doc_type": self._doc_type_var.get(),
             "materials": list(self._selected_materials),

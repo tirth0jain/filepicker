@@ -38,6 +38,7 @@ def main() -> None:
         "--include-package=pymupdf",
         "--include-package=openpyxl",
         "--include-package=xlrd",
+        "--include-package=pystray",
         "--output-dir=dist",
         "--product-name=FilePicker",
         "--file-version=" + VERSION,

@@ -2,9 +2,9 @@
 
 The generated filename strictly follows the format::
 
-    {Doc Type}-{Financial Year}-{Site Name}-{Material Shortcodes}-{Serial}-{Status}.{ext}
+    {Company}-{Doc Type}-{Financial Year}-{Site Name}-{Material Shortcodes}-{Serial}-{Status}.{ext}
 
-e.g. ``DC-26-27-Site 1 - Mumbai-A+C-0001-Received.pdf``
+e.g. ``Acme-DC-26-27-Site 1 - Mumbai-A+C-0001-Received.pdf``
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ def material_shortcodes(selected_names, materials_map) -> str:
 
 
 def build_filename(
+    company: str,
     doc_type: str,
     site_name: str,
     selected_materials,
@@ -82,6 +83,7 @@ def build_filename(
 
     stem = "-".join(
         [
+            sanitize(company),
             sanitize(doc_type),
             fy,
             sanitize(site_name),

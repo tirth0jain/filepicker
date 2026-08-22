@@ -85,3 +85,64 @@ def remove() -> bool:
 def is_installed() -> bool:
     """Return True if the Startup-folder shortcut exists."""
     return (_startup_dir() / _SHORTCUT_NAME).exists()
+
+
+def _read_shortcut(lnk: Path):
+    """Return ``(target, arguments)`` of an existing .lnk, or None on failure."""
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{lnk}'); "
+        "Write-Output $s.TargetPath; "
+        "Write-Output $s.Arguments"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            return lines[0], lines[1]
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _same_path(a: str, b: str) -> bool:
+    """Compare two Windows paths case-insensitively, ignoring slash style."""
+    return a.strip().replace("/", "\\").lower() == b.strip().replace("/", "\\").lower()
+
+
+def verify() -> bool:
+    """Return True if auto-start will actually work at the next login.
+
+    The Startup shortcut must exist, point at the currently running app (not a
+    stale path from a previous install location), and its target file must
+    still be present.
+    """
+    lnk = _startup_dir() / _SHORTCUT_NAME
+    if not lnk.exists():
+        return False
+    target, _args, _workdir = _target()
+    info = _read_shortcut(lnk)
+    if info is None:
+        return False
+    lnk_target, _lnk_args = info
+    if not _same_path(lnk_target, target):
+        return False
+    try:
+        if not Path(lnk_target).exists():
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def ensure() -> bool:
+    """Verify auto-start, reinstalling the shortcut if it is missing or stale.
+
+    Returns True when auto-start is confirmed working afterwards.
+    """
+    if verify():
+        return True
+    return install()
