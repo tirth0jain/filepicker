@@ -140,7 +140,12 @@ class ConfigManager:
         return {name: list(sites) for name, sites in clients.items()}
 
     def sites_for(self, client: str) -> List[str]:
-        return list(self.load().get("clients", {}).get(client, []))
+        return list(self._clients_dict().get(client.strip().lower(), []))
+
+    def _clients_dict(self) -> Dict[str, List[str]]:
+        """The raw {client -> [sites]} map with case-insensitive keys."""
+        clients = self.load().get("clients", {})
+        return {str(k).lower(): list(v) for k, v in clients.items()}
 
     @property
     def auto_start(self) -> bool:
@@ -163,14 +168,14 @@ class ConfigManager:
     def add_company(self, company: str) -> None:
         with self._lock:
             companies = self.load().setdefault("companies", [])
-            if company not in companies:
+            if not self._ci_matches(companies, company):
                 companies.append(company)
                 self.save()
 
     def add_client(self, client: str, sites: Optional[List[str]] = None) -> None:
         with self._lock:
             clients = self.load().setdefault("clients", {})
-            if client not in clients:
+            if not self._ci_matches(clients.keys(), client):
                 clients[client] = list(sites or [])
                 self.save()
 
@@ -178,10 +183,24 @@ class ConfigManager:
         """Add a new site under ``client``; create the client if needed."""
         with self._lock:
             clients = self.load().setdefault("clients", {})
-            sites = clients.setdefault(client, [])
-            if site not in sites:
+            key = self._canonical_key(clients, client)
+            sites = clients.setdefault(key, [])
+            if not self._ci_matches(sites, site):
                 sites.append(site)
                 self.save()
+
+    @staticmethod
+    def _canonical_key(d: dict, name: str) -> str:
+        """Return the existing dict key that case-insensitively matches name."""
+        lowered = name.strip().lower()
+        for k in d:
+            if str(k).lower() == lowered:
+                return k
+        return name
+
+    @staticmethod
+    def _ci_matches(existing, name: str) -> bool:
+        return any(str(e).lower() == name.strip().lower() for e in existing)
 
     def add_material(self, name: str, shortcode: str) -> None:
         with self._lock:
@@ -192,6 +211,6 @@ class ConfigManager:
     def add_doc_type(self, doc_type: str) -> None:
         with self._lock:
             doc_types = self.load().setdefault("doc_types", [])
-            if doc_type not in doc_types:
+            if not self._ci_matches(doc_types, doc_type):
                 doc_types.append(doc_type)
                 self.save()

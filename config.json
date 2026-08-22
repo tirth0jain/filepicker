@@ -1,15 +1,15 @@
 {
   "watch_directory": "D:/test",
-  "root_directory": "D:/Company_Data",
+  "root_directory": "Z:/Sorted",
   "doc_types": ["DC"],
   "materials": {
     "Aluminium": "A",
-    "Carbon": "C",
+    "Fastner": "F",
     "Stainless Steel": "SS",
     "Mild Steel": "MS",
-    "Galvanized Iron": "GI"
+    "Glass": "G"
   },
-  "companies": ["Company A", "Company B"],
+  "companies": ["Ruby Steel", "Ruby Steel Railings & Facades"],
   "clients": {
     "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
     "Beta Projects": ["Plant Central"]

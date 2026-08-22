@@ -25,6 +25,7 @@ from version import VERSION
 
 # Sentinel options shown at the bottom of the Site / Company dropdowns.
 ADD_NEW_SITE_OPTION = "[+ Add New Site...]"
+ADD_NEW_CLIENT_OPTION = "[+ Add New Client...]"
 ADD_NEW_COMPANY_OPTION = "[+ Add New Company...]"
 ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 
@@ -44,6 +45,138 @@ _TEXT = "#f2f2f7"
 _TEXT_MUTED = "#b6b6c9"
 _SUCCESS = "#7ad17a"
 _DANGER = "#ff6b6b"
+
+
+class SearchableDropdown:
+    """A searchable combo: a text entry that filters a dropdown of choices.
+
+    Used for Client and Site so the user can type to jump to an entry (useful
+    when the lists grow). Replaces the plain CTkOptionMenu with the same
+    interface the popup expects: ``get()``, ``configure(values=...)``,
+    ``set(value)`` and an ``on_change`` callback.
+    """
+
+    def __init__(self, parent, values, on_change, width=None) -> None:
+        self.parent = parent
+        self._values = list(values)
+        self._on_change = on_change
+        self._value = ""
+
+        self.entry = ctk.CTkEntry(
+            parent, fg_color=_BG_FIELD, border_color=_BG_FIELD,
+            text_color=_TEXT, placeholder_text="Search or select…",
+        )
+        if width:
+            self.entry.configure(width=width)
+        self.entry.pack(fill="x", pady=(0, 12))
+
+        self._menu = tk.Menu(
+            parent, tearoff=0, bg=_BG_FIELD, fg=_TEXT,
+            activebackground=_ACCENT, activeforeground="#ffffff",
+            font=tkfont.nametofont("TkDefaultFont"),
+        )
+        self._menu_open = False
+
+        self.entry.bind("<KeyRelease>", self._on_key)
+        self.entry.bind("<Return>", self._select_highlighted)
+        self.entry.bind("<Escape>", lambda _e: self._close())
+        self.entry.bind("<Down>", lambda _e: self._highlight(1))
+        self.entry.bind("<Up>", lambda _e: self._highlight(-1))
+        self.entry.bind("<FocusOut>", lambda _e: self.entry.after(150, self._close))
+        self.entry.bind("<Button-1>", lambda _e: self._show_all())
+
+        self._highlight_index = -1
+        self._open()
+
+    # ------------------------------------------------------------------
+    def get(self) -> str:
+        return self._value
+
+    def set(self, value: str) -> None:
+        self._value = value
+        self.entry.delete(0, "end")
+        self.entry.insert(0, value)
+
+    def configure(self, **kwargs) -> None:
+        if "values" in kwargs:
+            self._values = list(kwargs.pop("values"))
+            if self._value not in self._values:
+                self._value = ""
+            self.entry.delete(0, "end")
+        for key, val in kwargs.items():
+            getattr(self.entry, "configure")(**{key: val})
+
+    # ------------------------------------------------------------------
+    def _visible_items(self) -> list:
+        text = self.entry.get().strip().lower()
+        if not text:
+            return list(self._values)
+        return [v for v in self._values if text in v.lower()]
+
+    def _show_all(self) -> None:
+        self._update_menu(self._visible_items())
+        self._open()
+
+    def _open(self) -> None:
+        if self._menu_open:
+            return
+        self._menu_open = True
+        try:
+            self._menu.post(
+                self.entry.winfo_rootx(),
+                self.entry.winfo_rooty() + self.entry.winfo_height(),
+            )
+        except tk.TclError:
+            self._menu_open = False
+
+    def _close(self) -> None:
+        if self._menu_open:
+            try:
+                self._menu.unpost()
+            except tk.TclError:
+                pass
+            self._menu_open = False
+
+    def _update_menu(self, items) -> None:
+        self._menu.delete(0, "end")
+        self._highlight_index = -1
+        if not items:
+            self._menu.add_command(label="(no matches)", state="disabled")
+            return
+        for item in items:
+            self._menu.add_command(label=item, command=lambda v=item: self._choose(v))
+        self._menu.entryconfigure(0, background=_ACCENT, foreground="#ffffff")
+
+    def _choose(self, value: str) -> None:
+        self._close()
+        self._value = value
+        self.entry.delete(0, "end")
+        self.entry.insert(0, value)
+        if self._on_change:
+            self._on_change(value)
+
+    def _highlight(self, delta: int) -> None:
+        items = self._visible_items()
+        if not items:
+            return
+        self._highlight_index = (self._highlight_index + delta) % len(items)
+        self._menu.entryconfigure(self._highlight_index,
+                                  background=_ACCENT, foreground="#ffffff")
+        self._menu.entryconfigure(
+            (self._highlight_index - delta) % len(items),
+            background=_BG_FIELD, foreground=_TEXT,
+        )
+
+    def _select_highlighted(self, _e=None) -> None:
+        items = self._visible_items()
+        if not items:
+            return
+        idx = self._highlight_index if 0 <= self._highlight_index < len(items) else 0
+        self._choose(items[idx])
+
+    def _on_key(self, _e=None) -> None:
+        self._update_menu(self._visible_items())
+        self._open()
 
 
 class FilePickerPopup:
@@ -216,22 +349,22 @@ class FilePickerPopup:
         # -- Client -----------------------------------------------------
         ctk.CTkLabel(f, text="Client", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
-        self.client_combo = ctk.CTkOptionMenu(
-            f, values=[], variable=self._client_var,
-            command=self._on_client_change, fg_color=_BG_FIELD,
-            button_color=_ACCENT, button_hover_color=_ACCENT,
+        self.client_dropdown = SearchableDropdown(
+            f, values=[], on_change=self._on_client_change,
         )
-        self.client_combo.pack(fill="x", pady=(0, 12))
+        self.client_dropdown.entry.configure(
+            placeholder_text="Search client…",
+        )
 
         # -- Site -------------------------------------------------------
         ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
-        self.site_combo = ctk.CTkOptionMenu(
-            f, values=[], variable=self._site_var,
-            command=self._on_site_change, fg_color=_BG_FIELD,
-            button_color=_ACCENT, button_hover_color=_ACCENT,
+        self.site_dropdown = SearchableDropdown(
+            f, values=[], on_change=self._on_site_change,
         )
-        self.site_combo.pack(fill="x", pady=(0, 12))
+        self.site_dropdown.entry.configure(
+            placeholder_text="Search site…",
+        )
 
         # -- Document type ----------------------------------------------
         ctk.CTkLabel(f, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
@@ -314,15 +447,16 @@ class FilePickerPopup:
             self.company_combo.configure(values=[ADD_NEW_COMPANY_OPTION])
             self._company_var.set(ADD_NEW_COMPANY_OPTION)
 
-        # Client dropdown drives the site list.
+        # Client dropdown drives the site list. Values include the "add new"
+        # sentinel so a new client can be created right from the dropdown.
         client_names = list(clients.keys())
         if client_names:
-            self.client_combo.configure(values=client_names)
+            self.client_dropdown.configure(values=client_names + [ADD_NEW_CLIENT_OPTION])
             self._client_var.set(client_names[0])
             self._populate_sites(client_names[0])
         else:
-            self.client_combo.configure(values=["(no clients)"])
-            self._client_var.set("(no clients)")
+            self.client_dropdown.configure(values=[ADD_NEW_CLIENT_OPTION])
+            self._client_var.set(ADD_NEW_CLIENT_OPTION)
 
         doc_types = data.get("doc_types", ["DC"])
         self.doc_type_combo.configure(values=doc_types)
@@ -334,7 +468,7 @@ class FilePickerPopup:
     def _populate_sites(self, client: str) -> None:
         sites = self.config.sites_for(client)
         values = sites + [ADD_NEW_SITE_OPTION]
-        self.site_combo.configure(values=values)
+        self.site_dropdown.configure(values=values)
         if sites:
             self._site_var.set(sites[0])
         else:
@@ -464,8 +598,35 @@ class FilePickerPopup:
     def _on_client_change(self, client: str) -> None:
         if not client or client == "(no clients)":
             return
+        if client == ADD_NEW_CLIENT_OPTION:
+            self._ask_text(
+                "Add New Client",
+                "New client name:",
+                default="",
+                placeholder="e.g. Gamma Projects",
+                on_ok=self._add_new_client,
+            )
+            return
         self._populate_sites(client)
         self._refresh_preview()
+
+    def _add_new_client(self, client: str) -> None:
+        client = client.strip()
+        if not client:
+            # Nothing entered; revert to the previously selected client.
+            self._reload_client_options()
+            return
+        self.config.add_client(client)
+        self._reload_client_options()
+        self._client_var.set(client)
+        self._populate_sites(client)
+        self._refresh_preview()
+
+    def _reload_client_options(self) -> None:
+        clients = self.config.clients
+        self.client_dropdown.configure(values=list(clients.keys()) + [ADD_NEW_CLIENT_OPTION])
+        if clients:
+            self._client_var.set(next(iter(clients)))
 
     def _on_site_change(self, site: str) -> None:
         if site == ADD_NEW_SITE_OPTION:
