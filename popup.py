@@ -29,6 +29,11 @@ ADD_NEW_CLIENT_OPTION = "[+ Add New Client...]"
 ADD_NEW_COMPANY_OPTION = "[+ Add New Company...]"
 ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 
+# Maximum number of matches shown at once in the searchable dropdown. The list
+# is live-filtered as the user types, so a long client/site list only ever
+# shows the first few closest matches instead of dumping the entire menu.
+_MAX_DROPDOWN_RESULTS = 5
+
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",
@@ -90,6 +95,12 @@ class SearchableDropdown:
 
     # ------------------------------------------------------------------
     def get(self) -> str:
+        """The currently displayed value: the selected match if set, otherwise
+        whatever the user typed (so typing + Save without clicking still uses
+        the typed value)."""
+        typed = self.entry.get().strip()
+        if typed:
+            return typed
         return self._value
 
     def set(self, value: str) -> None:
@@ -110,11 +121,13 @@ class SearchableDropdown:
     def _visible_items(self) -> list:
         text = self.entry.get().strip().lower()
         if not text:
-            return list(self._values)
-        return [v for v in self._values if text in v.lower()]
+            matches = list(self._values)
+        else:
+            matches = [v for v in self._values if text in v.lower()]
+        return matches[:_MAX_DROPDOWN_RESULTS]
 
     def _show_all(self) -> None:
-        self._update_menu(self._visible_items())
+        self._update_menu()
         self._open()
 
     def _open(self) -> None:
@@ -137,14 +150,27 @@ class SearchableDropdown:
                 pass
             self._menu_open = False
 
-    def _update_menu(self, items) -> None:
+    def _update_menu(self, _items=None) -> None:
+        # Filter from the full value list so we know the total match count
+        # (the "more" hint) while only showing the first few rows.
+        text = self.entry.get().strip().lower()
+        if not text:
+            matches = list(self._values)
+        else:
+            matches = [v for v in self._values if text in v.lower()]
+
         self._menu.delete(0, "end")
         self._highlight_index = -1
-        if not items:
+        if not matches:
             self._menu.add_command(label="(no matches)", state="disabled")
             return
-        for item in items:
+        for item in matches[:_MAX_DROPDOWN_RESULTS]:
             self._menu.add_command(label=item, command=lambda v=item: self._choose(v))
+        if len(matches) > _MAX_DROPDOWN_RESULTS:
+            self._menu.add_command(
+                label=f"… {len(matches) - _MAX_DROPDOWN_RESULTS} more (keep typing)",
+                state="disabled",
+            )
         self._menu.entryconfigure(0, background=_ACCENT, foreground="#ffffff")
 
     def _choose(self, value: str) -> None:
@@ -175,7 +201,7 @@ class SearchableDropdown:
         self._choose(items[idx])
 
     def _on_key(self, _e=None) -> None:
-        self._update_menu(self._visible_items())
+        self._update_menu()
         self._open()
 
 
@@ -197,9 +223,9 @@ class FilePickerPopup:
         # Internal UI state.
         self._company_var = tk.StringVar()
         self._client_var = tk.StringVar()
-        self._site_var = tk.StringVar()
         self._doc_type_var = tk.StringVar(value="DC")
         self._serial_var = tk.StringVar()
+        self._tags_var = tk.StringVar()
         self._received_var = tk.BooleanVar(value=True)
         self._selected_materials: List[str] = []
 
@@ -395,6 +421,16 @@ class FilePickerPopup:
         )
         self.serial_entry.pack(fill="x", pady=(0, 12))
 
+        # -- Tags (searchable metadata) ----------------------------------
+        ctk.CTkLabel(f, text="Tags (search in Windows Explorer)",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        ctk.CTkEntry(
+            f, textvariable=self._tags_var, fg_color=_BG_FIELD,
+            border_color=_BG_FIELD, text_color=_TEXT,
+            placeholder_text="e.g. Aluminium, DC, Site 1  (comma separated)",
+        ).pack(fill="x", pady=(0, 12))
+
         # -- Received copy checkbox -------------------------------------
         self.received_check = ctk.CTkCheckBox(
             f, text="Received Copy (unchecked = Submitted)",
@@ -470,9 +506,9 @@ class FilePickerPopup:
         values = sites + [ADD_NEW_SITE_OPTION]
         self.site_dropdown.configure(values=values)
         if sites:
-            self._site_var.set(sites[0])
+            self.site_dropdown.set(sites[0])
         else:
-            self._site_var.set(ADD_NEW_SITE_OPTION)
+            self.site_dropdown.set(ADD_NEW_SITE_OPTION)
 
     # ------------------------------------------------------------------
     # Material chip rendering
@@ -607,6 +643,9 @@ class FilePickerPopup:
                 on_ok=self._add_new_client,
             )
             return
+        # Keep the internal var in sync so the add-new-site flow uses the
+        # currently selected client.
+        self._client_var.set(client)
         self._populate_sites(client)
         self._refresh_preview()
 
@@ -618,7 +657,7 @@ class FilePickerPopup:
             return
         self.config.add_client(client)
         self._reload_client_options()
-        self._client_var.set(client)
+        self.client_dropdown.set(client)
         self._populate_sites(client)
         self._refresh_preview()
 
@@ -626,7 +665,7 @@ class FilePickerPopup:
         clients = self.config.clients
         self.client_dropdown.configure(values=list(clients.keys()) + [ADD_NEW_CLIENT_OPTION])
         if clients:
-            self._client_var.set(next(iter(clients)))
+            self.client_dropdown.set(next(iter(clients)))
 
     def _on_site_change(self, site: str) -> None:
         if site == ADD_NEW_SITE_OPTION:
@@ -650,7 +689,7 @@ class FilePickerPopup:
         client = self._client_var.get()
         self.config.add_site(client, site)
         self._populate_sites(client)
-        self._site_var.set(site)
+        self.site_dropdown.set(site)
         self._refresh_preview()
 
     # ------------------------------------------------------------------
@@ -724,26 +763,27 @@ class FilePickerPopup:
         payload = {
             "file_path": self.file_path,
             "company": self._company_var.get(),
-            "client": self._client_var.get(),
+            "client": self.client_dropdown.get(),
             "site": self._current_site(),
             "doc_type": self._doc_type_var.get(),
             "materials": list(self._selected_materials),
             "serial": self._serial_var.get(),
             "status": status,
+            "tags": self._tags_var.get(),
         }
         self._release()
         self.on_submit(payload)
 
     def _current_site(self) -> str:
-        """The site to use for a client that has no sites yet.
+        """The site to use for the file.
 
-        Clients with an empty site list show only "[+ Add New Site...]" in the
-        dropdown; that sentinel must never be used as a real folder name, so
-        fall back to the client name so the file still gets organized.
+        Uses whatever the user typed/selected in the site box (the dropdown's
+        live value), so the folder is created for the site the user actually
+        entered — never a fallback to the first item or the add-new sentinel.
         """
-        site = self._site_var.get()
+        site = self.site_dropdown.get()
         if site == ADD_NEW_SITE_OPTION:
-            return self._client_var.get() or site
+            return self.client_dropdown.get() or site
         return site
 
     def _skip(self) -> None:

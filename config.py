@@ -30,6 +30,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     # Top-level company names (shown as a dropdown; the first is the default).
     "companies": ["Company A", "Company B"],
+    # Optional per-company initials used in filenames (e.g. "Ruby Steel": "RS").
+    # Companies not listed here fall back to auto-derived initials.
+    "company_initials": {},
     # Each client owns a list of sites.
     "clients": {
         "Alpha Infra": ["Site 1 - Mumbai", "Site 2 - Pune"],
@@ -80,6 +83,9 @@ class ConfigManager:
 
     def _read_from_disk(self) -> None:
         if not self.path.exists():
+            # No config yet: seed the file from DEFAULT_CONFIG (first run) so
+            # the user has a file to edit, then treat that file as the source.
+            self._data = deepcopy(DEFAULT_CONFIG)
             self.save()
             return
         try:
@@ -87,10 +93,11 @@ class ConfigManager:
                 loaded = json.load(fh)
             if not isinstance(loaded, dict):
                 raise ValueError("config root must be a JSON object")
-            # Merge defaults so new keys added in later versions appear.
-            merged = deepcopy(DEFAULT_CONFIG)
-            merged.update(loaded)
-            self._data = merged
+            # config.json is the source of truth: use its contents as-is and
+            # never merge config.py's placeholder defaults over them. Missing
+            # keys are handled at the accessor level (each uses .get with a
+            # safe fallback) without being written back.
+            self._data = loaded
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             # Fall back to defaults but never crash the watcher.
             self._data = deepcopy(DEFAULT_CONFIG)
@@ -141,6 +148,12 @@ class ConfigManager:
     def companies(self) -> List[str]:
         """Return the list of top-level company names."""
         return list(self.load().get("companies", []))
+
+    @property
+    def company_initials(self) -> Dict[str, str]:
+        """Return the {company name -> initials} override map."""
+        initials = self.load().get("company_initials", {})
+        return {str(name): str(code) for name, code in initials.items()}
 
     @property
     def clients(self) -> Dict[str, List[str]]:

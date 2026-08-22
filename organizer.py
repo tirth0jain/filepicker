@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import filename as fn
+from tags import apply_tags
 
 
 @dataclass
@@ -48,6 +49,8 @@ class OrganizeRequest:
     status: str                    # "Received" or "Submitted"
     root: Path
     replace: bool = False          # overwrite existing destination files
+    initials_map: Optional[dict] = None   # company name -> initials override
+    tags: Optional[List[str]] = None      # user-entered search tags
 
 
 def _destination_for(root: Path, company: str, client: str, site: str,
@@ -84,39 +87,39 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
         serial=request.serial,
         status=request.status,
         extension=ext,
+        initials_map=request.initials_map,
     )
+
+    def place_copy(dest_dir: Path) -> Optional[Path]:
+        """Copy the source into ``dest_dir`` (handling collisions + tags)."""
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            result.errors.append(f"Cannot create {dest_dir}: {exc}")
+            return None
+        safe_name = fn.resolve_collision(dest_dir, base_name, request.replace)
+        target = dest_dir / safe_name
+        try:
+            shutil.copy2(request.source, target)
+        except OSError as exc:
+            result.errors.append(f"Cannot copy to {target}: {exc}")
+            return None
+        if request.tags:
+            apply_tags(target, request.tags)
+        result.destinations.append(target)
+        return target
 
     # --- Destination folder (single copy; no per-material subfolders) ----
     dest_dir = _destination_for(
         request.root, request.company, request.client,
         request.site, request.doc_type, request.status,
     )
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        result.errors.append(f"Cannot create {dest_dir}: {exc}")
+    if place_copy(dest_dir) is None and result.errors:
         return result
-
-    safe_name = fn.resolve_collision(dest_dir, base_name, request.replace)
-    try:
-        shutil.copy2(request.source, dest_dir / safe_name)
-        result.destinations.append(dest_dir / safe_name)
-    except OSError as exc:
-        result.errors.append(f"Cannot copy to {dest_dir / safe_name}: {exc}")
 
     # --- Global "All DC" folder (only when Doc Type == "DC") ------------
     if request.doc_type.strip().upper() == "DC":
         all_dc_dir = request.root / fn.sanitize(request.company) / "All DC" / fn.sanitize(request.status)
-        try:
-            all_dc_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            result.errors.append(f"Cannot create {all_dc_dir}: {exc}")
-        else:
-            safe_name = fn.resolve_collision(all_dc_dir, base_name, request.replace)
-            try:
-                shutil.copy2(request.source, all_dc_dir / safe_name)
-                result.destinations.append(all_dc_dir / safe_name)
-            except OSError as exc:
-                result.errors.append(f"Cannot copy to {all_dc_dir / safe_name}: {exc}")
+        place_copy(all_dc_dir)
 
     return result

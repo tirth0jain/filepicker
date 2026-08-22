@@ -97,14 +97,18 @@ def _latest_release_info() -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def check_for_update() -> Optional[dict]:
+def check_for_update(strict: bool = True) -> Optional[dict]:
     """Return update info if a newer binary exists, else ``None``.
 
-    Comparison rules:
-    - A higher version (e.g. 0.2.0 > 0.1.0) always updates.
-    - A newer build of the same version (e.g. v0.1.0-bbb vs v0.1.0-aaa)
-      updates only when the installed binary has a recorded tag that differs
-      (so a fresh download of the latest build does not re-download itself).
+    ``strict=True`` (used by the automatic periodic check): only a higher
+    version (e.g. 0.2.6 > 0.2.5) is treated as an update. Builds of the *same*
+    version line — even with a different GitHub Actions id in the tag — are
+    ignored, so the app never nags when it is already on the latest release.
+
+    ``strict=False`` (used by the manual tray "Check for updates"): also
+    updates on a newer build of the same version (e.g. v0.2.5-bbb vs
+    v0.2.5-aaa) when the recorded installed tag differs, so the user can pull
+    the newest build on demand.
     """
     try:
         info = _latest_release_info()
@@ -116,16 +120,21 @@ def check_for_update() -> Optional[dict]:
     if not latest_tag:
         return None
 
-    latest_ver, _ = _split_tag(latest_tag)
+    latest_ver, latest_build = _split_tag(latest_tag)
     current_ver, _ = _split_tag(VERSION)
-    installed = _installed_tag()
 
     if latest_ver < current_ver:
         return None
     if latest_ver == current_ver:
-        # Same version line: only update if we have a recorded installed tag
-        # that differs (a newer build of the same version).
-        if installed == VERSION or installed == latest_tag:
+        if strict:
+            # Auto check: same version line == up to date. Ignore the Actions
+            # id so a new build of the installed version does not re-prompt.
+            return None
+        # Manual check: a newer build of the same version updates only when the
+        # recorded installed tag differs (don't re-download the exact build).
+        installed = _installed_tag().strip().lower().lstrip("v")
+        latest_norm = latest_tag.strip().lower().lstrip("v")
+        if installed == latest_norm or installed == current_ver:
             return None
 
     # Find the Windows zip asset for this app.

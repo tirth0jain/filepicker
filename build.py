@@ -39,6 +39,7 @@ def main() -> None:
         "--include-package=openpyxl",
         "--include-package=xlrd",
         "--include-package=pystray",
+        "--include-package=docx",
         "--output-dir=dist",
         "--product-name=FilePicker",
         "--file-version=" + VERSION,

@@ -10,6 +10,9 @@
     "Glass": "G"
   },
   "companies": ["Ruby Steel", "Ruby Steel Railings & Facades"],
+  "company_initials": {
+    "Ruby Steel": "RS"
+  },
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],

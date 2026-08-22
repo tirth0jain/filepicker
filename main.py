@@ -204,6 +204,8 @@ class FilePickerController:
             serial=payload["serial"],
             status=payload["status"],
             root=Path(self.config.root_directory),
+            initials_map=self.config.company_initials,
+            tags=payload.get("tags") or [],
         )
         result = organize(request)
 
@@ -403,7 +405,7 @@ class FilePickerController:
         """Manual 'Check for updates' from the tray (runs on the main thread)."""
         try:
             from updater import check_for_update, download_update
-            update = check_for_update()
+            update = check_for_update(strict=False)
             if not update:
                 self._set_status("Already up to date.")
                 return
@@ -418,7 +420,13 @@ class FilePickerController:
             print(f"[filepicker] manual update error: {exc}")
 
     def _schedule_update_checks(self) -> None:
-        """Check for updates periodically; stage downloads, install when idle."""
+        """Check for updates periodically, without blocking the UI.
+
+        The network check (and download) run on a background thread so the
+        popup loop never stalls. Only when a genuinely newer build is found do
+        we stage it and (once idle) show the updating dialog — never when the
+        app is already on the latest version.
+        """
         try:
             from updater import CHECK_INTERVAL, check_for_update, download_update
 
@@ -431,18 +439,18 @@ class FilePickerController:
                     except Exception:
                         pass
                     return
-                try:
-                    update = check_for_update()
-                    if update:
-                        staged = download_update(update)
-                        if staged:
-                            self._pending_update = (update, staged)
-                            print(
-                                f"[filepicker] update {update['version']} downloaded; "
-                                "will install once all files are processed"
-                            )
-                except Exception as exc:
-                    print(f"[filepicker] updater check error: {exc}")
+
+                def work() -> None:
+                    try:
+                        update = check_for_update()
+                        if update:
+                            staged = download_update(update)
+                            if staged:
+                                self._root.after(0, lambda: self._stage_update(update, staged))
+                    except Exception as exc:
+                        print(f"[filepicker] updater check error: {exc}")
+
+                threading.Thread(target=work, name="filepicker-updater", daemon=True).start()
                 try:
                     self._root.after(int(CHECK_INTERVAL * 1000), check)
                 except Exception:
@@ -451,6 +459,14 @@ class FilePickerController:
             self._root.after(1000, check)  # first check shortly after start
         except Exception as exc:
             print(f"[filepicker] updater unavailable: {exc}")
+
+    def _stage_update(self, update: dict, staged) -> None:
+        """Record a staged update (main thread) and apply once idle."""
+        self._pending_update = (update, staged)
+        print(
+            f"[filepicker] update {update['version']} downloaded; "
+            "will install once all files are processed"
+        )
 
 
 def main() -> None:

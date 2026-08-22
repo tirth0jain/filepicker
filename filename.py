@@ -62,6 +62,24 @@ def material_shortcodes(selected_names, materials_map) -> str:
     return "+".join(codes)
 
 
+def company_initials(company: str, initials_map: Optional[dict] = None) -> str:
+    """Return the initials used in the filename for a company.
+
+    Prefers an explicit mapping (``initials_map`` = {company: initials}) so the
+    user can override, then falls back to the first letter of each word:
+
+    - "Ruby Steel" -> "RS"
+    - "Ruby Steel Railings & Facades" -> "RSRF"
+    - "RSB" manual override -> "RSB"
+    """
+    if initials_map:
+        explicit = initials_map.get(company)
+        if explicit:
+            return sanitize(explicit)
+    words = [w for w in re.split(r"[\s&\-/]+", company) if w]
+    return sanitize("".join(w[0] for w in words).upper()) or sanitize(company)[:1].upper()
+
+
 def build_filename(
     company: str,
     doc_type: str,
@@ -72,18 +90,22 @@ def build_filename(
     status: str,
     extension: str,
     now: Optional[datetime.date] = None,
+    initials_map: Optional[dict] = None,
 ) -> str:
     """Assemble the fully formatted file name.
 
     ``status`` should be either ``"Received"`` or ``"Submitted"``.
     ``extension`` should be provided without a leading dot (e.g. ``"pdf"``).
+    ``initials_map`` optionally maps a company name to its short initials used
+    in the filename (otherwise initials are derived from the name).
     """
     fy = financial_year(now)
     codes = material_shortcodes(selected_materials, materials_map)
+    company_code = company_initials(company, initials_map)
 
     stem = "-".join(
         [
-            sanitize(company),
+            company_code,
             sanitize(doc_type),
             fy,
             sanitize(site_name),
