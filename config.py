@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -41,7 +42,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 def default_config_path() -> Path:
-    """Return the path to the config.json file next to this module."""
+    """Return the path to the config.json file next to the app.
+
+    When frozen (Nuitka standalone) the modules live inside the app folder, but
+    ``__file__`` can point at a temporary/embedded location; the config file
+    must always be found next to the running executable so the user's data is
+    read (and new files are created there).
+    """
+    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
+        return Path(sys.executable).resolve().parent / "config.json"
     return Path(__file__).resolve().parent / "config.json"
 
 
