@@ -142,6 +142,17 @@ class SearchableDropdown:
         except tk.TclError:
             self._menu_open = False
 
+    def _refresh(self) -> None:
+        """Re-render and re-post the dropdown so it live-updates as the user
+        types. Rebuilding the menu alone does not update the posted window."""
+        try:
+            if self._menu_open:
+                self._menu.unpost()
+        except tk.TclError:
+            pass
+        self._update_menu()
+        self._open()
+
     def _close(self) -> None:
         if self._menu_open:
             try:
@@ -201,8 +212,7 @@ class SearchableDropdown:
         self._choose(items[idx])
 
     def _on_key(self, _e=None) -> None:
-        self._update_menu()
-        self._open()
+        self._refresh()
 
 
 class FilePickerPopup:
@@ -274,7 +284,7 @@ class FilePickerPopup:
                 pass
             self._preview = None
             self.preview_pane.pack_forget()
-            self.window.geometry("560x720")
+            self.window.geometry("560x880")
             self.preview_btn.configure(text="👁 Preview")
             return
 
@@ -287,10 +297,10 @@ class FilePickerPopup:
         except Exception as exc:
             self._preview = None
             self.preview_pane.pack_forget()
-            self.window.geometry("560x720")
+            self.window.geometry("560x880")
             print(f"[filepicker] preview error: {exc}")
             return
-        self.window.geometry("1180x720")
+        self.window.geometry("1180x880")
         self.preview_btn.configure(text="✕ Close Preview")
 
     @staticmethod
@@ -307,7 +317,7 @@ class FilePickerPopup:
     def _build_window(self) -> None:
         self.window = ctk.CTkToplevel()
         self.window.title(f"FilePicker v{VERSION} — New Download")
-        self.window.geometry("560x720")
+        self.window.geometry("560x880")
         self.window.configure(fg_color=_BG)
         self.window.resizable(False, False)
         self.window.protocol("WM_DELETE_WINDOW", self._skip)
@@ -505,10 +515,9 @@ class FilePickerPopup:
         sites = self.config.sites_for(client)
         values = sites + [ADD_NEW_SITE_OPTION]
         self.site_dropdown.configure(values=values)
-        if sites:
-            self.site_dropdown.set(sites[0])
-        else:
-            self.site_dropdown.set(ADD_NEW_SITE_OPTION)
+        # Do NOT auto-select the first site — leave the box empty and let the
+        # user pick. The add-new sentinel stays as a valid choice.
+        self.site_dropdown.set("")
 
     # ------------------------------------------------------------------
     # Material chip rendering
@@ -560,10 +569,42 @@ class FilePickerPopup:
     def _toggle_material(self, name: str) -> None:
         if name in self._selected_materials:
             self._selected_materials.remove(name)
+            self._remove_tag(name)
         else:
             self._selected_materials.append(name)
+            self._add_tag(name)
         self._render_material_chips()
         self._refresh_preview()
+
+    # ------------------------------------------------------------------
+    # Auto tags (case-insensitive)
+    # ------------------------------------------------------------------
+    def _current_tags(self) -> List[str]:
+        """Parse the tags field into a list (deduped, case-insensitive)."""
+        raw = self._tags_var.get()
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        seen, out = set(), []
+        for p in parts:
+            key = p.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
+
+    def _set_tags(self, tags: List[str]) -> None:
+        self._tags_var.set(", ".join(tags))
+
+    def _add_tag(self, tag: str) -> None:
+        tags = self._current_tags()
+        if tag and not any(t.lower() == tag.lower() for t in tags):
+            tags.append(tag)
+            self._set_tags(tags)
+
+    def _remove_tag(self, tag: str) -> None:
+        tags = self._current_tags()
+        kept = [t for t in tags if t.lower() != tag.lower()]
+        if len(kept) != len(tags):
+            self._set_tags(kept)
 
     def _prompt_add_material(self) -> None:
         self._ask_text(

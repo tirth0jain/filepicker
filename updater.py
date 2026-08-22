@@ -260,6 +260,14 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         except OSError:
             pass
 
+    # Prefer the project config.json shipped in the new build, unless the
+    # installed app already has one (a config.json that exists next to the exe
+    # is the user's data and must never be replaced by the shipped default).
+    shipped_config = new_dir / "config.json"
+    installed_config = app_dir / "config.json"
+    if shipped_config.exists() and not installed_config.exists():
+        shutil.copy2(shipped_config, installed_config)
+
     # 2. Rename the running exe out of the way (Windows allows renaming the
     #    running image, but not deleting it).
     old_exe = app_dir / "FilePicker.exe.old"

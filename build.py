@@ -18,6 +18,7 @@ has no self-extractor, which removes the main heuristic trigger.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -71,6 +72,16 @@ def main() -> None:
             raise SystemExit("No .exe found in the dist folder.")
         exe = candidates[0]
     exe.rename(app_dir / "FilePicker.exe")
+
+    # Ship the project's config.json inside the app folder so the installed
+    # app starts with the real data (clients, companies, materials, paths)
+    # instead of seeding placeholder defaults on first run.
+    project_config = Path(__file__).resolve().parent / "config.json"
+    if project_config.exists():
+        shutil.copy2(project_config, app_dir / "config.json")
+        print(f"Bundled config.json into the build.")
+    else:
+        print("WARNING: config.json not found next to build.py; not bundled.")
 
     # Zip the app folder so it can be downloaded as one file and extracted.
     # Ship the current version tag as a marker file so the updater can record
