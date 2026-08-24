@@ -16,6 +16,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Remote live config — single source of truth for clients/sites.
+# Every popup fetches this so all users see the same data instantly.
+GITHUB_CONFIG_URL = "https://raw.githubusercontent.com/tirth0jain/filepicker/main/config.json"
+
 # Default configuration used the very first time the app runs.
 DEFAULT_CONFIG: Dict[str, Any] = {
     "watch_directory": str(Path.home() / "Downloads"),
@@ -110,6 +114,43 @@ class ConfigManager:
         with self._lock:
             self._loaded = False
             return self.load()
+
+    # ------------------------------------------------------------------
+    # Live GitHub config (single source of truth for all users)
+    # ------------------------------------------------------------------
+    def fetch_github_config(self, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+        """Fetch the live config from GitHub. Returns None on failure."""
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                GITHUB_CONFIG_URL, headers={"User-Agent": "FilePicker"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, dict) and "clients" in data:
+                return data
+        except Exception as exc:
+            print(f"[config] GitHub live config fetch failed: {exc}")
+        return None
+
+    def apply_github_config(self, remote: Dict[str, Any]) -> bool:
+        """Merge the live GitHub config into the local one.
+
+        Only the shared catalog keys are overwritten (companies, clients,
+        materials, doc_types, company_initials). Local paths
+        (watch_directory, root_directory, auto_start) are never clobbered.
+        Returns True if anything changed and was saved.
+        """
+        with self._lock:
+            changed = False
+            for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
+                if key in remote and remote[key] != self._data.get(key):
+                    self._data[key] = remote[key]
+                    changed = True
+            if changed:
+                self.save()
+            return changed
 
     # ------------------------------------------------------------------
     # Persistence

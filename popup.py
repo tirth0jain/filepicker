@@ -57,6 +57,7 @@ class SearchableDropdown(ctk.CTkFrame):
 
     Uses a Listbox in an overrideredirect Toplevel so the dropdown never
     steals keyboard focus — the user keeps typing while the list updates live.
+    Shows at most 5 matches live as you type (no Enter needed).
     Replaces the plain CTkOptionMenu with the same interface the popup expects:
     ``get()``, ``configure(values=...)``, ``set(value)`` and an ``on_change``
     callback.
@@ -69,7 +70,6 @@ class SearchableDropdown(ctk.CTkFrame):
         self._value = ""
         self._dropdown_open = False
         self._highlight_index = -1
-        self._after_id = None
 
         self.entry = ctk.CTkEntry(
             self, fg_color=_BG_FIELD, border_color=_BG_FIELD,
@@ -82,26 +82,9 @@ class SearchableDropdown(ctk.CTkFrame):
         self.pack(fill="x", pady=(0, 12))
 
         # Dropdown window (overrideredirect Toplevel with a Listbox)
-        self._top = tk.Toplevel(self)
-        self._top.withdraw()
-        self._top.overrideredirect(True)
-        self._top.attributes("-topmost", True)
-        # Do not take focus away from the entry when showing.
-        try:
-            self._top.attributes("-type", "tooltip")
-        except tk.TclError:
-            pass
-        self._top.configure(bg=_BG_FIELD)
-        self._listbox = tk.Listbox(
-            self._top, bg=_BG_FIELD, fg=_TEXT,
-            selectbackground=_ACCENT, selectforeground="#ffffff",
-            activestyle="none", highlightthickness=0, bd=0,
-            font=tkfont.Font(family="Segoe UI", size=11),
-            exportselection=False,
-        )
-        self._listbox.pack(fill="both", expand=True, padx=1, pady=1)
-        self._listbox.bind("<ButtonRelease-1>", self._on_list_click)
-        self._listbox.bind("<Motion>", lambda e: None)
+        # Created lazily on first open so winfo_toplevel() is valid.
+        self._top = None
+        self._listbox = None
 
         self.entry.bind("<KeyRelease>", self._on_key)
         self.entry.bind("<Return>", self._on_return)
@@ -115,6 +98,26 @@ class SearchableDropdown(ctk.CTkFrame):
         # Keep dropdown positioned when popup moves
         self.bind("<Configure>", lambda _e: self._reposition() if self._dropdown_open else None)
 
+    def _ensure_dropdown(self) -> None:
+        if self._top is not None and self._top.winfo_exists():
+            return
+        top = tk.Toplevel(self.winfo_toplevel())
+        top.withdraw()
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg=_BG_FIELD)
+        lb = tk.Listbox(
+            top, bg=_BG_FIELD, fg=_TEXT,
+            selectbackground=_ACCENT, selectforeground="#ffffff",
+            activestyle="none", highlightthickness=0, bd=0,
+            font=tkfont.Font(family="Segoe UI", size=11),
+            exportselection=False,
+        )
+        lb.pack(fill="both", expand=True, padx=1, pady=1)
+        lb.bind("<ButtonRelease-1>", self._on_list_click)
+        self._top = top
+        self._listbox = lb
+
     # ------------------------------------------------------------------
     def get(self) -> str:
         """The currently displayed value: the selected match if set, otherwise
@@ -123,8 +126,6 @@ class SearchableDropdown(ctk.CTkFrame):
         matches an existing value case-insensitively."""
         typed = self.entry.get().strip()
         if typed:
-            # If typed text matches a value case-insensitively, return the
-            # canonical value (e.g. "alpha infra" -> "Alpha Infra").
             for v in self._values:
                 if v.lower() == typed.lower():
                     return v
@@ -161,23 +162,39 @@ class SearchableDropdown(ctk.CTkFrame):
             matches = [v for v in self._values if text in v.lower()]
         return matches[:_MAX_DROPDOWN_RESULTS]
 
-    def _full_matches(self) -> list:
-        text = self.entry.get().strip().lower()
-        if not text:
-            return list(self._values)
-        return [v for v in self._values if text in v.lower()]
+    def _ensure_dropdown(self) -> None:
+        if self._top is not None and self._top.winfo_exists():
+            return
+        top = tk.Toplevel(self.winfo_toplevel())
+        top.withdraw()
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg=_BG_FIELD)
+        lb = tk.Listbox(
+            top, bg=_BG_FIELD, fg=_TEXT,
+            selectbackground=_ACCENT, selectforeground="#ffffff",
+            activestyle="none", highlightthickness=0, bd=0,
+            font=tkfont.Font(family="Segoe UI", size=11),
+            exportselection=False,
+        )
+        lb.pack(fill="both", expand=True, padx=1, pady=1)
+        lb.bind("<ButtonRelease-1>", self._on_list_click)
+        self._top = top
+        self._listbox = lb
 
     def _show_all(self) -> None:
+        self._ensure_dropdown()
         self._update_listbox()
         self._open()
 
     def _open(self) -> None:
+        self._ensure_dropdown()
         if self._dropdown_open:
             self._update_listbox()
             self._reposition()
             return
         self._update_listbox()
-        if self._listbox.size() == 0:
+        if self._listbox.size() == 0 or self._listbox.get(0) == "(no matches)":
             return
         self._reposition()
         try:
@@ -211,26 +228,22 @@ class SearchableDropdown(ctk.CTkFrame):
             self._highlight_index = -1
 
     def _on_focus_out(self, _e=None) -> None:
-        # Delay so a click on the listbox registers before we hide.
         self.after(180, self._close_if_not_focused)
 
     def _close_if_not_focused(self) -> None:
         try:
+            if self._top is None or not self._top.winfo_exists():
+                self._close()
+                return
             focused = self.focus_displayof()
             if focused is not None and str(focused).startswith(str(self._top)):
                 return
-            # Also check if the listbox itself has focus
-            if self._listbox is not None:
-                try:
-                    if self._listbox.focus_get() is not None and str(self._listbox.focus_get()).startswith(str(self._top)):
-                        return
-                except tk.TclError:
-                    pass
         except tk.TclError:
             pass
         self._close()
 
     def _update_listbox(self) -> None:
+        self._ensure_dropdown()
         text = self.entry.get().strip().lower()
         if not text:
             matches = list(self._values)
@@ -247,7 +260,6 @@ class SearchableDropdown(ctk.CTkFrame):
         if len(matches) > _MAX_DROPDOWN_RESULTS:
             self._listbox.insert("end", f"… {len(matches) - _MAX_DROPDOWN_RESULTS} more (keep typing)")
             self._listbox.itemconfig("end", fg=_TEXT_MUTED)
-        # Highlight first real item
         if self._listbox.size() > 0:
             self._highlight_index = 0
             self._listbox.selection_clear(0, "end")
@@ -278,9 +290,7 @@ class SearchableDropdown(ctk.CTkFrame):
         n = self._listbox.size()
         if n == 0:
             return "break"
-        # Skip disabled "(no matches)" / "… more" rows
         self._highlight_index = (self._highlight_index + delta) % n
-        # Skip disabled last row
         val = self._listbox.get(self._highlight_index)
         if val.startswith("… ") or val == "(no matches)":
             self._highlight_index = (self._highlight_index + delta) % n
@@ -300,13 +310,12 @@ class SearchableDropdown(ctk.CTkFrame):
         return ""
 
     def _on_key(self, _e=None) -> None:
-        # Live search: re-filter on every keystroke (no Enter needed).
-        # Keep entry focused; listbox never steals it.
         self._update_listbox()
         if self._listbox.size() > 0 and self._listbox.get(0) != "(no matches)":
             self._reposition()
             if not self._dropdown_open:
                 try:
+                    self._ensure_dropdown()
                     self._top.deiconify()
                     self._top.lift()
                     self._dropdown_open = True
@@ -315,17 +324,13 @@ class SearchableDropdown(ctk.CTkFrame):
             self.entry.focus_set()
         else:
             self._close()
-        # Do NOT return "break" — let the key go to the entry
 
     def _on_focus(self, _e=None) -> None:
-        """Show the dropdown as soon as the field is focused, so typing starts
-        from a visible, live list (no need to press Enter first)."""
         self._update_listbox()
-        if self._listbox.size() > 0:
+        if self._listbox.size() > 0 and self._listbox.get(0) != "(no matches)":
             self._open()
 
     def _key_pressed(self, _e=None) -> None:
-        """Bound to a <Key> event: same live refresh as typing."""
         self._on_key()
 
 
