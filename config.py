@@ -122,9 +122,20 @@ class ConfigManager:
         """Fetch the live config from GitHub. Returns None on failure."""
         try:
             import urllib.request
+            import time as _time
 
+            url = GITHUB_CONFIG_URL
+            # Bust raw.githubusercontent CDN cache (5 min) so a push shows up
+            # within one poll interval instead of waiting for CDN expiry.
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}_t={int(_time.time())}"
             req = urllib.request.Request(
-                GITHUB_CONFIG_URL, headers={"User-Agent": "FilePicker"}
+                url,
+                headers={
+                    "User-Agent": "FilePicker",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                },
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -133,6 +144,13 @@ class ConfigManager:
         except Exception as exc:
             print(f"[config] GitHub live config fetch failed: {exc}")
         return None
+
+    def sync_from_github(self, timeout: float = 5.0) -> bool:
+        """Fetch and apply the live config if it changed. Returns True if updated."""
+        remote = self.fetch_github_config(timeout=timeout)
+        if remote is None:
+            return False
+        return self.apply_github_config(remote)
 
     def apply_github_config(self, remote: Dict[str, Any]) -> bool:
         """Merge the live GitHub config into the local one.

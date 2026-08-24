@@ -13,6 +13,7 @@ captures the metadata needed to rename and route the file:
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -33,6 +34,9 @@ ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 # is live-filtered as the user types, so a long client/site list only ever
 # shows the first few closest matches instead of dumping the entire menu.
 _MAX_DROPDOWN_RESULTS = 5
+
+# How often the open popup polls GitHub for live config (ms).
+_CONFIG_POLL_MS = 30_000
 
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
@@ -153,6 +157,66 @@ class SearchableDropdown(ctk.CTkFrame):
                 pass
         return self
 
+    def update_values_preserve_typed(self, new_values) -> None:
+        """Update dropdown values without losing what the user is currently typing.
+
+        Unlike ``configure(values=...)`` which clears the entry when the selected
+        value is no longer valid, this keeps the raw entry text (a partial filter
+        like ``\"LODH\"``) and only resolves to canonical case when the typed text
+        exactly matches a new value.
+        """
+        typed = self.entry.get()
+        typed_stripped = typed.strip()
+        old_value = self._value
+        self._values = list(new_values)
+
+        # Decide what to show in the entry:
+        # - If user is actively typing (entry != old canonical value), keep typed text
+        #   (unless typed exactly matches a new canonical value, then canonicalize).
+        # - Otherwise (entry == canonical or empty), show canonical if still valid.
+        sentinels = {ADD_NEW_CLIENT_OPTION, ADD_NEW_SITE_OPTION,
+                     ADD_NEW_COMPANY_OPTION, ADD_NEW_MATERIAL_OPTION}
+        # Check for exact case-insensitive match to a new value
+        exact_match = None
+        if typed_stripped:
+            for v in self._values:
+                if v in sentinels:
+                    continue
+                if v.lower() == typed_stripped.lower():
+                    exact_match = v
+                    break
+
+        typing = typed != old_value
+        if exact_match is not None:
+            # Typed is an exact (case-insensitive) match to a new value — canonicalize
+            self._value = exact_match
+            self.entry.delete(0, "end")
+            self.entry.insert(0, exact_match)
+        elif typing:
+            # User is actively typing a partial filter (or cleared to empty) — preserve typed
+            if old_value not in self._values:
+                self._value = ""
+            # else keep old_value as-is for get() fallback when entry empty
+            self.entry.delete(0, "end")
+            self.entry.insert(0, typed)
+        else:
+            # Not typing (entry == canonical) — show canonical if still valid
+            if self._value not in self._values:
+                self._value = ""
+            self.entry.delete(0, "end")
+            if self._value:
+                self.entry.insert(0, self._value)
+            elif typed and typed_stripped in sentinels:
+                self.entry.insert(0, typed)
+        self._close()
+        # If dropdown was open, refresh its listbox to reflect new values
+        if self._dropdown_open:
+            try:
+                self._update_listbox()
+                self._reposition()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     def _visible_items(self) -> list:
         text = self.entry.get().strip().lower()
@@ -161,26 +225,6 @@ class SearchableDropdown(ctk.CTkFrame):
         else:
             matches = [v for v in self._values if text in v.lower()]
         return matches[:_MAX_DROPDOWN_RESULTS]
-
-    def _ensure_dropdown(self) -> None:
-        if self._top is not None and self._top.winfo_exists():
-            return
-        top = tk.Toplevel(self.winfo_toplevel())
-        top.withdraw()
-        top.overrideredirect(True)
-        top.attributes("-topmost", True)
-        top.configure(bg=_BG_FIELD)
-        lb = tk.Listbox(
-            top, bg=_BG_FIELD, fg=_TEXT,
-            selectbackground=_ACCENT, selectforeground="#ffffff",
-            activestyle="none", highlightthickness=0, bd=0,
-            font=tkfont.Font(family="Segoe UI", size=11),
-            exportselection=False,
-        )
-        lb.pack(fill="both", expand=True, padx=1, pady=1)
-        lb.bind("<ButtonRelease-1>", self._on_list_click)
-        self._top = top
-        self._listbox = lb
 
     def _show_all(self) -> None:
         self._ensure_dropdown()
@@ -376,6 +420,10 @@ class FilePickerPopup:
         self.window.attributes("-topmost", True)
         self.window.lift()
         self.window.focus_force()
+
+        # Live config: refresh while open if someone pushes a new clients/sites list.
+        self._config_poll_after = None
+        self._start_config_poll()
 
     def _set_banner(self) -> None:
         try:
@@ -629,6 +677,162 @@ class FilePickerPopup:
         # Do NOT auto-select the first site — leave the box empty and let the
         # user pick. The add-new sentinel stays as a valid choice.
         self.site_dropdown.set("")
+
+    # ------------------------------------------------------------------
+    # Live config refresh (preserves what the user is typing)
+    # ------------------------------------------------------------------
+    def refresh_from_config(self) -> bool:
+        """Reload dropdowns from (possibly fresh) config without losing typed text.
+
+        Called every :data:`_CONFIG_POLL_MS` and also when the controller detects
+        a live GitHub change while the popup is open. Returns True if the UI
+        changed.
+        """
+        try:
+            data = self.config.load()
+        except Exception:
+            return False
+
+        changed = False
+
+        # -- Companies --------------------------------------------------
+        companies = list(data.get("companies", []))
+        try:
+            cur_vals = list(self.company_combo.cget("values"))
+            cur_no_sentinel = [c for c in cur_vals if c != ADD_NEW_COMPANY_OPTION]
+        except Exception:
+            cur_no_sentinel = []
+        if companies != cur_no_sentinel:
+            cur_company = self._company_var.get()
+            new_vals = companies + [ADD_NEW_COMPANY_OPTION]
+            self.company_combo.configure(values=new_vals)
+            if cur_company not in companies and cur_company != ADD_NEW_COMPANY_OPTION:
+                if companies:
+                    self._company_var.set(companies[0])
+                else:
+                    self._company_var.set(ADD_NEW_COMPANY_OPTION)
+            # if cur_company still valid, keep it as-is (no set needed)
+            changed = True
+
+        # -- Doc types --------------------------------------------------
+        doc_types = list(data.get("doc_types", ["DC"]))
+        try:
+            cur_doc_vals = list(self.doc_type_combo.cget("values"))
+        except Exception:
+            cur_doc_vals = []
+        if doc_types != cur_doc_vals:
+            cur_doc = self._doc_type_var.get()
+            self.doc_type_combo.configure(values=doc_types)
+            if cur_doc in doc_types:
+                self._doc_type_var.set(cur_doc)
+            elif doc_types:
+                self._doc_type_var.set(doc_types[0])
+            changed = True
+
+        # -- Materials --------------------------------------------------
+        new_materials = dict(data.get("materials", {}))
+        if new_materials != self._materials_map:
+            self._materials_map = new_materials
+            # Keep only selected materials that still exist
+            self._selected_materials = [m for m in self._selected_materials if m in new_materials]
+            self._render_material_chips()
+            changed = True
+
+        # -- Clients ----------------------------------------------------
+        clients = data.get("clients", {})
+        client_names = list(clients.keys())
+        new_client_values = client_names + [ADD_NEW_CLIENT_OPTION]
+        try:
+            cur_client_vals = list(self.client_dropdown._values)
+        except Exception:
+            cur_client_vals = []
+        if set(new_client_values) != set(cur_client_vals):
+            self.client_dropdown.update_values_preserve_typed(new_client_values)
+            resolved = self.client_dropdown.get()
+            if resolved in client_names:
+                self._client_var.set(resolved)
+            # if resolved is a partial typed filter, leave _client_var as-is
+            changed = True
+
+        # -- Sites (always refresh — sites for the current client may have changed) --
+        # Determine effective client for sites: prefer _client_var if it still exists
+        effective_client = self._client_var.get()
+        if effective_client not in clients:
+            resolved_client = self.client_dropdown.get()
+            if resolved_client in clients:
+                effective_client = resolved_client
+                # keep _client_var in sync when the dropdown resolved to a real client
+                self._client_var.set(resolved_client)
+            else:
+                # No valid client — show only the sentinel; preserve whatever the user typed in site
+                effective_client = ""
+
+        sites = self.config.sites_for(effective_client) if effective_client else []
+        new_site_values = sites + [ADD_NEW_SITE_OPTION]
+        try:
+            cur_site_vals = list(self.site_dropdown._values)
+        except Exception:
+            cur_site_vals = []
+        if set(new_site_values) != set(cur_site_vals):
+            self.site_dropdown.update_values_preserve_typed(new_site_values)
+            changed = True
+        elif effective_client and not self.site_dropdown.entry.get().strip():
+            # Ensure empty site box stays empty (populate already did)
+            pass
+
+        if changed:
+            self._refresh_preview()
+            # Refresh open dropdown listboxes if filtered
+            try:
+                if self.client_dropdown._dropdown_open:
+                    self.client_dropdown._update_listbox()
+                    self.client_dropdown._reposition()
+                if self.site_dropdown._dropdown_open:
+                    self.site_dropdown._update_listbox()
+                    self.site_dropdown._reposition()
+            except Exception:
+                pass
+
+        return changed
+
+    def _start_config_poll(self) -> None:
+        """Begin polling GitHub for live config while the popup is open."""
+        self._config_poll_after = None
+        # schedule first poll after _CONFIG_POLL_MS
+        try:
+            self._config_poll_after = self.window.after(_CONFIG_POLL_MS, self._poll_config)
+        except Exception:
+            pass
+
+    def _stop_config_poll(self) -> None:
+        after = getattr(self, "_config_poll_after", None)
+        if after is not None:
+            try:
+                self.window.after_cancel(after)
+            except Exception:
+                pass
+            self._config_poll_after = None
+
+    def _poll_config(self) -> None:
+        """Background fetch → apply → refresh (never blocks the UI)."""
+        def work() -> None:
+            try:
+                changed = self.config.sync_from_github(timeout=5.0)
+                if changed:
+                    try:
+                        self.window.after(0, self.refresh_from_config)
+                    except tk.TclError:
+                        pass
+            except Exception as exc:
+                print(f"[filepicker] popup config poll error: {exc}")
+            finally:
+                try:
+                    if self.window.winfo_exists():
+                        self._config_poll_after = self.window.after(_CONFIG_POLL_MS, self._poll_config)
+                except tk.TclError:
+                    pass
+
+        threading.Thread(target=work, name="filepicker-popup-config", daemon=True).start()
 
     # ------------------------------------------------------------------
     # Material chip rendering
@@ -910,6 +1114,11 @@ class FilePickerPopup:
         self.on_skip()
 
     def _release(self) -> None:
+        # Stop live config polling first so no after() fires on a destroyed window.
+        try:
+            self._stop_config_poll()
+        except Exception:
+            pass
         # Close the preview first so it releases the file handle; otherwise the
         # source file stays locked on Windows and can't be deleted afterwards.
         if self._preview is not None:
@@ -918,6 +1127,12 @@ class FilePickerPopup:
             except Exception:
                 pass
             self._preview = None
+        # Close any dropdown popups
+        try:
+            self.client_dropdown._close()
+            self.site_dropdown._close()
+        except Exception:
+            pass
         try:
             self.window.grab_release()
         except tk.TclError:

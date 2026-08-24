@@ -48,6 +48,10 @@ _DANGER = "#ff6b6b"
 # automatically (the app then swaps the exe and relaunches on its own).
 _UPDATE_APPLY_DELAY_MS = 3000
 
+# How often to poll GitHub for the live config (seconds). With cache-busting
+# a push shows up within one interval even if the popup is already open.
+_CONFIG_SYNC_INTERVAL = 30
+
 
 def show_update_notice(root, notice: str) -> None:
     """Show a small popup telling the user the app was updated."""
@@ -92,6 +96,7 @@ class FilePickerController:
         self._ui_commands: "queue.Queue[str]" = queue.Queue()  # tray -> main thread
         self._tray = None
         self._root = None
+        self._current_popup = None  # the popup currently on screen (so live config can refresh it)
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -173,8 +178,12 @@ class FilePickerController:
             on_submit=self._handle_submit,
             on_skip=self._handle_skip,
         )
-        # Blocking until the modal is dismissed.
-        popup.show()
+        self._current_popup = popup
+        try:
+            # Blocking until the modal is dismissed.
+            popup.show()
+        finally:
+            self._current_popup = None
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
@@ -365,6 +374,7 @@ class FilePickerController:
 
         self._root.after(100, self._poll_popups)
         self._schedule_update_checks()
+        self._schedule_config_sync()
         self._start_tray()
         try:
             self._root.mainloop()
@@ -466,6 +476,47 @@ class FilePickerController:
             f"[filepicker] update {update['version']} downloaded; "
             "will install once all files are processed"
         )
+
+    def _schedule_config_sync(self) -> None:
+        """Poll GitHub for live config every :data:`_CONFIG_SYNC_INTERVAL` seconds.
+
+        Works even while a popup is open: the network fetch runs on a background
+        thread and, if the config changed, refreshes the open popup in place
+        (preserving what the user is typing) via ``popup.refresh_from_config()``.
+        """
+        def check() -> None:
+            def work() -> None:
+                try:
+                    changed = self.config.sync_from_github(timeout=5.0)
+                    if changed:
+                        def do_refresh() -> None:
+                            popup = getattr(self, "_current_popup", None)
+                            if popup is not None:
+                                try:
+                                    if popup.window.winfo_exists():
+                                        popup.refresh_from_config()
+                                except Exception as exc:
+                                    print(f"[filepicker] live config refresh error: {exc}")
+                            print("[filepicker] live config updated from GitHub (background)")
+
+                        try:
+                            self._root.after(0, do_refresh)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    print(f"[filepicker] config sync error: {exc}")
+                finally:
+                    try:
+                        self._root.after(int(_CONFIG_SYNC_INTERVAL * 1000), check)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=work, name="filepicker-config-sync", daemon=True).start()
+
+        try:
+            self._root.after(2000, check)
+        except Exception as exc:
+            print(f"[filepicker] config sync unavailable: {exc}")
 
 
 def main() -> None:
