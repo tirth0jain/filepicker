@@ -81,27 +81,30 @@ def _is_frozen() -> bool:
 
 
 def _current_exe() -> Path:
-    """Path of the running executable (or main.py in dev)."""
+    """Path of the running executable (or main.py in dev).
+
+    Prefers a ``FilePicker.exe`` next to the interpreter/this file — this is
+    the correct exe even when frozen detection fails (the bug the user hit:
+    ``main.py -> FilePicker.exe.old`` on a frozen install).
+    """
+    # 1. FilePicker.exe next to the running image — most reliable for frozen.
+    try:
+        cand = Path(sys.executable).with_name("FilePicker.exe")
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+    try:
+        cand2 = Path(__file__).resolve().parent / "FilePicker.exe"
+        if cand2.exists():
+            return cand2
+    except Exception:
+        pass
     if _is_frozen():
-        exe = Path(sys.executable)
-        # Defensive: if sys.executable somehow still points at python, try the
-        # sibling FilePicker.exe next to this file or next to the interpreter.
-        if exe.name.lower() in ("python.exe", "pythonw.exe"):
-            cand = exe.with_name("FilePicker.exe")
-            if cand.exists():
-                return cand
-            cand2 = Path(__file__).resolve().parent / "FilePicker.exe"
-            if cand2.exists():
-                return cand2
-        return exe
-    # Dev mode: main.py should exist; if it doesn't (e.g. stale frozen
-    # detection), fall back to a sibling FilePicker.exe if present.
+        return Path(sys.executable)
     main_py = Path(__file__).resolve().parent / "main.py"
     if main_py.exists():
         return main_py
-    cand = Path(sys.executable).with_name("FilePicker.exe")
-    if cand.exists():
-        return cand
     return Path(sys.executable)
 
 
