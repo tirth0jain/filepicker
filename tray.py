@@ -30,9 +30,10 @@ def _build_icon_image() -> "Image.Image":
 class TrayIcon:
     """Owns the pystray icon and forwards menu actions to callbacks."""
 
-    def __init__(self, on_check_update, on_quit) -> None:
+    def __init__(self, on_check_update, on_quit, on_search=None) -> None:
         self._on_check_update = on_check_update
         self._on_quit = on_quit
+        self._on_search = on_search
         self._icon = None
 
     def start(self) -> None:
@@ -47,6 +48,7 @@ class TrayIcon:
             icon=_build_icon_image(),
             title="FilePicker",
             menu=Menu(
+                MenuItem("Search files…", self._search),
                 MenuItem("Check for updates", self._check_update),
                 MenuItem("Quit", self._quit),
             ),
@@ -61,6 +63,10 @@ class TrayIcon:
                 self._icon.stop()
             except Exception:
                 pass
+
+    def _search(self, _icon, _item) -> None:
+        if self._on_search:
+            self._on_search()
 
     def _check_update(self, _icon, _item) -> None:
         self._on_check_update()

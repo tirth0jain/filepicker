@@ -52,61 +52,80 @@ _SUCCESS = "#7ad17a"
 _DANGER = "#ff6b6b"
 
 
-class SearchableDropdown:
+class SearchableDropdown(ctk.CTkFrame):
     """A searchable combo: a text entry that filters a dropdown of choices.
 
-    Used for Client and Site so the user can type to jump to an entry (useful
-    when the lists grow). Replaces the plain CTkOptionMenu with the same
-    interface the popup expects: ``get()``, ``configure(values=...)``,
-    ``set(value)`` and an ``on_change`` callback.
+    Uses a Listbox in an overrideredirect Toplevel so the dropdown never
+    steals keyboard focus — the user keeps typing while the list updates live.
+    Replaces the plain CTkOptionMenu with the same interface the popup expects:
+    ``get()``, ``configure(values=...)``, ``set(value)`` and an ``on_change``
+    callback.
     """
 
     def __init__(self, parent, values, on_change, width=None) -> None:
-        self.parent = parent
+        super().__init__(parent, fg_color="transparent")
         self._values = list(values)
         self._on_change = on_change
         self._value = ""
+        self._dropdown_open = False
+        self._highlight_index = -1
+        self._after_id = None
 
         self.entry = ctk.CTkEntry(
-            parent, fg_color=_BG_FIELD, border_color=_BG_FIELD,
+            self, fg_color=_BG_FIELD, border_color=_BG_FIELD,
             text_color=_TEXT, placeholder_text="Search or select…",
         )
         if width:
             self.entry.configure(width=width)
         self.entry.pack(fill="x", pady=(0, 12))
 
-        self._menu = tk.Menu(
-            parent, tearoff=0, bg=_BG_FIELD, fg=_TEXT,
-            activebackground=_ACCENT, activeforeground="#ffffff",
-            font=tkfont.nametofont("TkDefaultFont"),
+        # Dropdown window (overrideredirect Toplevel with a Listbox)
+        self._top = tk.Toplevel(self)
+        self._top.withdraw()
+        self._top.overrideredirect(True)
+        self._top.attributes("-topmost", True)
+        # Do not take focus away from the entry when showing.
+        try:
+            self._top.attributes("-type", "tooltip")
+        except tk.TclError:
+            pass
+        self._top.configure(bg=_BG_FIELD)
+        self._listbox = tk.Listbox(
+            self._top, bg=_BG_FIELD, fg=_TEXT,
+            selectbackground=_ACCENT, selectforeground="#ffffff",
+            activestyle="none", highlightthickness=0, bd=0,
+            font=tkfont.Font(family="Segoe UI", size=11),
+            exportselection=False,
         )
-        self._menu_open = False
+        self._listbox.pack(fill="both", expand=True, padx=1, pady=1)
+        self._listbox.bind("<ButtonRelease-1>", self._on_list_click)
+        self._listbox.bind("<Motion>", lambda e: None)
 
         self.entry.bind("<KeyRelease>", self._on_key)
-        self.entry.bind("<Return>", self._select_highlighted)
+        self.entry.bind("<Return>", self._on_return)
         self.entry.bind("<Escape>", lambda _e: self._close())
-        self.entry.bind("<Down>", lambda _e: self._highlight(1))
-        self.entry.bind("<Up>", lambda _e: self._highlight(-1))
-        self.entry.bind("<FocusIn>", self._on_focus)
-        self.entry.bind("<FocusOut>", lambda _e: self.entry.after(150, self._close))
-        self.entry.bind("<Button-1>", lambda _e: self._show_all())
+        self.entry.bind("<Down>", lambda _e: self._move(1))
+        self.entry.bind("<Up>", lambda _e: self._move(-1))
+        self.entry.bind("<FocusIn>", lambda _e: self._show_all())
+        self.entry.bind("<FocusOut>", self._on_focus_out)
+        self.entry.bind("<Button-1>", lambda _e: self.after(10, self._show_all))
 
-        self._highlight_index = -1
-        self._open()
-
-    def _on_focus(self, _e=None) -> None:
-        """Show the dropdown as soon as the field is focused, so typing starts
-        from a visible, live list (no need to press Enter first)."""
-        self._update_menu()
-        self._open()
+        # Keep dropdown positioned when popup moves
+        self.bind("<Configure>", lambda _e: self._reposition() if self._dropdown_open else None)
 
     # ------------------------------------------------------------------
     def get(self) -> str:
         """The currently displayed value: the selected match if set, otherwise
         whatever the user typed (so typing + Save without clicking still uses
-        the typed value)."""
+        the typed value). Resolves typed text to the canonical case when it
+        matches an existing value case-insensitively."""
         typed = self.entry.get().strip()
         if typed:
+            # If typed text matches a value case-insensitively, return the
+            # canonical value (e.g. "alpha infra" -> "Alpha Infra").
+            for v in self._values:
+                if v.lower() == typed.lower():
+                    return v
             return typed
         return self._value
 
@@ -121,8 +140,15 @@ class SearchableDropdown:
             if self._value not in self._values:
                 self._value = ""
             self.entry.delete(0, "end")
+            if self._value:
+                self.entry.insert(0, self._value)
+            self._close()
         for key, val in kwargs.items():
-            getattr(self.entry, "configure")(**{key: val})
+            try:
+                getattr(self.entry, "configure")(**{key: val})
+            except Exception:
+                pass
+        return self
 
     # ------------------------------------------------------------------
     def _visible_items(self) -> list:
@@ -133,103 +159,172 @@ class SearchableDropdown:
             matches = [v for v in self._values if text in v.lower()]
         return matches[:_MAX_DROPDOWN_RESULTS]
 
+    def _full_matches(self) -> list:
+        text = self.entry.get().strip().lower()
+        if not text:
+            return list(self._values)
+        return [v for v in self._values if text in v.lower()]
+
     def _show_all(self) -> None:
-        self._update_menu()
+        self._update_listbox()
         self._open()
 
     def _open(self) -> None:
-        if self._menu_open:
+        if self._dropdown_open:
+            self._update_listbox()
+            self._reposition()
             return
-        self._menu_open = True
+        self._update_listbox()
+        if self._listbox.size() == 0:
+            return
+        self._reposition()
         try:
-            self._menu.post(
-                self.entry.winfo_rootx(),
-                self.entry.winfo_rooty() + self.entry.winfo_height(),
-            )
+            self._top.deiconify()
+            self._top.lift()
+            self._dropdown_open = True
+            self.entry.focus_set()
         except tk.TclError:
-            self._menu_open = False
+            self._dropdown_open = False
 
-    def _refresh(self) -> None:
-        """Re-render and re-post the dropdown so it live-updates as the user
-        types. Rebuilding the menu alone does not update the posted window."""
+    def _reposition(self) -> None:
         try:
-            if self._menu_open:
-                self._menu.unpost()
+            x = self.entry.winfo_rootx()
+            y = self.entry.winfo_rooty() + self.entry.winfo_height() + 2
+            w = self.entry.winfo_width()
+            h = self._listbox.size() * 22 + 4
+            h = min(h, _MAX_DROPDOWN_RESULTS * 22 + 4)
+            if h < 22:
+                h = 22
+            self._top.geometry(f"{w}x{h}+{x}+{y}")
         except tk.TclError:
             pass
-        self._update_menu()
-        self._open()
 
     def _close(self) -> None:
-        if self._menu_open:
+        if self._dropdown_open:
             try:
-                self._menu.unpost()
+                self._top.withdraw()
             except tk.TclError:
                 pass
-            self._menu_open = False
+            self._dropdown_open = False
+            self._highlight_index = -1
 
-    def _update_menu(self, _items=None) -> None:
-        # Filter from the full value list so we know the total match count
-        # (the "more" hint) while only showing the first few rows.
+    def _on_focus_out(self, _e=None) -> None:
+        # Delay so a click on the listbox registers before we hide.
+        self.after(180, self._close_if_not_focused)
+
+    def _close_if_not_focused(self) -> None:
+        try:
+            focused = self.focus_displayof()
+            if focused is not None and str(focused).startswith(str(self._top)):
+                return
+            # Also check if the listbox itself has focus
+            if self._listbox is not None:
+                try:
+                    if self._listbox.focus_get() is not None and str(self._listbox.focus_get()).startswith(str(self._top)):
+                        return
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass
+        self._close()
+
+    def _update_listbox(self) -> None:
         text = self.entry.get().strip().lower()
         if not text:
             matches = list(self._values)
         else:
             matches = [v for v in self._values if text in v.lower()]
-
-        self._menu.delete(0, "end")
+        self._listbox.delete(0, "end")
         self._highlight_index = -1
         if not matches:
-            self._menu.add_command(label="(no matches)", state="disabled")
+            self._listbox.insert("end", "(no matches)")
+            self._listbox.itemconfig(0, fg=_TEXT_MUTED)
             return
         for item in matches[:_MAX_DROPDOWN_RESULTS]:
-            self._menu.add_command(label=item, command=lambda v=item: self._choose(v))
+            self._listbox.insert("end", item)
         if len(matches) > _MAX_DROPDOWN_RESULTS:
-            self._menu.add_command(
-                label=f"… {len(matches) - _MAX_DROPDOWN_RESULTS} more (keep typing)",
-                state="disabled",
-            )
-        self._menu.entryconfigure(0, background=_ACCENT, foreground="#ffffff")
+            self._listbox.insert("end", f"… {len(matches) - _MAX_DROPDOWN_RESULTS} more (keep typing)")
+            self._listbox.itemconfig("end", fg=_TEXT_MUTED)
+        # Highlight first real item
+        if self._listbox.size() > 0:
+            self._highlight_index = 0
+            self._listbox.selection_clear(0, "end")
+            self._listbox.selection_set(0)
+            self._listbox.activate(0)
 
     def _choose(self, value: str) -> None:
+        if value.startswith("… ") or value == "(no matches)":
+            return
         self._close()
         self._value = value
         self.entry.delete(0, "end")
         self.entry.insert(0, value)
+        self.entry.focus_set()
         if self._on_change:
             self._on_change(value)
 
-    def _highlight(self, delta: int) -> None:
-        items = self._visible_items()
-        if not items:
-            return
-        self._highlight_index = (self._highlight_index + delta) % len(items)
-        self._menu.entryconfigure(self._highlight_index,
-                                  background=_ACCENT, foreground="#ffffff")
-        self._menu.entryconfigure(
-            (self._highlight_index - delta) % len(items),
-            background=_BG_FIELD, foreground=_TEXT,
-        )
+    def _on_list_click(self, event) -> None:
+        idx = self._listbox.nearest(event.y)
+        if 0 <= idx < self._listbox.size():
+            val = self._listbox.get(idx)
+            self._choose(val)
 
-    def _select_highlighted(self, _e=None) -> None:
-        items = self._visible_items()
-        if not items:
-            return
-        idx = self._highlight_index if 0 <= self._highlight_index < len(items) else 0
-        self._choose(items[idx])
+    def _move(self, delta: int) -> str:
+        if not self._dropdown_open:
+            self._show_all()
+            return "break"
+        n = self._listbox.size()
+        if n == 0:
+            return "break"
+        # Skip disabled "(no matches)" / "… more" rows
+        self._highlight_index = (self._highlight_index + delta) % n
+        # Skip disabled last row
+        val = self._listbox.get(self._highlight_index)
+        if val.startswith("… ") or val == "(no matches)":
+            self._highlight_index = (self._highlight_index + delta) % n
+        self._listbox.selection_clear(0, "end")
+        self._listbox.selection_set(self._highlight_index)
+        self._listbox.activate(self._highlight_index)
+        self._listbox.see(self._highlight_index)
+        return "break"
+
+    def _on_return(self, _e=None) -> str:
+        if self._dropdown_open and self._listbox.size() > 0:
+            idx = self._highlight_index if 0 <= self._highlight_index < self._listbox.size() else 0
+            val = self._listbox.get(idx)
+            if not val.startswith("… ") and val != "(no matches)":
+                self._choose(val)
+                return "break"
+        return ""
 
     def _on_key(self, _e=None) -> None:
-        self._refresh()
+        # Live search: re-filter on every keystroke (no Enter needed).
+        # Keep entry focused; listbox never steals it.
+        self._update_listbox()
+        if self._listbox.size() > 0 and self._listbox.get(0) != "(no matches)":
+            self._reposition()
+            if not self._dropdown_open:
+                try:
+                    self._top.deiconify()
+                    self._top.lift()
+                    self._dropdown_open = True
+                except tk.TclError:
+                    pass
+            self.entry.focus_set()
+        else:
+            self._close()
+        # Do NOT return "break" — let the key go to the entry
 
     def _on_focus(self, _e=None) -> None:
         """Show the dropdown as soon as the field is focused, so typing starts
         from a visible, live list (no need to press Enter first)."""
-        self._update_menu()
-        self._open()
+        self._update_listbox()
+        if self._listbox.size() > 0:
+            self._open()
 
     def _key_pressed(self, _e=None) -> None:
         """Bound to a <Key> event: same live refresh as typing."""
-        self._refresh()
+        self._on_key()
 
 
 class FilePickerPopup:
@@ -516,10 +611,12 @@ class FilePickerPopup:
         client_names = list(clients.keys())
         if client_names:
             self.client_dropdown.configure(values=client_names + [ADD_NEW_CLIENT_OPTION])
+            self.client_dropdown.set(client_names[0])
             self._client_var.set(client_names[0])
             self._populate_sites(client_names[0])
         else:
             self.client_dropdown.configure(values=[ADD_NEW_CLIENT_OPTION])
+            self.client_dropdown.set(ADD_NEW_CLIENT_OPTION)
             self._client_var.set(ADD_NEW_CLIENT_OPTION)
 
         doc_types = data.get("doc_types", ["DC"])
