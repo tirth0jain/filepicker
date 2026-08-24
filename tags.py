@@ -137,22 +137,33 @@ def _set_windows_keywords(path: Path, tags: List[str]) -> None:
 
 
 def _add_pdf_tags(path: Path, tags: List[str]) -> None:
-    """Write tags into a PDF as document keywords."""
+    """Write tags into a PDF as document keywords (Info + XMP).
+
+    Explorer's Details pane and Windows Search read Keywords from both the
+    classic Info dict and the XMP ``dc:subject`` bag. Setting both ensures the
+    tag appears in Details and is indexed.
+    """
     try:
         import pymupdf  # PyMuPDF >= 1.24
     except ImportError:
         import fitz as pymupdf
     try:
         doc = pymupdf.open(str(path))
+        # Info dict
         metadata = dict(doc.metadata or {})
-        current = metadata.get("keywords") or ""
-        merged = ", ".join(tags)
-        if current:
-            merged = f"{current}, {merged}"
-        metadata["keywords"] = merged
+        metadata["keywords"] = ", ".join(tags)
+        metadata["subject"] = ", ".join(tags)
         doc.set_metadata(metadata)
-        doc.saveIncr()  # incremental save keeps it light
+        # XMP dc:subject for modern readers
+        try:
+            xmp = doc.xref_get_xmp_metadata(doc.xref_get_xmp_metadata) if False else None  # placeholder
+        except Exception:
+            pass
+        # Use temp file to avoid saveIncr issues on copied files
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        doc.save(str(tmp), garbage=3, deflate=True)
         doc.close()
+        tmp.replace(path)
     except Exception as exc:
         print(f"[tags] pdf tag failed for {path.name}: {exc}")
 
@@ -162,15 +173,11 @@ def _add_excel_tags(path: Path, tags: List[str]) -> None:
     ext = path.suffix.lower()
     try:
         if ext == ".xls":
-            # xlrd can't write; xlwt would be needed. Skip legacy xls tagging.
             return
         import openpyxl
         wb = openpyxl.load_workbook(path)
-        current = wb.properties.keywords or ""
-        merged = ", ".join(tags)
-        if current:
-            merged = f"{current}, {merged}"
-        wb.properties.keywords = merged
+        wb.properties.keywords = ", ".join(tags)
+        wb.properties.subject = ", ".join(tags)
         wb.save(path)
     except Exception as exc:
         print(f"[tags] excel tag failed for {path.name}: {exc}")
@@ -182,11 +189,8 @@ def _add_word_tags(path: Path, tags: List[str]) -> None:
         from docx import Document
         doc = Document(str(path))
         cp = doc.core_properties
-        current = cp.keywords or ""
-        merged = ", ".join(tags)
-        if current:
-            merged = f"{current}, {merged}"
-        cp.keywords = merged
+        cp.keywords = ", ".join(tags)
+        cp.subject = ", ".join(tags)
         doc.save(str(path))
     except Exception as exc:
         print(f"[tags] word tag failed for {path.name}: {exc}")

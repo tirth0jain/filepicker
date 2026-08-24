@@ -147,8 +147,6 @@ class FilePickerController:
                 break
             if cmd == "check_update":
                 self._check_update_now()
-            elif cmd == "search":
-                self._open_search_window()
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -384,7 +382,6 @@ class FilePickerController:
             self._tray = TrayIcon(
                 on_check_update=self._tray_check_update,
                 on_quit=self._tray_quit,
-                on_search=self._tray_search,
             )
             self._tray.start()
         except Exception as exc:
@@ -400,9 +397,6 @@ class FilePickerController:
     def _tray_check_update(self) -> None:
         # Called from the pystray thread; marshal onto the Tk main thread.
         self._ui_commands.put("check_update")
-
-    def _tray_search(self) -> None:
-        self._ui_commands.put("search")
 
     def _tray_quit(self) -> None:
         self._ui_commands.put("quit")
@@ -424,69 +418,6 @@ class FilePickerController:
                 self._set_status("Update download failed.")
         except Exception as exc:
             print(f"[filepicker] manual update error: {exc}")
-
-    def _open_search_window(self) -> None:
-        """In-app tag search — works even when the folder isn't indexed by Windows."""
-        try:
-            import tagsearch
-        except Exception as exc:
-            print(f"[filepicker] search unavailable: {exc}")
-            return
-        win = ctk.CTkToplevel(self._root)
-        win.title("FilePicker — Search by tag")
-        win.geometry("700x520")
-        win.configure(fg_color=_BG)
-        win.transient(self._root)
-        win.attributes("-topmost", True)
-        win.lift()
-        win.focus_force()
-
-        ctk.CTkLabel(win, text="Search by tag (e.g. Aluminium, Glass, Site 1)",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", padx=16, pady=(16, 4))
-        entry = ctk.CTkEntry(win, fg_color=_BG_FIELD, border_color=_BG_FIELD,
-                             text_color=_TEXT, placeholder_text="Type to search…")
-        entry.pack(fill="x", padx=16, pady=(0, 8))
-        entry.focus_set()
-
-        result_frame = ctk.CTkScrollableFrame(win, fg_color=_BG_SECONDARY)
-        result_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        def render(query: str) -> None:
-            for w in result_frame.winfo_children():
-                w.destroy()
-            query = query.strip()
-            if not query:
-                ctk.CTkLabel(result_frame, text="Type a tag to search.",
-                             text_color=_TEXT_MUTED).pack(pady=12)
-                return
-            hits = tagsearch.search(query)
-            if not hits:
-                ctk.CTkLabel(result_frame, text=f"No files tagged '{query}'.",
-                             text_color=_TEXT_MUTED).pack(pady=12)
-                return
-            for hit in hits:
-                row = ctk.CTkFrame(result_frame, fg_color=_BG_FIELD)
-                row.pack(fill="x", pady=2)
-                ctk.CTkLabel(row, text=Path(hit["path"]).name,
-                             text_color=_TEXT, anchor="w").pack(side="left", padx=8, pady=6)
-                ctk.CTkLabel(row, text=", ".join(hit["tags"]),
-                             text_color=_TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
-                ctk.CTkButton(row, text="Open folder", width=100,
-                              fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
-                              command=lambda p=hit["path"]: os.startfile(str(Path(p).parent)) if hasattr(os, "startfile") else None
-                              ).pack(side="right", padx=8)
-
-        entry.bind("<KeyRelease>", lambda _e: render(entry.get()))
-
-        all_t = tagsearch.all_tags()
-        if all_t:
-            ctk.CTkLabel(result_frame, text=f"Available tags: {', '.join(all_t[:20])}",
-                         text_color=_TEXT_MUTED, font=ctk.CTkFont(size=11),
-                         wraplength=640).pack(pady=8)
-        else:
-            ctk.CTkLabel(result_frame, text="No tags yet — organize a file to build the index.",
-                         text_color=_TEXT_MUTED).pack(pady=12)
 
     def _schedule_update_checks(self) -> None:
         """Check for updates periodically, without blocking the UI.
