@@ -52,12 +52,18 @@ def material_shortcodes(selected_names, materials_map) -> str:
     """Join the shortcodes of the selected materials with ``+``.
 
     Unknown material names are mapped to their first letter so nothing breaks.
+    Every code has ``1`` appended (e.g. ``A`` -> ``A1``, ``SS`` -> ``SS1``)
+    so the tag is not a single common letter.
     """
     codes = []
     for name in selected_names:
         code = materials_map.get(name)
         if not code:
             code = sanitize(name)[:1] or "?"
+        # Material codes are always suffixed with "1" (e.g. A -> A1, SS -> SS1).
+        # Avoid doubling if the stored code already ends with "1".
+        if not code.endswith("1"):
+            code = f"{code}1"
         codes.append(code)
     return "+".join(codes)
 

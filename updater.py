@@ -53,14 +53,56 @@ _PRESERVE_FILES = {"config.json", "last_update.txt", _INSTALLED_TAG_FILE}
 
 def _is_frozen() -> bool:
     """True when running from a compiled (Nuitka) binary."""
-    return getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False))
+    # Nuitka sets ``__compiled__`` in each compiled module and may set
+    # ``sys.frozen`` / ``sys.nuitka_standalone`` depending on the plugin
+    # version.  As a last resort, if the running executable is literally
+    # ``FilePicker.exe`` we are frozen — this handles the exact failure the
+    # user saw (``main.py -> FilePicker.exe.old`` on a frozen install).
+    if getattr(sys, "frozen", False):
+        return True
+    if bool(getattr(sys, "nuitka_standalone", False)):
+        return True
+    if globals().get("__compiled__"):
+        return True
+    try:
+        exe_name = Path(sys.executable).name.lower()
+        if exe_name == "filepicker.exe":
+            return True
+        # Any non-python exe is treated as frozen (covers renamed installs)
+        if exe_name not in ("python.exe", "pythonw.exe", "python"):
+            # If we're not running under a stock interpreter, assume frozen
+            # when the exe lives next to a FilePicker.exe sibling.
+            cand = Path(sys.executable).with_name("FilePicker.exe")
+            if cand.exists():
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _current_exe() -> Path:
     """Path of the running executable (or main.py in dev)."""
     if _is_frozen():
-        return Path(sys.executable)
-    return Path(__file__).resolve().parent / "main.py"
+        exe = Path(sys.executable)
+        # Defensive: if sys.executable somehow still points at python, try the
+        # sibling FilePicker.exe next to this file or next to the interpreter.
+        if exe.name.lower() in ("python.exe", "pythonw.exe"):
+            cand = exe.with_name("FilePicker.exe")
+            if cand.exists():
+                return cand
+            cand2 = Path(__file__).resolve().parent / "FilePicker.exe"
+            if cand2.exists():
+                return cand2
+        return exe
+    # Dev mode: main.py should exist; if it doesn't (e.g. stale frozen
+    # detection), fall back to a sibling FilePicker.exe if present.
+    main_py = Path(__file__).resolve().parent / "main.py"
+    if main_py.exists():
+        return main_py
+    cand = Path(sys.executable).with_name("FilePicker.exe")
+    if cand.exists():
+        return cand
+    return Path(sys.executable)
 
 
 def _installed_tag() -> str:

@@ -6,4 +6,4 @@
 """
 
 APP_NAME = "FilePicker"
-VERSION = "0.3.4"
+VERSION = "0.3.5"

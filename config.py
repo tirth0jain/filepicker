@@ -28,6 +28,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Mild Steel": "MS",
         "Galvanized Iron": "GI",
     },
+    # NOTE: material codes are suffixed with "1" at filename time
+    # (A -> A1, SS -> SS1) so single-letter tags are searchable.
     # Top-level company names (shown as a dropdown; the first is the default).
     "companies": ["Company A", "Company B"],
     # Optional per-company initials used in filenames (e.g. "Ruby Steel": "RS").

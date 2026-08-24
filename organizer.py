@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import filename as fn
-from tags import apply_tags
 
 
 @dataclass
@@ -50,7 +49,6 @@ class OrganizeRequest:
     root: Path
     replace: bool = False          # overwrite existing destination files
     initials_map: Optional[dict] = None   # company name -> initials override
-    tags: Optional[List[str]] = None      # user-entered search tags
 
 
 def _destination_for(root: Path, company: str, client: str, site: str,
@@ -91,7 +89,7 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
     )
 
     def place_copy(dest_dir: Path) -> Optional[Path]:
-        """Copy the source into ``dest_dir`` (handling collisions + tags)."""
+        """Copy the source into ``dest_dir`` (handling collisions)."""
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -104,26 +102,6 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
         except OSError as exc:
             result.errors.append(f"Cannot copy to {target}: {exc}")
             return None
-        # Tags must always include the selected materials (full names) so a
-        # file named "...-A-..." is still findable by searching "Aluminium".
-        all_tags = []
-        if request.tags:
-            from tags import _clean_tags
-
-            all_tags = _clean_tags(request.tags)
-        for mat in request.materials or []:
-            if mat.strip() and mat.strip().lower() not in [t.lower() for t in all_tags]:
-                all_tags.append(mat.strip())
-        if all_tags:
-            apply_tags(target, all_tags)
-            # Also record in the tag index for the in-app search (works even
-            # when the folder isn't indexed by Windows Search, e.g. network Z:).
-            try:
-                from tagsearch import add_entry
-
-                add_entry(target, all_tags)
-            except Exception:
-                pass
         result.destinations.append(target)
         return target
 

@@ -349,7 +349,6 @@ class FilePickerPopup:
         self._client_var = tk.StringVar()
         self._doc_type_var = tk.StringVar(value="DC")
         self._serial_var = tk.StringVar()
-        self._tags_var = tk.StringVar()
         self._received_var = tk.BooleanVar(value=True)
         self._selected_materials: List[str] = []
 
@@ -546,16 +545,6 @@ class FilePickerPopup:
         )
         self.serial_entry.pack(fill="x", pady=(0, 12))
 
-        # -- Tags (searchable metadata) ----------------------------------
-        ctk.CTkLabel(f, text="Tags (search in Windows Explorer)",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
-        ctk.CTkEntry(
-            f, textvariable=self._tags_var, fg_color=_BG_FIELD,
-            border_color=_BG_FIELD, text_color=_TEXT,
-            placeholder_text="e.g. Aluminium, DC, Site 1  (comma separated)",
-        ).pack(fill="x", pady=(0, 12))
-
         # -- Received copy checkbox -------------------------------------
         self.received_check = ctk.CTkCheckBox(
             f, text="Received Copy (unchecked = Submitted)",
@@ -686,42 +675,10 @@ class FilePickerPopup:
     def _toggle_material(self, name: str) -> None:
         if name in self._selected_materials:
             self._selected_materials.remove(name)
-            self._remove_tag(name)
         else:
             self._selected_materials.append(name)
-            self._add_tag(name)
         self._render_material_chips()
         self._refresh_preview()
-
-    # ------------------------------------------------------------------
-    # Auto tags (case-insensitive)
-    # ------------------------------------------------------------------
-    def _current_tags(self) -> List[str]:
-        """Parse the tags field into a list (deduped, case-insensitive)."""
-        raw = self._tags_var.get()
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
-        seen, out = set(), []
-        for p in parts:
-            key = p.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(p)
-        return out
-
-    def _set_tags(self, tags: List[str]) -> None:
-        self._tags_var.set(", ".join(tags))
-
-    def _add_tag(self, tag: str) -> None:
-        tags = self._current_tags()
-        if tag and not any(t.lower() == tag.lower() for t in tags):
-            tags.append(tag)
-            self._set_tags(tags)
-
-    def _remove_tag(self, tag: str) -> None:
-        tags = self._current_tags()
-        kept = [t for t in tags if t.lower() != tag.lower()]
-        if len(kept) != len(tags):
-            self._set_tags(kept)
 
     def _prompt_add_material(self) -> None:
         self._ask_text(
@@ -927,7 +884,6 @@ class FilePickerPopup:
             "materials": list(self._selected_materials),
             "serial": self._serial_var.get(),
             "status": status,
-            "tags": self._tags_var.get(),
         }
         self._release()
         self.on_submit(payload)

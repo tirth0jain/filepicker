@@ -205,7 +205,6 @@ class FilePickerController:
             status=payload["status"],
             root=Path(self.config.root_directory),
             initials_map=self.config.company_initials,
-            tags=payload.get("tags") or [],
         )
         result = organize(request)
 
