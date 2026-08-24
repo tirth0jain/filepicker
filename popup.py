@@ -77,7 +77,9 @@ class SearchableDropdown(ctk.CTkFrame):
         )
         if width:
             self.entry.configure(width=width)
-        self.entry.pack(fill="x", pady=(0, 12))
+        self.entry.pack(fill="x")
+        # Pack this frame itself into its parent (the popup form).
+        self.pack(fill="x", pady=(0, 12))
 
         # Dropdown window (overrideredirect Toplevel with a Listbox)
         self._top = tk.Toplevel(self)
