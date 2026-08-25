@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 venv/
 config.json.tmp
+github_token.txt
+.github_token
+*_token.txt

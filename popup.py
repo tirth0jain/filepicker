@@ -798,9 +798,12 @@ class FilePickerPopup:
     def _start_config_poll(self) -> None:
         """Begin polling GitHub for live config while the popup is open."""
         self._config_poll_after = None
-        # schedule first poll after _CONFIG_POLL_MS
+        if not self.config.enable_live_config:
+            return
+        # Immediate fetch shortly after open so the popup never shows stale data
+        # for 30s — then every _CONFIG_POLL_MS thereafter.
         try:
-            self._config_poll_after = self.window.after(_CONFIG_POLL_MS, self._poll_config)
+            self._config_poll_after = self.window.after(500, self._poll_config)
         except Exception:
             pass
 
@@ -815,6 +818,9 @@ class FilePickerPopup:
 
     def _poll_config(self) -> None:
         """Background fetch → apply → refresh (never blocks the UI)."""
+        if not self.config.enable_live_config:
+            return
+
         def work() -> None:
             try:
                 changed = self.config.sync_from_github(timeout=5.0)

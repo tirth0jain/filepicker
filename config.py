@@ -8,6 +8,7 @@ utility and survives reinstalls. All dynamic changes made from the popup UI
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -19,6 +20,13 @@ from typing import Any, Dict, List, Optional
 # Remote live config — single source of truth for clients/sites.
 # Every popup fetches this so all users see the same data instantly.
 GITHUB_CONFIG_URL = "https://raw.githubusercontent.com/tirth0jain/filepicker/main/config.json"
+
+# GitHub API details for pushing local additions (Add Site/Company) back to
+# the repo so every machine sees them without a manual git push.
+GITHUB_REPO = "tirth0jain/filepicker"
+GITHUB_BRANCH = "main"
+GITHUB_PATH = "config.json"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
 
 # Default configuration used the very first time the app runs.
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -47,6 +55,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Register a Startup-folder shortcut on first run so the app launches
     # automatically at Windows login. Set to false to disable.
     "auto_start": True,
+    # Live GitHub config sync — when true the app polls
+    # raw.githubusercontent.com every 30s (and on every popup open) so a
+    # push to config.json on GitHub appears for all users without rebuilding
+    # the exe. Set to false to use only the local config.json.
+    "enable_live_config": True,
+    # When true, any "Add Site / Add Company / Add Material" action also
+    # pushes the updated config.json back to GitHub (requires a token — see
+    # GITHUB_TOKEN below). This is how a site added on one machine appears
+    # for every other machine within 30s without a manual git push.
+    # Requires a fine-grained PAT with Contents: read & write on this repo.
+    # The token is NEVER stored in config.json — it lives in
+    # `github_token.txt` next to the exe (or env FILEPICKER_GITHUB_TOKEN).
+    "enable_github_push": True,
 }
 
 
@@ -61,6 +82,41 @@ def default_config_path() -> Path:
     if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
         return Path(sys.executable).resolve().parent / "config.json"
     return Path(__file__).resolve().parent / "config.json"
+
+
+def default_token_path() -> Path:
+    """Path to the file that holds the GitHub PAT for pushing config.json.
+
+    The token is deliberately NOT stored in config.json — otherwise it would
+    be pushed to the public repo when the config is synced. Store it in
+    `github_token.txt` next to the exe (or set env FILEPICKER_GITHUB_TOKEN).
+    """
+    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
+        return Path(sys.executable).resolve().parent / "github_token.txt"
+    return Path(__file__).resolve().parent / "github_token.txt"
+
+
+def _read_github_token() -> Optional[str]:
+    """Return the GitHub PAT if configured, else None.
+
+    Order: env FILEPICKER_GITHUB_TOKEN → env GITHUB_TOKEN → github_token.txt
+    The file should contain just the token on the first line (no JSON).
+    """
+    for env_key in ("FILEPICKER_GITHUB_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(env_key, "").strip()
+        if token:
+            return token
+    try:
+        token_path = default_token_path()
+        if token_path.exists():
+            text = token_path.read_text(encoding="utf-8").strip()
+            # Support file with `token = xyz` or just `xyz`
+            if "=" in text:
+                text = text.split("=", 1)[1].strip().strip('"\' ')
+            return text or None
+    except OSError:
+        pass
+    return None
 
 
 class ConfigManager:
@@ -145,8 +201,15 @@ class ConfigManager:
             print(f"[config] GitHub live config fetch failed: {exc}")
         return None
 
+    @property
+    def enable_live_config(self) -> bool:
+        """Whether to poll GitHub for live config. Local-only flag, never overwritten by remote."""
+        return bool(self.load().get("enable_live_config", True))
+
     def sync_from_github(self, timeout: float = 5.0) -> bool:
         """Fetch and apply the live config if it changed. Returns True if updated."""
+        if not self.enable_live_config:
+            return False
         remote = self.fetch_github_config(timeout=timeout)
         if remote is None:
             return False
@@ -169,6 +232,251 @@ class ConfigManager:
             if changed:
                 self.save()
             return changed
+
+    @property
+    def enable_github_push(self) -> bool:
+        """Whether manual additions should be pushed back to GitHub.
+
+        Local-only; never overwritten by remote. Requires a PAT in
+        `github_token.txt` or env FILEPICKER_GITHUB_TOKEN.
+        """
+        return bool(self.load().get("enable_github_push", False))
+
+    def _github_push_enabled(self) -> bool:
+        if not self.enable_live_config:
+            return False
+        if not self.enable_github_push:
+            return False
+        return bool(_read_github_token())
+
+    # ------------------------------------------------------------------
+    # Push local additions back to GitHub (so every machine sees them)
+    # ------------------------------------------------------------------
+    def push_to_github(
+        self,
+        reason: str = "FilePicker: update config",
+        timeout: float = 10.0,
+    ) -> bool:
+        """Push the local catalog back to GitHub.
+
+        Called automatically after Add Site/Company/Material. Merges the local
+        catalog (companies, clients, etc.) into the current GitHub file so
+        concurrent edits from two machines are unioned, not lost. Returns True
+        on success.
+
+        The token is read from `FILEPICKER_GITHUB_TOKEN` / `GITHUB_TOKEN` /
+        `github_token.txt` — it is NEVER stored in config.json.
+        """
+        if not self._github_push_enabled():
+            if self.enable_github_push and not _read_github_token():
+                print("[config] enable_github_push is true but no token found (env FILEPICKER_GITHUB_TOKEN or github_token.txt). Skipping push.")
+            return False
+
+        token = _read_github_token()
+        if not token:
+            return False
+
+        # Snapshot local catalog under lock
+        with self._lock:
+            local_data = deepcopy(self._data)
+
+        try:
+            import urllib.request
+            import urllib.error
+
+            api_url = GITHUB_API_URL
+
+            # 1. GET current file to obtain sha + remote content
+            sha: Optional[str] = None
+            remote_data: Dict[str, Any] = {}
+            try:
+                req = urllib.request.Request(
+                    f"{api_url}?ref={GITHUB_BRANCH}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "FilePicker",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    info = json.loads(resp.read().decode("utf-8"))
+                    sha = info.get("sha")
+                    content_b64 = info.get("content", "")
+                    if content_b64:
+                        # GitHub returns base64 with newlines
+                        decoded = base64.b64decode(content_b64).decode("utf-8")
+                        remote_data = json.loads(decoded)
+                        if not isinstance(remote_data, dict):
+                            remote_data = {}
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # File doesn't exist yet — will be created
+                    sha = None
+                    remote_data = {}
+                else:
+                    print(f"[config] GitHub GET failed ({e.code}): {e.reason}")
+                    return False
+            except Exception as exc:
+                print(f"[config] GitHub GET failed: {exc}")
+                return False
+
+            # 2. Merge local catalog into remote (union, not overwrite)
+            merged = self._merge_for_push(remote_data, local_data)
+            # If nothing to push (remote already has our catalog), skip
+            # Compare only the catalog keys for cheap equality
+            catalog_keys = ("companies", "company_initials", "clients", "materials", "doc_types")
+            if all(merged.get(k) == remote_data.get(k) for k in catalog_keys):
+                # For a brand-new file (remote_data empty) this is never true
+                if remote_data:
+                    return False
+
+            # Build new file content: start from remote_data (preserves remote's
+            # watch_directory etc.) and replace catalog keys with merged.
+            # If remote was empty, start from local_data but keep merged catalog.
+            if remote_data:
+                new_content = deepcopy(remote_data)
+            else:
+                new_content = deepcopy(local_data)
+            for k in catalog_keys:
+                if k in merged:
+                    new_content[k] = merged[k]
+
+            new_json = json.dumps(new_content, indent=2, ensure_ascii=False) + "\n"
+            b64_content = base64.b64encode(new_json.encode("utf-8")).decode("ascii")
+
+            payload: Dict[str, Any] = {
+                "message": reason,
+                "content": b64_content,
+                "branch": GITHUB_BRANCH,
+            }
+            if sha:
+                payload["sha"] = sha
+
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                api_url,
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "FilePicker",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status in (200, 201):
+                    print(f"[config] Pushed config to GitHub ({reason})")
+                    return True
+                print(f"[config] GitHub PUT unexpected status {resp.status}")
+                return False
+
+        except urllib.error.HTTPError as e:
+            # 409 = sha mismatch (concurrent edit) — fetch + retry once
+            if e.code == 409:
+                print("[config] GitHub push conflict (409) — retrying with merged remote…")
+                try:
+                    # Simple retry: fetch again and re-merge once
+                    return self.push_to_github(reason=reason, timeout=timeout)
+                except RecursionError:
+                    pass
+            try:
+               detail = e.read().decode("utf-8", errors="ignore")[:500]
+            except Exception:
+                detail = str(e)
+            print(f"[config] GitHub push failed ({e.code}): {detail}")
+            return False
+        except Exception as exc:
+            print(f"[config] GitHub push failed: {exc}")
+            return False
+
+    def _push_async(self, reason: str = "FilePicker: update config") -> None:
+        """Fire-and-forget push on a daemon thread (never blocks the UI)."""
+        if not self._github_push_enabled():
+            return
+
+        def _work() -> None:
+            try:
+                self.push_to_github(reason=reason)
+            except Exception as exc:
+                print(f"[config] async push error: {exc}")
+
+        threading.Thread(target=_work, name="filepicker-github-push", daemon=True).start()
+
+    @staticmethod
+    def _merge_for_push(remote: Dict[str, Any], local: Dict[str, Any]) -> Dict[str, Any]:
+        """Union remote + local catalog so concurrent adds are not lost."""
+        merged: Dict[str, Any] = {}
+
+        # companies — union, case-insensitive dedup, preserve order (remote first, then local additions)
+        def _merge_list_str(rem: List[str], loc: List[str]) -> List[str]:
+            seen = {str(x).strip().lower(): str(x) for x in rem if isinstance(x, str)}
+            out = list(rem)
+            for item in loc:
+                if not isinstance(item, str):
+                    continue
+                key = item.strip().lower()
+                if key not in seen:
+                    out.append(item)
+                    seen[key] = item
+            return out
+
+        rem_companies = list(remote.get("companies", []))
+        loc_companies = list(local.get("companies", []))
+        merged["companies"] = _merge_list_str(rem_companies, loc_companies)
+
+        # company_initials — merge dicts, local wins on conflict (new override)
+        rem_init = dict(remote.get("company_initials", {}))
+        loc_init = dict(local.get("company_initials", {}))
+        merged_init = dict(rem_init)
+        merged_init.update({str(k): str(v) for k, v in loc_init.items()})
+        merged["company_initials"] = merged_init
+
+        # clients — union keys, and for each client union sites
+        rem_clients = remote.get("clients", {})
+        loc_clients = local.get("clients", {})
+        if not isinstance(rem_clients, dict):
+            rem_clients = {}
+        if not isinstance(loc_clients, dict):
+            loc_clients = {}
+        # Map lower -> canonical key + sites
+        # Build from remote first
+        merged_clients: Dict[str, List[str]] = {}
+        lower_to_key: Dict[str, str] = {}
+        for k, v in rem_clients.items():
+            key = str(k)
+            lower_to_key[key.lower()] = key
+            merged_clients[key] = list(v) if isinstance(v, list) else []
+
+        for k, v in loc_clients.items():
+            key = str(k)
+            low = key.lower()
+            canon = lower_to_key.get(low)
+            if canon is None:
+                # New client from local
+                merged_clients[key] = list(v) if isinstance(v, list) else []
+                lower_to_key[low] = key
+            else:
+                # Existing client — union sites
+                loc_sites = list(v) if isinstance(v, list) else []
+                merged_sites = merged_clients.get(canon, [])
+                merged_clients[canon] = _merge_list_str(merged_sites, loc_sites)
+
+        merged["clients"] = merged_clients
+
+        # materials — dict union, local wins
+        rem_mat = dict(remote.get("materials", {}))
+        loc_mat = dict(local.get("materials", {}))
+        merged_mat = dict(rem_mat)
+        merged_mat.update({str(k): str(v) for k, v in loc_mat.items()})
+        merged["materials"] = merged_mat
+
+        # doc_types — union list
+        rem_docs = list(remote.get("doc_types", []))
+        loc_docs = list(local.get("doc_types", []))
+        merged["doc_types"] = _merge_list_str(rem_docs, loc_docs)
+
+        return merged
 
     # ------------------------------------------------------------------
     # Persistence
@@ -249,21 +557,30 @@ class ConfigManager:
             self.save()
 
     def add_company(self, company: str) -> None:
+        pushed = False
         with self._lock:
             companies = self.load().setdefault("companies", [])
             if not self._ci_matches(companies, company):
                 companies.append(company)
                 self.save()
+                pushed = True
+        if pushed:
+            self._push_async(reason=f"FilePicker: add company '{company}'")
 
     def add_client(self, client: str, sites: Optional[List[str]] = None) -> None:
+        pushed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
             if not self._ci_matches(clients.keys(), client):
                 clients[client] = list(sites or [])
                 self.save()
+                pushed = True
+        if pushed:
+            self._push_async(reason=f"FilePicker: add client '{client}'")
 
     def add_site(self, client: str, site: str) -> None:
         """Add a new site under ``client``; create the client if needed."""
+        pushed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
             key = self._canonical_key(clients, client)
@@ -271,6 +588,9 @@ class ConfigManager:
             if not self._ci_matches(sites, site):
                 sites.append(site)
                 self.save()
+                pushed = True
+        if pushed:
+            self._push_async(reason=f"FilePicker: add site '{site}' to '{client}'")
 
     @staticmethod
     def _canonical_key(d: dict, name: str) -> str:
@@ -286,14 +606,23 @@ class ConfigManager:
         return any(str(e).lower() == name.strip().lower() for e in existing)
 
     def add_material(self, name: str, shortcode: str) -> None:
+        changed = False
         with self._lock:
             materials = self.load().setdefault("materials", {})
-            materials[name] = shortcode
-            self.save()
+            if materials.get(name) != shortcode:
+                materials[name] = shortcode
+                self.save()
+                changed = True
+        if changed:
+            self._push_async(reason=f"FilePicker: add material '{name}'")
 
     def add_doc_type(self, doc_type: str) -> None:
+        pushed = False
         with self._lock:
             doc_types = self.load().setdefault("doc_types", [])
             if not self._ci_matches(doc_types, doc_type):
                 doc_types.append(doc_type)
                 self.save()
+                pushed = True
+        if pushed:
+            self._push_async(reason=f"FilePicker: add doc type '{doc_type}'")

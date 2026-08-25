@@ -483,10 +483,13 @@ class FilePickerController:
         Works even while a popup is open: the network fetch runs on a background
         thread and, if the config changed, refreshes the open popup in place
         (preserving what the user is typing) via ``popup.refresh_from_config()``.
+        Disabled when ``enable_live_config`` is false in config.json.
         """
         def check() -> None:
             def work() -> None:
                 try:
+                    if not self.config.enable_live_config:
+                        return
                     changed = self.config.sync_from_github(timeout=5.0)
                     if changed:
                         def do_refresh() -> None:

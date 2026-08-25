@@ -6,7 +6,25 @@ name: Build & Release
 on:
   push:
     branches: [main]
+    # Config tweaks are live-synced every 30s and on popup open (see config.py/
+    # popup.py) — they do NOT need a new .exe. This keeps the release history
+    # clean and avoids spamming users with "Updating…" for a client rename.
+    # ── Toggle ── To RE-ENABLE builds on config.json changes, delete the
+    # `paths-ignore` block below (or add the file back to the build).
+    # To force a one-off build for a config-only commit, use the
+    # "Run workflow" button and set `force_build: true`.
+    paths-ignore:
+      - 'config.json'
+      - '**/config.json'
+      - '*.md'
+      - '**/*.md'
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force a build even if only config.json changed (config tweaks are normally live-synced)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
