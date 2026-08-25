@@ -345,15 +345,22 @@ class SearchableDropdown(ctk.CTkFrame):
         return "break"
 
     def _on_return(self, _e=None) -> str:
+        # Enter always closes the dropdown. If a valid item is highlighted,
+        # choose it (calls on_change); otherwise keep the typed value.
         if self._dropdown_open and self._listbox.size() > 0:
             idx = self._highlight_index if 0 <= self._highlight_index < self._listbox.size() else 0
             val = self._listbox.get(idx)
             if not val.startswith("… ") and val != "(no matches)":
                 self._choose(val)
                 return "break"
-        return ""
+        # No valid highlight (typed a new value or "(no matches)") — just close
+        self._close()
+        return "break"
 
     def _on_key(self, _e=None) -> None:
+        # Don't reopen immediately after Enter (Return) — _on_return already closed.
+        if _e is not None and getattr(_e, "keysym", None) == "Return":
+            return
         self._update_listbox()
         if self._listbox.size() > 0 and self._listbox.get(0) != "(no matches)":
             self._reposition()

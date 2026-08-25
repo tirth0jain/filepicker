@@ -246,15 +246,53 @@ class PreviewWindow:
         ).pack(expand=True)
 
     def _make_scroll_canvas(self) -> tk.Canvas:
-        canvas = tk.Canvas(self.window, bg=_BG, highlightthickness=0)
-        vsb = ttk.Scrollbar(self.window, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
+        # Container holds canvas + both scrollbars so vertical, horizontal and
+        # pan all work. Alt+Scroll → horizontal, Shift+drag → pan (scan).
+        container = tk.Frame(self.window, bg=_BG)
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, bg=_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True)
+        hsb.pack(side="bottom", fill="x")
+        canvas.pack(side="left", fill="both", expand=True)
+        # Vertical scroll (plain wheel)
         canvas.bind(
             "<MouseWheel>",
             lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"),
         )
+        # Horizontal scroll via Alt+Wheel (Windows) and Alt+Button-4/5 (Linux)
+        canvas.bind(
+            "<Alt-MouseWheel>",
+            lambda e: canvas.xview_scroll(int(-e.delta / 120), "units"),
+        )
+        canvas.bind("<Alt-Button-4>", lambda e: canvas.xview_scroll(-1, "units"))
+        canvas.bind("<Alt-Button-5>", lambda e: canvas.xview_scroll(1, "units"))
+        # Pan / move tool: Shift + click-drag (hold Shift, drag mouse)
+        def _pan_start(e):
+            canvas.scan_mark(e.x, e.y)
+            try:
+                canvas.config(cursor="fleur")
+            except tk.TclError:
+                pass
+
+        def _pan_drag(e):
+            canvas.scan_dragto(e.x, e.y, gain=1)
+
+        def _pan_end(_e=None):
+            try:
+                canvas.config(cursor="")
+            except tk.TclError:
+                pass
+
+        canvas.bind("<Shift-ButtonPress-1>", _pan_start)
+        canvas.bind("<Shift-B1-Motion>", _pan_drag)
+        canvas.bind("<Shift-ButtonRelease-1>", _pan_end)
+        # Also allow plain middle-mouse drag as an alternative hand tool
+        canvas.bind("<ButtonPress-2>", _pan_start)
+        canvas.bind("<B2-Motion>", _pan_drag)
+        canvas.bind("<ButtonRelease-2>", _pan_end)
         return canvas
 
     # ------------------------------------------------------------------
