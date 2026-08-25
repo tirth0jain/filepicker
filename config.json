@@ -14,7 +14,7 @@
     "Ruby Steel": "RS"
   },
   "clients": {
-    "AAK KAMANI PVT LTD": [],
+    "AAK KAMANI PVT LTD": ["tirth"],
     "ACME HOUSING PVT LTD": [],
     "ALUMAYER INDIA PVT LTD": [],
     "AMI CONSTRUCTIONS": [],
