@@ -218,18 +218,24 @@ class ConfigManager:
     def apply_github_config(self, remote: Dict[str, Any]) -> bool:
         """Merge the live GitHub config into the local one.
 
-        Only the shared catalog keys are overwritten (companies, clients,
-        materials, doc_types, company_initials). Local paths
-        (watch_directory, root_directory, auto_start) are never clobbered.
-        The live-sync flags (`enable_live_config`, `enable_github_push`) are
-        also synced from remote so a repo change propagates to all installs.
+        Only the shared catalog keys are merged (companies, clients,
+        materials, doc_types, company_initials) — a union so a site added
+        locally that hasn't yet been pushed to GitHub is **not** deleted when
+        the next poll fetches the still-old remote. Local paths
+        (watch_directory, root_directory) are never clobbered. The live-sync
+        flags (`enable_live_config`, `enable_github_push`) are also synced
+        from remote so a repo change propagates to all installs.
         Returns True if anything changed and was saved.
         """
         with self._lock:
+            # Union-merge catalog so concurrent local adds are not lost
+            # when the remote is still stale (the bug that made Add Site
+            # disappear when you moved to the next field).
+            merged = self._merge_for_push(remote, self._data)
             changed = False
             for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
-                if key in remote and remote[key] != self._data.get(key):
-                    self._data[key] = remote[key]
+                if key in merged and merged[key] != self._data.get(key):
+                    self._data[key] = merged[key]
                     changed = True
             for key in ("enable_live_config", "enable_github_push", "auto_start"):
                 if key in remote and remote[key] != self._data.get(key):
