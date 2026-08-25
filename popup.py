@@ -650,18 +650,19 @@ class FilePickerPopup:
             self.company_combo.configure(values=[ADD_NEW_COMPANY_OPTION])
             self._company_var.set(ADD_NEW_COMPANY_OPTION)
 
-        # Client dropdown drives the site list. Values include the "add new"
-        # sentinel so a new client can be created right from the dropdown.
+        # Client dropdown — no default (empty) so the user must pick.
+        # The first client is NOT auto-selected; the field stays empty until
+        # the user searches/selects or creates a new client.
         client_names = list(clients.keys())
         if client_names:
             self.client_dropdown.configure(values=client_names + [ADD_NEW_CLIENT_OPTION])
-            self.client_dropdown.set(client_names[0])
-            self._client_var.set(client_names[0])
-            self._populate_sites(client_names[0])
+            self.client_dropdown.set("")
+            self._client_var.set("")
+            self._populate_sites("")
         else:
             self.client_dropdown.configure(values=[ADD_NEW_CLIENT_OPTION])
-            self.client_dropdown.set(ADD_NEW_CLIENT_OPTION)
-            self._client_var.set(ADD_NEW_CLIENT_OPTION)
+            self.client_dropdown.set("")
+            self._client_var.set("")
 
         doc_types = data.get("doc_types", ["DC"])
         self.doc_type_combo.configure(values=doc_types)
@@ -1090,11 +1091,28 @@ class FilePickerPopup:
 
     def _submit(self) -> None:
         status = "Received" if self._received_var.get() else "Submitted"
+        client = self.client_dropdown.get().strip()
+        site = self._current_site().strip()
+        # Validation — client & site must be chosen (no default anymore)
+        if not client or client == ADD_NEW_CLIENT_OPTION:
+            self.preview_label.configure(text="⚠ Please select a Client", text_color=_DANGER)
+            try:
+                self.client_dropdown.entry.focus_set()
+            except Exception:
+                pass
+            return
+        if not site or site == ADD_NEW_SITE_OPTION:
+            self.preview_label.configure(text="⚠ Please select a Site", text_color=_DANGER)
+            try:
+                self.site_dropdown.entry.focus_set()
+            except Exception:
+                pass
+            return
         payload = {
             "file_path": self.file_path,
             "company": self._company_var.get(),
-            "client": self.client_dropdown.get(),
-            "site": self._current_site(),
+            "client": client,
+            "site": site,
             "doc_type": self._doc_type_var.get(),
             "materials": list(self._selected_materials),
             "serial": self._serial_var.get(),

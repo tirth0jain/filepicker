@@ -111,18 +111,27 @@ class FilePickerController:
         During an update the running exe/DLLs are renamed to '.old' so the new
         build can take their place; those leftovers can't be deleted while the
         old process is alive, so they're cleaned up on the next launch.
+        Uses recursive scan because the batch updater and old in-place code
+        leave `.old` files deep inside subfolders (e.g. `PIL/*.old`).
         """
         try:
             if getattr(sys, "frozen", False):
                 app_dir = Path(sys.executable).parent
             else:
                 app_dir = Path(__file__).resolve().parent
-            for old in app_dir.glob("*.old"):
+            # Try updater's deep cleaner first (handles rglob)
+            try:
+                from updater import _cleanup_old_files_deep
+                _cleanup_old_files_deep(app_dir)
+                return
+            except ImportError:
+                pass
+            for old in app_dir.rglob("*.old"):
                 try:
                     if old.is_dir():
                         shutil.rmtree(old, ignore_errors=True)
                     else:
-                        old.unlink()
+                        old.unlink(missing_ok=True)
                 except OSError:
                     pass
         except Exception:
@@ -538,6 +547,14 @@ def main() -> None:
         print("Auto-start verified and ready." if verify()
               else "Auto-start NOT working (shortcut missing or stale).")
         return
+    if "--push-config" in args:
+        from config import ConfigManager
+        cfg = ConfigManager()
+        cfg.load()
+        print(f"Push enabled: {cfg._github_push_enabled()} (live={cfg.enable_live_config}, push={cfg.enable_github_push})")
+        ok = cfg.push_to_github(reason="FilePicker: manual --push-config")
+        print("Push succeeded." if ok else "Push skipped/failed (check token and enable_github_push).")
+        return
 
     config = ConfigManager()
 
@@ -572,6 +589,23 @@ def main() -> None:
             threading.Thread(target=_ensure_startup, daemon=True).start()
         except Exception as exc:
             print(f"[filepicker] auto-start setup failed: {exc}")
+
+    # If this machine has local catalog changes not yet on GitHub (e.g. a site
+    # added via "Add Site" before push was enabled, like the "tirth" entry),
+    # push them now so every other machine sees them within 30s.
+    try:
+        if config._github_push_enabled():
+            def _startup_push() -> None:
+                time.sleep(4)
+                try:
+                    if config.push_to_github(reason="FilePicker: startup sync"):
+                        print("[filepicker] startup sync pushed local catalog to GitHub")
+                except Exception as exc:
+                    print(f"[filepicker] startup push failed: {exc}")
+
+            threading.Thread(target=_startup_push, name="filepicker-startup-push", daemon=True).start()
+    except Exception as exc:
+        print(f"[filepicker] startup sync check failed: {exc}")
 
     controller = FilePickerController(config)
     controller.run()

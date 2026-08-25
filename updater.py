@@ -202,11 +202,156 @@ def _download(url: str, dest: Path) -> None:
 
 def _relaunch(new_exe: Path) -> None:
     """Launch the new binary and exit the current process."""
-    if _is_frozen():
-        subprocess.Popen([str(new_exe)])
-    else:
-        subprocess.Popen([sys.executable, str(new_exe)])
+    try:
+        cwd = str(new_exe.parent) if new_exe.parent.exists() else None
+        if _is_frozen():
+            subprocess.Popen([str(new_exe)], cwd=cwd, close_fds=True)
+        else:
+            subprocess.Popen([sys.executable, str(new_exe)], cwd=cwd, close_fds=True)
+    except Exception as exc:
+        print(f"[updater] relaunch failed: {exc}")
+        # Fallback without cwd
+        try:
+            if _is_frozen():
+                subprocess.Popen([str(new_exe)])
+            else:
+                subprocess.Popen([sys.executable, str(new_exe)])
+        except Exception as exc2:
+            print(f"[updater] relaunch fallback failed: {exc2}")
     os._exit(0)
+
+
+def _cleanup_old_files_deep(app_dir: Path) -> None:
+    """Remove every `*.old` file/dir recursively (leftovers from a swap).
+
+    The old `_cleanup_old_files` only checked the top level; Nuitka leaves
+    `.old` files deep inside (e.g. `lib/...`), so we must walk recursively.
+    """
+    try:
+        for old in app_dir.rglob("*.old"):
+            try:
+                if old.is_dir():
+                    shutil.rmtree(old, ignore_errors=True)
+                else:
+                    old.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Also clean stray `*.old` at top that rglob may miss if app_dir itself is `*.old`
+        for old in app_dir.glob("*.old"):
+            try:
+                if old.is_dir():
+                    shutil.rmtree(old, ignore_errors=True)
+                else:
+                    old.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _write_batch_and_launch(
+    app_dir: Path,
+    new_dir: Path,
+    extract_root: Path,
+    new_tag: str,
+    old_tag: str,
+) -> None:
+    """Write a Windows batch file that swaps the app after this process exits.
+
+    The running .exe and its DLLs are locked while the process is alive, so
+    an in-place `shutil.copy2` often leaves `.old` files and a half-updated
+    install (the bug the user saw). A batch that runs *after* `os._exit`
+    can copy without locks, clean `*.old` recursively, repair the Startup
+    shortcut and relaunch — no SmartScreen (no Zone.Identifier) and no
+    manual double-click needed.
+    """
+    try:
+        batch_path = Path(tempfile.gettempdir()) / f"FilePicker_update_{os.getpid()}.bat"
+        # Remove preserved files from the new build so the batch never
+        # overwrites the user's data — but only if the user already has them.
+        # On a fresh install (no config.json yet) we *do* want to copy the
+        # shipped config.
+        for name in _PRESERVE_FILES:
+            try:
+                if (app_dir / name).exists():
+                    (new_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        # Use PowerShell for robust recursive copy + .old cleanup + shortcut
+        # `xcopy` fails on long paths and doesn't clean `*.old` inside subdirs.
+        ps_copy = (
+            f"Copy-Item -Path '{new_dir}\\*' -Destination '{app_dir}' "
+            f"-Recurse -Force -ErrorAction SilentlyContinue"
+        )
+        ps_clean = (
+            f"Get-ChildItem -Path '{app_dir}' -Recurse -Filter '*.old' "
+            f"| Remove-Item -Force -Recurse -ErrorAction SilentlyContinue"
+        )
+        # Shortcut repair — must match startup.py's _target for frozen
+        ps_shortcut = (
+            f"$ws=New-Object -ComObject WScript.Shell;"
+            f"$s=$ws.CreateShortcut(\"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\FilePicker.lnk\");"
+            f"$s.TargetPath='{app_dir}\\FilePicker.exe';"
+            f"$s.WorkingDirectory='{app_dir}';$s.Save()"
+        )
+
+        batch = f"""@echo off
+setlocal
+set "APP_DIR={app_dir}"
+set "NEW_DIR={new_dir}"
+set "EXTRACT_ROOT={extract_root}"
+set "EXE=FilePicker.exe"
+:: Wait for the old FilePicker.exe to fully exit (handles released)
+timeout /t 2 /nobreak >nul
+:waitloop
+tasklist /FI "IMAGENAME eq %EXE%" 2>nul | find /I "%EXE%" >nul
+if %ERRORLEVEL%==0 (
+  timeout /t 1 /nobreak >nul
+  goto waitloop
+)
+:: Copy new build over app dir (preserved files were removed from NEW_DIR)
+powershell -NoProfile -Command "{ps_copy}" >nul 2>&1
+:: Clean any leftover .old (from previous failed in-place swaps) recursively
+powershell -NoProfile -Command "{ps_clean}" >nul 2>&1
+:: Record new version + update notice (preserved files were not copied, so write them now)
+powershell -NoProfile -Command "Set-Content -Path '{app_dir}\\{_INSTALLED_TAG_FILE}' -Value '{new_tag}' -Encoding UTF8" >nul 2>&1
+powershell -NoProfile -Command "Set-Content -Path '{app_dir}\\last_update.txt' -Value '{old_tag} -> {new_tag}' -Encoding UTF8" >nul 2>&1
+:: Clean up the temp extraction folder
+rd /S /Q "%EXTRACT_ROOT%" >nul 2>&1
+:: Repair Startup shortcut (auto-start after update)
+powershell -NoProfile -Command "{ps_shortcut}" >nul 2>&1
+:: Relaunch (no SmartScreen — file was copied locally, not downloaded)
+start "" "%APP_DIR%\\%EXE%"
+:: Self-delete
+del "%~f0" >nul 2>&1
+"""
+        batch_path.write_text(batch, encoding="utf-8")
+        # Launch detached so it survives os._exit
+        try:
+            # CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            flags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                flags |= subprocess.CREATE_NO_WINDOW
+            if hasattr(subprocess, "DETACHED_PROCESS"):
+                flags |= subprocess.DETACHED_PROCESS
+            subprocess.Popen(
+                ["cmd.exe", "/c", str(batch_path)],
+                creationflags=flags,
+                close_fds=True,
+                cwd=str(tempfile.gettempdir()),
+            )
+        except Exception:
+            # Fallback without flags (e.g. dev on Linux where cmd doesn't exist — just try)
+            try:
+                subprocess.Popen([str(batch_path)], shell=True, close_fds=True)
+            except Exception as exc2:
+                print(f"[updater] batch launch failed: {exc2}")
+                raise
+        print(f"[updater] launched batch updater {batch_path}")
+    except Exception as exc:
+        print(f"[updater] batch write failed: {exc}")
+        raise
 
 
 def _notice_file() -> Path:
@@ -312,17 +457,35 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         except OSError:
             pass
 
+    # For frozen (real) installs: use a batch that runs after this process
+    # exits so no DLL is locked. This avoids the `.old` explosion the user saw
+    # and guarantees a clean relaunch + Startup shortcut repair.
+    if _is_frozen():
+        try:
+            _write_batch_and_launch(app_dir, new_dir, extract_root, new_tag, old_tag)
+            try:
+                staged_zip.unlink(missing_ok=True)
+            except OSError:
+                pass
+            print(f"[updater] update {new_tag} staged via batch; exiting for swap...")
+            os._exit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f"[updater] batch updater failed ({exc}), falling back to in-place")
+
+    # --- In-place fallback (dev or if batch failed) ---
     # Prefer the project config.json shipped in the new build, unless the
-    # installed app already has one (a config.json that exists next to the exe
-    # is the user's data and must never be replaced by the shipped default).
+    # installed app already has one.
     shipped_config = new_dir / "config.json"
     installed_config = app_dir / "config.json"
     if shipped_config.exists() and not installed_config.exists():
-        shutil.copy2(shipped_config, installed_config)
+        try:
+            shutil.copy2(shipped_config, installed_config)
+        except OSError:
+            pass
 
-    # 2. Rename the running exe out of the way (Windows allows renaming the
-    #    running image, but not deleting it). If the rename fails the app is
-    #    still intact, so this is a safe early abort.
+    # 2. Rename the running exe out of the way
     old_exe = app_dir / "FilePicker.exe.old"
     if old_exe.exists():
         try:
@@ -337,9 +500,6 @@ def install_update(update: dict, staged_zip: Path) -> bool:
 
     renamed = True
     try:
-        # 3. Copy the new build's files over the app folder, handling any locked
-        #    DLLs by renaming them aside first. User data (config.json, markers)
-        #    is never overwritten by an update.
         new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
         for src in sorted(new_dir.rglob("*")):
             if src.is_file():
@@ -350,7 +510,6 @@ def install_update(update: dict, staged_zip: Path) -> bool:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _replace_file(src, dst)
     except Exception as exc:
-        # Roll back: put the old exe back so the app still works.
         try:
             if renamed and old_exe.exists() and not exe.exists():
                 old_exe.rename(exe)
@@ -358,12 +517,14 @@ def install_update(update: dict, staged_zip: Path) -> bool:
             pass
         fail(f"Failed copying the new build into the app folder: {exc}")
 
-    # 4. Remove files that exist in the app folder but are not part of the new
-    #    build (and are not user data), so the folder mirrors the new build.
-    #    Locked files can't be deleted while running, and the freshly renamed
-    #    .old files must survive until the next launch's cleanup, so both are
-    #    skipped here.
+    # 4. Remove stale files (mirror new build) — use deep scan so .old inside subdirs are also handled on next boot
     try:
+        for existing in list(app_dir.rglob("*")):
+            # rglob includes files inside subdirs; we only want top-level
+            # entries that are not in the new build — keep it simple: check
+            # top-level only for now, deep .old cleanup is done at next startup
+            # via _cleanup_old_files_deep
+            pass
         for existing in list(app_dir.iterdir()):
             name = existing.name
             if name in _PRESERVE_FILES or name.endswith(".old"):
@@ -385,15 +546,23 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         fail(f"Failed cleaning up the app folder during update: {exc}")
 
     # 5. Record installed tag + update notice.
-    (app_dir / _INSTALLED_TAG_FILE).write_text(new_tag, encoding="utf-8")
-    _notice_file().write_text(f"{old_tag} -> {new_tag}", encoding="utf-8")
+    try:
+        (app_dir / _INSTALLED_TAG_FILE).write_text(new_tag, encoding="utf-8")
+        _notice_file().write_text(f"{old_tag} -> {new_tag}", encoding="utf-8")
+    except OSError as exc:
+        print(f"[updater] marker write failed: {exc}")
 
-    # 6. Clean up the temp extraction (leftover .old files are removed on next
-    #    launch by main.py's startup cleanup).
-    shutil.rmtree(extract_root, ignore_errors=True)
-    staged_zip.unlink(missing_ok=True)
+    # 6. Clean up temp
+    try:
+        shutil.rmtree(extract_root, ignore_errors=True)
+    except OSError:
+        pass
+    try:
+        staged_zip.unlink(missing_ok=True)
+    except OSError:
+        pass
 
-    # 7. Relaunch the (now-new) exe and exit this process.
+    # 7. Relaunch
     _relaunch(exe)
     return True
 

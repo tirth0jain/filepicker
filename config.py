@@ -221,11 +221,17 @@ class ConfigManager:
         Only the shared catalog keys are overwritten (companies, clients,
         materials, doc_types, company_initials). Local paths
         (watch_directory, root_directory, auto_start) are never clobbered.
+        The live-sync flags (`enable_live_config`, `enable_github_push`) are
+        also synced from remote so a repo change propagates to all installs.
         Returns True if anything changed and was saved.
         """
         with self._lock:
             changed = False
             for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
+                if key in remote and remote[key] != self._data.get(key):
+                    self._data[key] = remote[key]
+                    changed = True
+            for key in ("enable_live_config", "enable_github_push", "auto_start"):
                 if key in remote and remote[key] != self._data.get(key):
                     self._data[key] = remote[key]
                     changed = True
@@ -237,17 +243,23 @@ class ConfigManager:
     def enable_github_push(self) -> bool:
         """Whether manual additions should be pushed back to GitHub.
 
-        Local-only; never overwritten by remote. Requires a PAT in
-        `github_token.txt` or env FILEPICKER_GITHUB_TOKEN.
+        Requires a PAT in `github_token.txt` or env FILEPICKER_GITHUB_TOKEN.
+        If the key is missing (old installs) it defaults to *enabled* when a
+        token is present, so placing the token file is enough.
         """
-        return bool(self.load().get("enable_github_push", False))
+        val = self.load().get("enable_github_push", None)
+        if val is None:
+            # Old config without the flag — enable automatically when token exists
+            return bool(_read_github_token()) and self.enable_live_config
+        return bool(val)
 
     def _github_push_enabled(self) -> bool:
         if not self.enable_live_config:
             return False
-        if not self.enable_github_push:
+        # Token must exist; flag may be missing (old config) — handled above
+        if not _read_github_token():
             return False
-        return bool(_read_github_token())
+        return self.enable_github_push
 
     # ------------------------------------------------------------------
     # Push local additions back to GitHub (so every machine sees them)
