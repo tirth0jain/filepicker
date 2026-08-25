@@ -49,6 +49,15 @@ def _target() -> tuple:
     return str(pythonw), f'"{main_py}"', str(main_py.parent)
 
 
+def _powershell_flags() -> dict:
+    """Return subprocess flags to hide the PowerShell console window on Windows."""
+    flags: dict = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags["creationflags"] = subprocess.CREATE_NO_WINDOW
+    # Also hide the window via PowerShell itself
+    return flags
+
+
 def install() -> bool:
     """Create the Startup-folder shortcut. Returns True on success."""
     lnk = _startup_dir() / _SHORTCUT_NAME
@@ -63,8 +72,9 @@ def install() -> bool:
     )
     try:
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
             check=True, capture_output=True, timeout=30,
+            **_powershell_flags(),
         )
         return lnk.exists()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -97,8 +107,9 @@ def _read_shortcut(lnk: Path):
     )
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
             check=True, capture_output=True, text=True, timeout=30,
+            **_powershell_flags(),
         )
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         if len(lines) >= 2:

@@ -22,10 +22,7 @@
   "enable_github_push": true,
   "auto_start": true,
   "clients": {
-    "AAK KAMANI PVT LTD": [
-      "tirth",
-      "samay"
-    ],
+    "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
     "ALUMAYER INDIA PVT LTD": [],
     "AMI CONSTRUCTIONS": [],

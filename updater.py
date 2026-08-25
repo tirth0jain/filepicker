@@ -278,16 +278,6 @@ def _write_batch_and_launch(
             except OSError:
                 pass
 
-        # Use PowerShell for robust recursive copy + .old cleanup + shortcut
-        # `xcopy` fails on long paths and doesn't clean `*.old` inside subdirs.
-        ps_copy = (
-            f"Copy-Item -Path '{new_dir}\\*' -Destination '{app_dir}' "
-            f"-Recurse -Force -ErrorAction SilentlyContinue"
-        )
-        ps_clean = (
-            f"Get-ChildItem -Path '{app_dir}' -Recurse -Filter '*.old' "
-            f"| Remove-Item -Force -Recurse -ErrorAction SilentlyContinue"
-        )
         # Shortcut repair — must match startup.py's _target for frozen
         ps_shortcut = (
             f"$ws=New-Object -ComObject WScript.Shell;"
@@ -310,17 +300,21 @@ if %ERRORLEVEL%==0 (
   timeout /t 1 /nobreak >nul
   goto waitloop
 )
-:: Copy new build over app dir (preserved files were removed from NEW_DIR)
-powershell -NoProfile -Command "{ps_copy}" >nul 2>&1
-:: Clean any leftover .old (from previous failed in-place swaps) recursively
-powershell -NoProfile -Command "{ps_clean}" >nul 2>&1
-:: Record new version + update notice (preserved files were not copied, so write them now)
-powershell -NoProfile -Command "Set-Content -Path '{app_dir}\\{_INSTALLED_TAG_FILE}' -Value '{new_tag}' -Encoding UTF8" >nul 2>&1
-powershell -NoProfile -Command "Set-Content -Path '{app_dir}\\last_update.txt' -Value '{old_tag} -> {new_tag}' -Encoding UTF8" >nul 2>&1
+:: Copy new build over app dir (xcopy is native, no PowerShell window)
+xcopy "%NEW_DIR%\\*" "%APP_DIR%\\" /E /Y /H /Q >nul 2>&1
+:: Fallback PowerShell copy for long paths (hidden)
+powershell -NoProfile -WindowStyle Hidden -Command "Copy-Item -Path '%NEW_DIR%\\*' -Destination '%APP_DIR%' -Recurse -Force -ErrorAction SilentlyContinue" >nul 2>&1
+:: Clean any leftover .old recursively (old in-place swaps)
+del /S /Q "%APP_DIR%\\*.old" >nul 2>&1
+for /D %%i in ("%APP_DIR%\\*.old") do rd /S /Q "%%i" >nul 2>&1
+powershell -NoProfile -WindowStyle Hidden -Command "Get-ChildItem -Path '%APP_DIR%' -Recurse -Filter '*.old' | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue" >nul 2>&1
+:: Record new version + update notice
+echo {new_tag}> "%APP_DIR%\\{_INSTALLED_TAG_FILE}"
+echo {old_tag} -> {new_tag}> "%APP_DIR%\\last_update.txt"
 :: Clean up the temp extraction folder
 rd /S /Q "%EXTRACT_ROOT%" >nul 2>&1
-:: Repair Startup shortcut (auto-start after update)
-powershell -NoProfile -Command "{ps_shortcut}" >nul 2>&1
+:: Repair Startup shortcut (hidden)
+powershell -NoProfile -WindowStyle Hidden -Command "{ps_shortcut}" >nul 2>&1
 :: Relaunch (no SmartScreen — file was copied locally, not downloaded)
 start "" "%APP_DIR%\\%EXE%"
 :: Self-delete
