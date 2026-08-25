@@ -34,6 +34,43 @@ from version import VERSION
 from watcher import DownloadWatcher
 
 
+def _setup_file_logging() -> None:
+    """Mirror all prints to FilePicker.log next to the exe (visible even with --windows-console-mode=disable)."""
+    try:
+        if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)) or Path(sys.executable).name.lower() == "filepicker.exe":
+            log_path = Path(sys.executable).parent / "FilePicker.log"
+        else:
+            log_path = Path(__file__).resolve().parent / "FilePicker.log"
+        import logging
+
+        logging.basicConfig(
+            filename=str(log_path),
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            filemode="a",
+        )
+
+        class _Writer:
+            def __init__(self, level):
+                self.level = level
+
+            def write(self, msg):
+                if msg and msg.strip():
+                    logging.log(self.level, msg.strip())
+
+            def flush(self):
+                pass
+
+        sys.stdout = _Writer(logging.INFO)  # type: ignore
+        sys.stderr = _Writer(logging.ERROR)  # type: ignore
+        print(f"[filepicker] logging to {log_path} v{VERSION} frozen={getattr(sys,'frozen',False)} pid={os.getpid()}")
+    except Exception as exc:
+        try:
+            print(f"[filepicker] log setup failed: {exc}")
+        except Exception:
+            pass
+
+
 # Popup palette (matches popup.py / viewer.py).
 _BG = "#15151d"
 _BG_SECONDARY = "#1f1f2b"
@@ -532,8 +569,10 @@ class FilePickerController:
 
 
 def main() -> None:
+    _setup_file_logging()
     # Handle one-shot CLI flags before starting the background app.
     args = sys.argv[1:]
+    print(f"[filepicker] start v{VERSION} args={args} exe={sys.executable} cwd={os.getcwd()}")
     if "--install-startup" in args:
         from startup import install
         print("Auto-start installed." if install() else "Failed to install auto-start.")
@@ -608,7 +647,20 @@ def main() -> None:
         print(f"[filepicker] startup sync check failed: {exc}")
 
     controller = FilePickerController(config)
-    controller.run()
+    try:
+        controller.run()
+    except Exception as exc:
+        import traceback
+
+        msg = f"FilePicker crashed: {exc}\n{traceback.format_exc()}"
+        print(msg)
+        try:
+            import tkinter.messagebox as mb
+
+            mb.showerror("FilePicker — Crash", msg[:2000])
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":

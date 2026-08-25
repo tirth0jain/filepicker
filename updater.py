@@ -451,24 +451,27 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         except OSError:
             pass
 
-    # For frozen (real) installs: use a batch that runs after this process
-    # exits so no DLL is locked. This avoids the `.old` explosion the user saw
-    # and guarantees a clean relaunch + Startup shortcut repair.
-    if _is_frozen():
-        try:
-            _write_batch_and_launch(app_dir, new_dir, extract_root, new_tag, old_tag)
-            try:
-                staged_zip.unlink(missing_ok=True)
-            except OSError:
-                pass
-            print(f"[updater] update {new_tag} staged via batch; exiting for swap...")
-            os._exit(0)
-        except SystemExit:
-            raise
-        except Exception as exc:
-            print(f"[updater] batch updater failed ({exc}), falling back to in-place")
+    # Batch updater disabled — it was flagged by Windows Defender as a
+    # dropper (writes a self-deleting .bat that uses PowerShell). Fall back to
+    # the proven in-place swap (renames locked files to .old, cleaned at next
+    # launch). No PowerShell windows, no SmartScreen after the first install.
+    # The .old leftovers are harmless and are deep-cleaned by
+    # _cleanup_old_files_deep on the next successful launch.
+    # if _is_frozen():
+    #     try:
+    #         _write_batch_and_launch(app_dir, new_dir, extract_root, new_tag, old_tag)
+    #         try:
+    #             staged_zip.unlink(missing_ok=True)
+    #         except OSError:
+    #             pass
+    #         print(f"[updater] update {new_tag} staged via batch; exiting for swap...")
+    #         os._exit(0)
+    #     except SystemExit:
+    #         raise
+    #     except Exception as exc:
+    #         print(f"[updater] batch updater failed ({exc}), falling back to in-place")
 
-    # --- In-place fallback (dev or if batch failed) ---
+    # --- In-place (proven, no batch, no Defender flag) ---
     # Prefer the project config.json shipped in the new build, unless the
     # installed app already has one.
     shipped_config = new_dir / "config.json"
