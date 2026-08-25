@@ -569,10 +569,9 @@ class FilePickerController:
 
 
 def main() -> None:
-    _setup_file_logging()
-    # Handle one-shot CLI flags before starting the background app.
+    # Handle one-shot CLI flags before file logging so console output is visible
+    # (file logging redirects stdout to FilePicker.log).
     args = sys.argv[1:]
-    print(f"[filepicker] start v{VERSION} args={args} exe={sys.executable} cwd={os.getcwd()}")
     if "--install-startup" in args:
         from startup import install
         print("Auto-start installed." if install() else "Failed to install auto-start.")
@@ -587,13 +586,15 @@ def main() -> None:
               else "Auto-start NOT working (shortcut missing or stale).")
         return
     if "--push-config" in args:
-        from config import ConfigManager
         cfg = ConfigManager()
         cfg.load()
         print(f"Push enabled: {cfg._github_push_enabled()} (live={cfg.enable_live_config}, push={cfg.enable_github_push})")
         ok = cfg.push_to_github(reason="FilePicker: manual --push-config")
         print("Push succeeded." if ok else "Push skipped/failed (check token and enable_github_push).")
         return
+
+    _setup_file_logging()
+    print(f"[filepicker] start v{VERSION} args={args} exe={sys.executable} cwd={os.getcwd()}")
 
     config = ConfigManager()
 
