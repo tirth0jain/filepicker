@@ -202,22 +202,50 @@ def _download(url: str, dest: Path) -> None:
 
 def _relaunch(new_exe: Path) -> None:
     """Launch the new binary and exit the current process."""
+    # Small delay to let the OS release handles after the copy
+    try:
+        time.sleep(0.5)
+    except Exception:
+        pass
+    if not new_exe.exists():
+        print(f"[updater] relaunch: new exe not found at {new_exe}")
+    else:
+        print(f"[updater] relaunching {new_exe} ...")
     try:
         cwd = str(new_exe.parent) if new_exe.parent.exists() else None
+        flags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            flags |= subprocess.CREATE_NO_WINDOW
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            flags |= subprocess.DETACHED_PROCESS
+        # Use CREATE_NO_WINDOW so no console flashes on relaunch
+        kwargs: dict = {"close_fds": True}
+        if cwd:
+            kwargs["cwd"] = cwd
+        if flags:
+            kwargs["creationflags"] = flags
         if _is_frozen():
-            subprocess.Popen([str(new_exe)], cwd=cwd, close_fds=True)
+            subprocess.Popen([str(new_exe)], **kwargs)
         else:
-            subprocess.Popen([sys.executable, str(new_exe)], cwd=cwd, close_fds=True)
+            subprocess.Popen([sys.executable, str(new_exe)], **kwargs)
+        print(f"[updater] Popen succeeded for {new_exe}")
     except Exception as exc:
         print(f"[updater] relaunch failed: {exc}")
-        # Fallback without cwd
+        # Fallback without cwd/flags
         try:
             if _is_frozen():
                 subprocess.Popen([str(new_exe)])
             else:
                 subprocess.Popen([sys.executable, str(new_exe)])
+            print(f"[updater] relaunch fallback succeeded")
         except Exception as exc2:
             print(f"[updater] relaunch fallback failed: {exc2}")
+    # Give the new process a moment to start before we exit
+    try:
+        time.sleep(0.3)
+    except Exception:
+        pass
+    print(f"[updater] exiting old process {os.getpid()} for update")
     os._exit(0)
 
 
@@ -514,33 +542,55 @@ def install_update(update: dict, staged_zip: Path) -> bool:
             pass
         fail(f"Failed copying the new build into the app folder: {exc}")
 
-    # 4. Remove stale files (mirror new build) — use deep scan so .old inside subdirs are also handled on next boot
+    # 4. Remove stale files so app_dir mirrors the new build.
+    # Deep scan: check every file/dir recursively, not just top-level.
+    # `.old` files are left for next-launch deep clean if locked.
     try:
-        for existing in list(app_dir.rglob("*")):
-            # rglob includes files inside subdirs; we only want top-level
-            # entries that are not in the new build — keep it simple: check
-            # top-level only for now, deep .old cleanup is done at next startup
-            # via _cleanup_old_files_deep
-            pass
-        for existing in list(app_dir.iterdir()):
-            name = existing.name
-            if name in _PRESERVE_FILES or name.endswith(".old"):
+        # Build set of all dirs in new build for quick check
+        new_dirs = {p for p in new_files if (new_dir / p).is_dir()}  # not needed, we check files only
+        for existing in sorted(app_dir.rglob("*"), reverse=True):  # reverse so files before dirs
+            try:
+                rel = existing.relative_to(app_dir)
+            except ValueError:
                 continue
-            rel = Path(name)
+            if rel.name in _PRESERVE_FILES or rel.suffix == ".old" or existing.suffix == ".old" or ".old" in str(rel):
+                continue
             if rel in new_files:
                 continue
-            try:
-                if existing.is_file():
-                    existing.unlink(missing_ok=True)
-                else:
-                    shutil.rmtree(existing, ignore_errors=True)
-            except (PermissionError, OSError):
+            # If it's a directory that contains a new file, don't delete the dir itself
+            # Check if any new_file is inside this dir
+            if existing.is_dir():
+                # Keep the dir if it contains any new file
+                keep = any(str(nf).startswith(str(rel) + os.sep) or str(nf) == str(rel) for nf in new_files)
+                if keep:
+                    continue
                 try:
-                    existing.rename(existing.with_name(existing.name + ".old"))
-                except OSError:
-                    pass
+                    # Only delete empty dirs that are not in new build
+                    if not any(existing.iterdir()):
+                        existing.rmdir()
+                    else:
+                        shutil.rmtree(existing, ignore_errors=True)
+                except (PermissionError, OSError):
+                    try:
+                        existing.rename(existing.with_name(existing.name + ".old"))
+                    except OSError:
+                        pass
+            else:
+                try:
+                    existing.unlink(missing_ok=True)
+                except (PermissionError, OSError):
+                    try:
+                        existing.rename(existing.with_name(existing.name + ".old"))
+                    except OSError:
+                        pass
     except Exception as exc:
-        fail(f"Failed cleaning up the app folder during update: {exc}")
+        print(f"[updater] stale cleanup warning: {exc}")
+
+    # 4b. Deep clean any leftover .old from previous failed updates (top + deep)
+    try:
+        _cleanup_old_files_deep(app_dir)
+    except Exception as exc:
+        print(f"[updater] .old cleanup warning: {exc}")
 
     # 5. Record installed tag + update notice.
     try:
