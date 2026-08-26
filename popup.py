@@ -407,6 +407,9 @@ class FilePickerPopup:
         self._serial_var = tk.StringVar()
         self._received_var = tk.BooleanVar(value=True)
         self._selected_materials: List[str] = []
+        # Company name placed by OCR that is NOT in the catalog — kept across
+        # live-config refreshes until the user picks a menu value.
+        self._ocr_company_override: Optional[str] = None
 
         # Material name -> shortcode mapping loaded once.
         self._materials_map: Dict[str, str] = {}
@@ -431,6 +434,10 @@ class FilePickerPopup:
         # Live config: refresh while open if someone pushes a new clients/sites list.
         self._config_poll_after = None
         self._start_config_poll()
+
+        # OCR auto-fill (only when enabled in config.json).
+        if self.config.enable_ocr:
+            self._start_ocr()
 
     def _set_banner(self) -> None:
         try:
@@ -545,6 +552,12 @@ class FilePickerPopup:
             self._banner, text="", font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
         )
         self._banner_size.pack(anchor="w", padx=14, pady=(0, 12))
+
+        # OCR status line — stays empty (invisible) unless enable_ocr is on.
+        self._ocr_label = ctk.CTkLabel(
+            f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED, anchor="w",
+        )
+        self._ocr_label.pack(fill="x", pady=(0, 8))
 
         # -- Company ----------------------------------------------------
         ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
@@ -714,7 +727,8 @@ class FilePickerPopup:
             cur_company = self._company_var.get()
             new_vals = companies + [ADD_NEW_COMPANY_OPTION]
             self.company_combo.configure(values=new_vals)
-            if cur_company not in companies and cur_company != ADD_NEW_COMPANY_OPTION:
+            if cur_company not in companies and cur_company != ADD_NEW_COMPANY_OPTION \
+                    and cur_company != getattr(self, "_ocr_company_override", None):
                 if companies:
                     self._company_var.set(companies[0])
                 else:
@@ -941,6 +955,8 @@ class FilePickerPopup:
     def _on_company_change(self, company: str) -> None:
         if not company or company == "(no companies)":
             return
+        # A menu pick overrides any OCR-placed (non-catalog) company.
+        self._ocr_company_override = None
         if company == ADD_NEW_COMPANY_OPTION:
             self._ask_text(
                 "Add New Company",
@@ -1071,6 +1087,120 @@ class FilePickerPopup:
         ctk.CTkButton(prompt, text="Cancel", command=cancel,
                       fg_color=_BG_FIELD, text_color=_TEXT_MUTED,
                       width=100).pack(side="left", pady=(0, 16))
+
+    # ------------------------------------------------------------------
+    # OCR auto-fill (OpenCode Go "DeepSeek V4 Flash Vision Exp")
+    # ------------------------------------------------------------------
+    def _set_ocr_status(self, text: str, color: str = _TEXT_MUTED) -> None:
+        label = getattr(self, "_ocr_label", None)
+        if label is None:
+            return
+        try:
+            label.configure(text=text, text_color=color)
+        except Exception:
+            pass
+
+    def _start_ocr(self) -> None:
+        """OCR the delivery note in the background, then pre-fill the fields.
+
+        The vision call can take 10–60s (reasoning model), so it always runs
+        on a daemon thread; results are applied via ``window.after(0, ...)``
+        on the UI thread and never clobber anything the user already typed.
+        """
+        token = self.config.opencode_token
+        if not token:
+            self._set_ocr_status(
+                "OCR: no API key — put opencode_token.txt next to the exe "
+                "(or set OPENCODE_API_KEY)"
+            )
+            return
+        from ocr import extract_delivery_note
+
+        model = self.config.ocr_model
+        api_base = self.config.ocr_api_base
+        self._set_ocr_status("OCR: reading document…", _ACCENT)
+
+        def work() -> None:
+            try:
+                result = extract_delivery_note(
+                    self.file_path, token=token, model=model, api_base=api_base,
+                )
+            except Exception as exc:
+                print(f"[filepicker] OCR error: {exc}")
+                result = None
+
+            def apply() -> None:
+                try:
+                    if not self.window.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                if not result or not any(result.values()):
+                    self._set_ocr_status("OCR: could not read document")
+                    return
+                if self._apply_ocr_result(result):
+                    self._set_ocr_status(
+                        "OCR: Company/Client/Site filled — check before saving", _SUCCESS
+                    )
+                else:
+                    self._set_ocr_status("OCR: done (fields already filled)")
+
+            try:
+                self.window.after(0, apply)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=work, name="filepicker-ocr", daemon=True).start()
+
+    def _apply_ocr_result(self, result: Dict[str, str]) -> bool:
+        """Pre-fill Company/Client/Site from the OCR table.
+
+        Never clobbers fields the user already typed (if client or site has
+        any text, the whole result is skipped). Catalog entries are matched
+        case-insensitively so the canonical spelling is used when one exists;
+        unknown names stay typed as-is and flow through the normal
+        Save / Add flows for the user to confirm.
+        """
+        # If the user already started filling client/site, leave everything alone.
+        if self.client_dropdown.entry.get().strip() or self.site_dropdown.entry.get().strip():
+            return False
+
+        company = (result.get("company") or "").strip()
+        client = (result.get("client") or "").strip()
+        site = (result.get("site") or "").strip()
+        if not (company or client or site):
+            return False
+
+        # Company (CTkOptionMenu): canonical catalog spelling when a
+        # case-insensitive match exists, else keep the OCR text as-is (and
+        # remember it so live-config refreshes don't revert it).
+        if company:
+            canonical = self._ci_canonical(self.config.companies, company)
+            self._ocr_company_override = company if not canonical else None
+            self._company_var.set(canonical if canonical else company)
+
+        # Client + Site (searchable dropdowns): same canonical lookup;
+        # unknown names stay typed and can be added at Save time.
+        if client:
+            canonical_client = self._ci_canonical(list(self.config.clients.keys()), client)
+            client_value = canonical_client if canonical_client else client
+            self.client_dropdown.set(client_value)
+            self._client_var.set(client_value)
+            self._populate_sites(client_value)
+        if site:
+            self.site_dropdown.set(site)
+
+        self._refresh_preview()
+        return True
+
+    @staticmethod
+    def _ci_canonical(values: List[str], name: str) -> Optional[str]:
+        """The catalog spelling matching *name* case-insensitively, if any."""
+        lowered = name.strip().lower()
+        for value in values:
+            if str(value).strip().lower() == lowered:
+                return str(value)
+        return None
 
     # ------------------------------------------------------------------
     # Preview + submit

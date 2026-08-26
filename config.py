@@ -17,6 +17,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ocr import OCR_API_BASE, OCR_MODEL
+
 # Remote live config — single source of truth for clients/sites.
 # Every popup fetches this so all users see the same data instantly.
 GITHUB_CONFIG_URL = "https://raw.githubusercontent.com/tirth0jain/filepicker/main/config.json"
@@ -68,6 +70,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # The token is NEVER stored in config.json — it lives in
     # `github_token.txt` next to the exe (or env FILEPICKER_GITHUB_TOKEN).
     "enable_github_push": True,
+    # OCR auto-fill of the popup (Company/Client/Site) using the OpenCode Go
+    # "DeepSeek V4 Flash Vision Exp" model. LOCAL-ONLY toggle: it is never
+    # synced from the GitHub config nor pushed back, because OCR needs this
+    # machine's own API key (see _read_opencode_token) and one machine
+    # enabling it must not force it on every install.
+    "enable_ocr": True,
+    # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
+    # OpenAI-compatible API). Overridable per machine in config.json.
+    "ocr_model": OCR_MODEL,
+    "ocr_api_base": OCR_API_BASE,
 }
 
 
@@ -94,6 +106,56 @@ def default_token_path() -> Path:
     if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
         return Path(sys.executable).resolve().parent / "github_token.txt"
     return Path(__file__).resolve().parent / "github_token.txt"
+
+
+def default_opencode_token_path() -> Path:
+    """Path to the file that holds the OpenCode Go API key used by OCR.
+
+    Mirrors ``github_token.txt``: `opencode_token.txt` next to the exe (or
+    env FILEPICKER_OPENCODE_TOKEN / OPENCODE_API_KEY). The key is the same
+    one the opencode CLI uses (see `opencode auth`), and it is deliberately
+    NEVER stored in config.json — otherwise it would be pushed to the public
+    repo when the config is synced.
+    """
+    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
+        return Path(sys.executable).resolve().parent / "opencode_token.txt"
+    return Path(__file__).resolve().parent / "opencode_token.txt"
+
+
+def _read_opencode_token() -> Optional[str]:
+    """Return the OpenCode Go API key used by the OCR feature, else None.
+
+    Order: env FILEPICKER_OPENCODE_TOKEN → env OPENCODE_API_KEY →
+    opencode_token.txt (first line, `token = xyz` or bare) → opencode's own
+    auth store as a dev convenience (~/.local/share/opencode/auth.json,
+    providers "opencode-go" then "opencode").
+    """
+    for env_key in ("FILEPICKER_OPENCODE_TOKEN", "OPENCODE_API_KEY"):
+        token = os.environ.get(env_key, "").strip()
+        if token:
+            return token
+    try:
+        token_path = default_opencode_token_path()
+        if token_path.exists():
+            text = token_path.read_text(encoding="utf-8").strip()
+            # Support file with `token = xyz` or just `xyz`
+            if "=" in text:
+                text = text.split("=", 1)[1].strip().strip('"\' ')
+            return text or None
+    except OSError:
+        pass
+    # Dev fallback: reuse the key the user pasted into `opencode auth`.
+    try:
+        auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+        if auth.exists():
+            data = json.loads(auth.read_text(encoding="utf-8"))
+            for provider in ("opencode-go", "opencode"):
+                entry = data.get(provider)
+                if isinstance(entry, dict) and entry.get("key"):
+                    return str(entry["key"]).strip() or None
+    except Exception:
+        pass
+    return None
 
 
 def _read_github_token() -> Optional[str]:
@@ -560,6 +622,31 @@ class ConfigManager:
     def auto_start(self) -> bool:
         """Whether the app should register itself to launch at Windows login."""
         return bool(self.load().get("auto_start", True))
+
+    @property
+    def enable_ocr(self) -> bool:
+        """Whether the popup auto-fills Company/Client/Site via OCR.
+
+        Reads the LOCAL config only — like watch_directory/root_directory,
+        this flag is never merged from the GitHub config nor pushed back, so
+        one machine can enable OCR without forcing it on all installs.
+        """
+        return bool(self.load().get("enable_ocr", False))
+
+    @property
+    def ocr_model(self) -> str:
+        """The vision model id used for OCR (OpenCode Go catalog)."""
+        return str(self.load().get("ocr_model", OCR_MODEL))
+
+    @property
+    def ocr_api_base(self) -> str:
+        """The OpenAI-compatible endpoint base used for OCR."""
+        return str(self.load().get("ocr_api_base", OCR_API_BASE))
+
+    @property
+    def opencode_token(self) -> Optional[str]:
+        """The OpenCode Go API key (env / opencode_token.txt / opencode auth store)."""
+        return _read_opencode_token()
 
     # ------------------------------------------------------------------
     # Mutators (each persists to disk)

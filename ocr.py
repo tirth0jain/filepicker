@@ -1,0 +1,302 @@
+"""OCR of delivery-note documents via the OpenCode Go vision model.
+
+When ``enable_ocr`` is on, the popup sends the first page of a new download
+(PDF or image) to the **DeepSeek V4 Flash Vision Exp** model on the OpenCode
+Go catalog (`opencode.ai/zen/go/v1`, OpenAI-compatible API) with a prompt
+that asks for:
+
+    Company (Supplier) / Client (Buyer) / Site (Other References)
+
+and pre-fills the popup fields from the returned table.
+
+Credentials are resolved by :func:`config._read_opencode_token` — the same
+key as the opencode CLI uses. Production machines put the key in
+``opencode_token.txt`` next to the exe (or env ``FILEPICKER_OPENCODE_TOKEN``
+/ ``OPENCODE_API_KEY``); dev machines fall back to opencode's own auth store.
+
+This module intentionally has no UI and never raises: callers always get a
+plain dict (``None`` values for fields the model could not determine) or
+``None`` when the whole call failed.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Dict, Optional
+
+from version import VERSION
+
+# OpenCode Go catalog endpoint (OpenAI-compatible). Both the OpenCode Go
+# subscription and the zen catalog share one key; the Go catalog is served
+# under /zen/go/v1.
+OCR_API_BASE = "https://opencode.ai/zen/go/v1"
+
+# The vision model from the user's OpenCode Go subscription ("DeepSeek V4
+# Flash Vision Exp"). Reasoning-heavy: needs a large max_tokens budget or it
+# runs out of room before producing the answer table (see OCR_MAX_TOKENS).
+OCR_MODEL = "deepseek-v4-flash-vision-exp"
+
+# The model burns ~1500 tokens reasoning on a simple delivery note; 4096
+# leaves room for harder documents without truncating the answer table.
+OCR_MAX_TOKENS = 4096
+
+# Total wall-clock budget for one OCR call (seconds). Vision + reasoning on a
+# busy gateway can take a while; 120s keeps the popup snappy while allowing
+# the model to finish.
+OCR_TIMEOUT = 120
+
+# Maximum image dimension sent to the model (pixels). Keeps the request
+# small and fast without hurting text legibility.
+OCR_MAX_IMAGE_DIM = 1600
+
+# JPEG quality used when compressing the rendered page for the API call.
+OCR_JPEG_QUALITY = 90
+
+# Cloudflare in front of the OpenCode gateway blocks the default
+# "Python-urllib" user agent (HTTP 403, error code 1010), so every request
+# carries a browser-like application UA.
+_UA = f"FilePicker/{VERSION} (Windows; DeliveryNote OCR)"
+
+# The extraction prompt — verbatim from the feature spec.
+OCR_PROMPT = """You are given a delivery note document. Extract the following information and present it in a table format:
+
+1. Company (Supplier) - the company supplying the goods (e.g., Ruby Steel)
+2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
+3. Site - the value present in the "Other References" field (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
+
+Rules:
+- Company is the supplier (from the "From" / "RUBY STEEL" section)
+- Client is the buyer/consignee (from "Buyer (Bill to)" or "Consignee (Ship to)" section)
+- Site is always what appears in the "Other References" field
+- Case insensitive, convert to Title Case
+
+Output format:
+
+| Role | Value |
+|------|-------|
+| Company (Supplier) | [Name] |
+| Client (Buyer) | [Name] |
+| Site (Other References) | [Name] |"""
+
+# Labels the model is asked to emit, mapped to our result keys. Matching is
+# case-insensitive and tolerant of extra whitespace/backticks around the row.
+_ROW_PATTERNS = {
+    "company": re.compile(r"Company\s*\(Supplier\)", re.IGNORECASE),
+    "client": re.compile(r"Client\s*\(Buyer\)", re.IGNORECASE),
+    "site": re.compile(r"Site\s*\(Other\s*References\)", re.IGNORECASE),
+}
+
+# Values that mean "nothing found" — treated as absent.
+_NULL_VALUES = {"", "-", "--", "n/a", "na", "none", "not found", "not available", "unknown"}
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif", ".gif"}
+
+
+def render_to_data_url(
+    file_path: Path,
+    max_dim: int = OCR_MAX_IMAGE_DIM,
+    quality: int = OCR_JPEG_QUALITY,
+) -> Optional[str]:
+    """Render the first page of *file_path* to a JPEG data URL for the vision API.
+
+    PDFs are rendered with PyMuPDF (first page, ~144 DPI); images are loaded
+    with Pillow (first frame). Returns None for unsupported files or render
+    errors — callers continue without OCR.
+    """
+    try:
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".pdf":
+            return _pdf_to_data_url(file_path, max_dim=max_dim, quality=quality)
+        if suffix in _IMAGE_EXTS:
+            return _image_to_data_url(file_path, max_dim=max_dim, quality=quality)
+        print(f"[ocr] unsupported file type for OCR: {file_path}")
+    except Exception as exc:
+        print(f"[ocr] could not render {file_path} for OCR: {exc}")
+    return None
+
+
+def _pdf_to_data_url(file_path: Path, max_dim: int, quality: int) -> Optional[str]:
+    try:
+        import pymupdf as fitz
+    except ImportError:  # older PyMuPDF (<1.24) exposes the module as `fitz`
+        import fitz  # type: ignore
+    with fitz.open(str(file_path)) as doc:
+        page = doc[0] if doc.page_count else None
+        if page is None:
+            return None
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        # PyMuPDF 1.24+ deprecated Pixmap.tobytes("png"); do the conversion via
+        # Pillow so we always have a JPEG data URL regardless of version.
+        img_bytes = pix.tobytes("png")
+    return _pil_to_data_url(io.BytesIO(img_bytes), max_dim=max_dim, quality=quality)
+
+
+def _image_to_data_url(file_path: Path, max_dim: int, quality: int) -> Optional[str]:
+    from PIL import Image
+    with Image.open(file_path) as img:
+        img.seek(0)  # first frame of GIF/TIFF
+        return _pil_to_data_url(img, max_dim=max_dim, quality=quality)
+
+
+def _pil_to_data_url(image, max_dim: int, quality: int) -> str:
+    from PIL import Image
+
+    if not isinstance(image, Image.Image):
+        with Image.open(image) as img:
+            pil = img.copy()
+    else:
+        pil = image
+
+    # Flatten transparency onto white so JPEG compression is lossless-ish for
+    # scans and keeps no alpha channel.
+    if pil.mode in ("RGBA", "LA", "P"):
+        rgba = pil.convert("RGBA")
+        bg = Image.new("RGB", rgba.size, (255, 255, 255))
+        bg.paste(rgba, mask=rgba.split()[-1])
+        pil = bg
+    elif pil.mode != "RGB":
+        pil = pil.convert("RGB")
+
+    if max(pil.size) > max_dim:
+        pil.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    pil.save(buf, format="JPEG", quality=quality)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def parse_table_response(content: str) -> Dict[str, Optional[str]]:
+    """Extract Company/Client/Site from the model's markdown table.
+
+    Tolerates code fences, extra surrounding text, different label casing and
+    values wrapped in ``**``. Fields the model couldn't determine (or that
+    came back as "N/A") become ``None``.
+    """
+    result: Dict[str, Optional[str]] = {"company": None, "client": None, "site": None}
+    if not content:
+        return result
+
+    lines = content.splitlines()
+    for raw_line in lines:
+        # A table row looks like: | Company (Supplier) | Ruby Steel | .
+        # Normalise markdown emphasis first so **Company (Supplier)** and
+        # `Company (Supplier)` labels also match.
+        line = raw_line.replace("**", "").strip()
+        if "|" not in line:
+            continue
+        for key, label_re in _ROW_PATTERNS.items():
+            if result[key] is not None:
+                continue  # first row wins
+            m = re.search(r"\|\s*" + label_re.pattern + r"\s*\|\s*([^|\n]+?)\s*\|", line, re.IGNORECASE)
+            if not m:
+                continue
+            value = m.group(1).strip().strip("`").strip()
+            value = re.sub(r"^\*\*|\*\*$", "", value).strip()
+            if value.lower() in _NULL_VALUES:
+                value = ""
+            if value:
+                result[key] = value
+    return result
+
+
+def extract_delivery_note(
+    file_path,
+    token: str,
+    model: str = OCR_MODEL,
+    api_base: str = OCR_API_BASE,
+    prompt: str = OCR_PROMPT,
+    max_tokens: int = OCR_MAX_TOKENS,
+    timeout: float = OCR_TIMEOUT,
+) -> Optional[Dict[str, Optional[str]]]:
+    """Run OCR on *file_path* and return {company, client, site} (None on failure).
+
+    Never raises: network/render/model errors are logged and return None so
+    the popup can simply skip auto-fill.
+    """
+    data_url = render_to_data_url(Path(file_path))
+    if data_url is None:
+        return None
+
+    body = json.dumps({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        "max_tokens": max_tokens,
+    }).encode("utf-8")
+
+    endpoint = api_base.rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": _UA,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")[:300]
+        except Exception:
+            pass
+        print(f"[ocr] OpenCode Go API error ({e.code}): {detail}")
+        return None
+    except Exception as exc:
+        print(f"[ocr] OpenCode Go API call failed: {exc}")
+        return None
+
+    try:
+        content = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError):
+        print(f"[ocr] unexpected API response: {str(data)[:300]}")
+        return None
+
+    result = parse_table_response(content)
+    if not any(result.values()):
+        usage = data.get("usage") or {}
+        fin = (data.get("choices") or [{}])[0].get("finish_reason")
+        reason = f"finish_reason={fin}" if fin else "no usage"
+        if usage.get("completion_tokens") and usage.get("completion_tokens_details", {}).get("reasoning_tokens"):
+            reason = f"reasoning consumed all {usage.get('completion_tokens')} tokens"
+        print(f"[ocr] model returned no fields ({reason})")
+    return result
+
+
+if __name__ == "__main__":
+    # CLI for testing:  python ocr.py <delivery-note.pdf|image> [model] [api_base]
+    if len(sys.argv) < 2:
+        print("usage: python ocr.py <file.pdf|file.png> [model] [api_base]")
+        sys.exit(2)
+    from config import _read_opencode_token
+
+    token = _read_opencode_token()
+    if not token:
+        print("No OpenCode Go API key found (env FILEPICKER_OPENCODE_TOKEN / OPENCODE_API_KEY / opencode_token.txt).")
+        sys.exit(1)
+    model = sys.argv[2] if len(sys.argv) > 2 else OCR_MODEL
+    api_base = sys.argv[3] if len(sys.argv) > 3 else OCR_API_BASE
+    out = extract_delivery_note(sys.argv[1], token=token, model=model, api_base=api_base)
+    if out is None:
+        print("OCR failed (see logs above).")
+        sys.exit(1)
+    for key in ("company", "client", "site"):
+        print(f"{key}: {out.get(key)}")
