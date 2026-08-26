@@ -24,12 +24,14 @@ from __future__ import annotations
 import base64
 import io
 import json
+import queue
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from version import VERSION
 
@@ -58,6 +60,12 @@ OCR_MAX_IMAGE_DIM = 1600
 
 # JPEG quality used when compressing the rendered page for the API call.
 OCR_JPEG_QUALITY = 90
+
+# Maximum number of vision calls run at the same time. When many files land
+# at once, OCR is processed in batches of this size: as soon as one of the
+# current calls finishes, the next queued file starts (so at most
+# MAX_CONCURRENT_OCR requests are ever in flight).
+MAX_CONCURRENT_OCR = 5
 
 # Cloudflare in front of the OpenCode gateway blocks the default
 # "Python-urllib" user agent (HTTP 403, error code 1010), so every request
@@ -279,6 +287,141 @@ def extract_delivery_note(
             reason = f"reasoning consumed all {usage.get('completion_tokens')} tokens"
         print(f"[ocr] model returned no fields ({reason})")
     return result
+
+
+class OcrPool:
+    """Bounded background OCR worker pool.
+
+    Every file that lands in the watch folder is submitted eagerly, so by the
+    time its popup opens the result is usually already cached. At most
+    :data:`MAX_CONCURRENT_OCR` vision calls run at once — when many files
+    arrive together they are processed in batches of that size: as soon as
+    one call finishes, the next queued file starts (never more than 5
+    requests in flight).
+
+    Results are cached by resolved path; callers either poll :meth:`get` or
+    register a completion callback with :meth:`submit`. Never raises: every
+    failure surfaces as a ``None`` result. Workers are daemon threads so the
+    app can always quit immediately, even mid-call.
+    """
+
+    # Sentinel pushed on shutdown to stop the workers.
+    _STOP = object()
+
+    def __init__(
+        self,
+        token: Optional[str],
+        model: str = OCR_MODEL,
+        api_base: str = OCR_API_BASE,
+        max_concurrent: int = MAX_CONCURRENT_OCR,
+    ) -> None:
+        self._token = token
+        self._model = model
+        self._api_base = api_base
+        self._max = max(1, max_concurrent)
+        self._queue: "queue.Queue" = queue.Queue()
+        self._lock = threading.Lock()
+        self._results: Dict[str, Optional[Dict[str, Optional[str]]]] = {}
+        self._active: set = set()          # paths queued or running
+        self._waiters: Dict[str, List[Callable]] = {}
+        self._workers = [
+            threading.Thread(target=self._worker, daemon=True,
+                             name=f"filepicker-ocr-{i}")
+            for i in range(self._max)
+        ]
+        for w in self._workers:
+            w.start()
+
+    @property
+    def available(self) -> bool:
+        """True when an API key is present so OCR can actually run."""
+        return bool(self._token)
+
+    def _key(self, file_path) -> str:
+        return str(Path(file_path).resolve())
+
+    def get(self, file_path) -> Optional[Dict[str, Optional[str]]]:
+        """The cached OCR result for *file_path* (None if not finished yet)."""
+        with self._lock:
+            return self._results.get(self._key(file_path))
+
+    def submit(self, file_path, on_done: Optional[Callable] = None) -> bool:
+        """Queue OCR for *file_path* (no-op when already queued or finished).
+
+        If the result is already cached, *on_done* fires immediately on the
+        calling thread. Otherwise it fires (once, from a worker thread) when
+        the OCR call completes. Returns True when the file was newly queued.
+        """
+        if not self.available:
+            if on_done is not None:
+                try:
+                    on_done(None)
+                except Exception:
+                    pass
+            return False
+        key = self._key(file_path)
+        with self._lock:
+            if key in self._results:
+                done = True
+                result = self._results[key]
+            elif key in self._active:
+                done = False
+                result = None
+                if on_done is not None:
+                    self._waiters.setdefault(key, []).append(on_done)
+                return False
+            else:
+                self._active.add(key)
+                if on_done is not None:
+                    self._waiters.setdefault(key, []).append(on_done)
+                self._queue.put((Path(file_path), key))
+                return True
+        if done and on_done is not None:
+            try:
+                on_done(result)
+            except Exception:
+                pass
+        return False
+
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is self._STOP:
+                self._queue.task_done()
+                return
+            path, key = item
+            try:
+                self._work(path, key)
+            except Exception as exc:
+                print(f"[ocr] worker error for {path}: {exc}")
+            finally:
+                self._queue.task_done()
+
+    def _work(self, file_path: Path, key: str) -> None:
+        try:
+            result = extract_delivery_note(
+                file_path, token=self._token, model=self._model, api_base=self._api_base,
+            )
+        except Exception as exc:  # belt & braces: extract never raises
+            print(f"[ocr] OCR error for {file_path}: {exc}")
+            result = None
+        with self._lock:
+            self._results[key] = result
+            self._active.discard(key)
+            waiters = list(self._waiters.pop(key, []))
+        for cb in waiters:
+            try:
+                cb(result)
+            except Exception:
+                pass
+
+    def shutdown(self) -> None:
+        """Stop the workers (in-flight calls finish; queued ones are dropped)."""
+        for _ in range(self._max):
+            try:
+                self._queue.put(self._STOP)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

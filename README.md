@@ -122,6 +122,12 @@ brand-new names stay typed so you can review (and optionally *Add*) them
 before saving. The key never lands in `config.json`, so it can't leak to the
 public repo.
 
+**Batches of 5:** every file that lands in the watch folder is read in the
+background as it arrives (not when its popup opens), so popups open already
+pre-filled. When you drop many files at once, at most **5 vision calls run
+concurrently** — as one finishes, the next queued file starts, so a folder
+of 20 notes is read in ~4 waves instead of 20 sequential waits.
+
 ## Usage
 
 **From source (dev):**
@@ -276,5 +282,3 @@ filepicker/
 ├── requirements.txt
 └── .github/workflows/build.yml   # CI: build + release on every commit
 ```
-# filepicker
-# filepicker

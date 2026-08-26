@@ -394,11 +394,13 @@ class FilePickerPopup:
         file_path: Path,
         on_submit: Callable[[dict], None],
         on_skip: Callable[[], None],
+        ocr_pool=None,
     ) -> None:
         self.config = config
         self.file_path = Path(file_path)
         self.on_submit = on_submit
         self.on_skip = on_skip
+        self.ocr_pool = ocr_pool  # OcrPool (eager background OCR) or None
 
         # Internal UI state.
         self._company_var = tk.StringVar()
@@ -1101,56 +1103,58 @@ class FilePickerPopup:
             pass
 
     def _start_ocr(self) -> None:
-        """OCR the delivery note in the background, then pre-fill the fields.
+        """Consume the background OCR result for this file (if any).
 
-        The vision call can take 10–60s (reasoning model), so it always runs
-        on a daemon thread; results are applied via ``window.after(0, ...)``
+        OCR of every completed download is kicked off eagerly by the
+        controller's OcrPool (bounded to 5 concurrent vision calls), so by
+        the time a popup opens the result is usually already cached. If it is
+        still in flight we subscribe to its completion; results are applied
         on the UI thread and never clobber anything the user already typed.
         """
-        token = self.config.opencode_token
-        if not token:
+        pool = getattr(self, "ocr_pool", None)
+        if pool is None:
+            return  # feature disabled
+        if not pool.available:
             self._set_ocr_status(
                 "OCR: no API key — put opencode_token.txt next to the exe "
                 "(or set OPENCODE_API_KEY)"
             )
             return
-        from ocr import extract_delivery_note
 
-        model = self.config.ocr_model
-        api_base = self.config.ocr_api_base
+        cached = pool.get(self.file_path)
+        if cached is not None:
+            self._apply_ocr_outcome(cached)
+            return
+
         self._set_ocr_status("OCR: reading document…", _ACCENT)
 
-        def work() -> None:
-            try:
-                result = extract_delivery_note(
-                    self.file_path, token=token, model=model, api_base=api_base,
-                )
-            except Exception as exc:
-                print(f"[filepicker] OCR error: {exc}")
-                result = None
-
+        def on_done(result) -> None:
             def apply() -> None:
                 try:
                     if not self.window.winfo_exists():
                         return
                 except tk.TclError:
                     return
-                if not result or not any(result.values()):
-                    self._set_ocr_status("OCR: could not read document")
-                    return
-                if self._apply_ocr_result(result):
-                    self._set_ocr_status(
-                        "OCR: Company/Client/Site filled — check before saving", _SUCCESS
-                    )
-                else:
-                    self._set_ocr_status("OCR: done (fields already filled)")
+                self._apply_ocr_outcome(result)
 
             try:
                 self.window.after(0, apply)
             except tk.TclError:
                 pass
 
-        threading.Thread(target=work, name="filepicker-ocr", daemon=True).start()
+        pool.submit(self.file_path, on_done)
+
+    def _apply_ocr_outcome(self, result) -> None:
+        """Update the status line + fields once an OCR result is available."""
+        if not result or not any(result.values()):
+            self._set_ocr_status("OCR: could not read document")
+            return
+        if self._apply_ocr_result(result):
+            self._set_ocr_status(
+                "OCR: Company/Client/Site filled — check before saving", _SUCCESS
+            )
+        else:
+            self._set_ocr_status("OCR: done (fields already filled)")
 
     def _apply_ocr_result(self, result: Dict[str, str]) -> bool:
         """Pre-fill Company/Client/Site from the OCR table.

@@ -134,6 +134,7 @@ class FilePickerController:
         self._tray = None
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
+        self._ocr_pool = None  # OcrPool — eager background OCR (max 5 concurrent)
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -187,6 +188,15 @@ class FilePickerController:
     def _on_file_completed(self, path: Path) -> None:
         """Called from the watcher's worker thread when a file settles."""
         self._popup_queue.put(path)
+        # Eager OCR: read every completed file in the background (bounded to
+        # 5 concurrent vision calls) so its popup is pre-filled by the time
+        # the user gets to it — even when many files land at once.
+        pool = getattr(self, "_ocr_pool", None)
+        if pool is not None:
+            try:
+                pool.submit(path)
+            except Exception as exc:
+                print(f"[filepicker] OCR submit error: {exc}")
 
     def _poll_popups(self) -> None:
         """Main-thread polling loop that shows one popup at a time."""
@@ -223,6 +233,7 @@ class FilePickerController:
             file_path=path,
             on_submit=self._handle_submit,
             on_skip=self._handle_skip,
+            ocr_pool=self._ocr_pool,
         )
         self._current_popup = popup
         try:
@@ -423,6 +434,22 @@ class FilePickerController:
         self._cleanup_old_files()
         self._show_update_notice_if_any()
 
+        # Background OCR pool: every completed file is read eagerly (up to 5
+        # vision calls at once) so popups open pre-filled.
+        if self.config.enable_ocr:
+            try:
+                from ocr import OcrPool
+                self._ocr_pool = OcrPool(
+                    token=self.config.opencode_token,
+                    model=self.config.ocr_model,
+                    api_base=self.config.ocr_api_base,
+                )
+                if self._ocr_pool.available:
+                    self._set_status("OCR enabled — delivery notes auto-filled (5 concurrent reads)")
+            except Exception as exc:
+                print(f"[filepicker] OCR pool init error: {exc}")
+                self._ocr_pool = None
+
         watch_dir = self.config.watch_directory
         watcher = DownloadWatcher(
             watch_directory=watch_dir,
@@ -440,6 +467,11 @@ class FilePickerController:
         finally:
             watcher.stop()
             self._stop_tray()
+            if self._ocr_pool is not None:
+                try:
+                    self._ocr_pool.shutdown()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Tray icon + manual update
