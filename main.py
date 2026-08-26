@@ -407,6 +407,19 @@ class FilePickerController:
     # ------------------------------------------------------------------
     def run(self) -> None:
         self._build_root()
+        # Finish any interrupted in-place update: the process that applied an
+        # update swaps the exe and exits; the freshly launched process must
+        # remove the leftover `.old` files and retry file copies that were
+        # locked while the old process was still alive.
+        try:
+            from updater import resume_pending_update
+            if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
+                app_dir = Path(sys.executable).resolve().parent
+            else:
+                app_dir = Path(__file__).resolve().parent
+            resume_pending_update(app_dir)
+        except Exception as exc:
+            print(f"[filepicker] update resume error: {exc}")
         self._cleanup_old_files()
         self._show_update_notice_if_any()
 

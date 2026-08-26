@@ -237,7 +237,11 @@ swaps the app folder, and relaunches — the same experience, minus the AV noise
   for any open popup, queued file, or in-progress organise operation to finish
   before replacing the running exe and relaunching. No work is ever interrupted.
 - On update: the new `.exe` is swapped in (running binary renamed to `.old`),
-  and the app relaunches. If anything fails the original binary is restored.
+  and the app relaunches.
+- **Leftover cleanup:** files locked by the still-running process are renamed
+  to `.old`, and the freshly launched process removes all `.old` files at
+  first startup (`resume_pending_update`) — leftovers never accumulate, even
+  if a swap is interrupted.
 - **After an update, a popup appears** telling you what version it was updated
   from and to (e.g. `v0.1.2-aaa -> v0.1.2-bbb`).
 - The current version is shown in the title bar of every window

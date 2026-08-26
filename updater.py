@@ -46,6 +46,12 @@ CHECK_INTERVAL = 5 * 60  # every 5 minutes
 # extracted into the app folder by install_update().
 _INSTALLED_TAG_FILE = "installed_version.txt"
 
+# Runtime marker the updater writes BEFORE swapping files, so the freshly
+# launched process knows there is a swap to finish (re-copy files that were
+# locked, remove every `*.old`, drop the staging folder). It is written next
+# to the app and removed by resume_pending_update().
+_PENDING_UPDATE_FILE = "update_state.json"
+
 # Files that live next to the app but are the user's data / runtime state and
 # must never be deleted or overwritten by an update.
 _PRESERVE_FILES = {"config.json", "last_update.txt", _INSTALLED_TAG_FILE}
@@ -200,53 +206,53 @@ def _download(url: str, dest: Path) -> None:
         shutil.copyfileobj(resp, fh)
 
 
-def _relaunch(new_exe: Path) -> None:
-    """Launch the new binary and exit the current process."""
-    # Small delay to let the OS release handles after the copy
+def _relaunch(new_exe: Path) -> bool:
+    """Launch the new binary. Returns True once the process has started.
+
+    The caller only exits the old process when this returns True — if the new
+    exe cannot be started the old process stays alive and the pending swap is
+    finished by the next launch instead (see resume_pending_update).
+    """
+    if not new_exe.exists():
+        print(f"[updater] relaunch: new exe missing at {new_exe}")
+        return False
     try:
+        # Small delay to let the OS release handles after the copy
         time.sleep(0.5)
     except Exception:
         pass
-    if not new_exe.exists():
-        print(f"[updater] relaunch: new exe not found at {new_exe}")
-    else:
-        print(f"[updater] relaunching {new_exe} ...")
-    try:
-        cwd = str(new_exe.parent) if new_exe.parent.exists() else None
-        flags = 0
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            flags |= subprocess.CREATE_NO_WINDOW
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            flags |= subprocess.DETACHED_PROCESS
-        # Use CREATE_NO_WINDOW so no console flashes on relaunch
-        kwargs: dict = {"close_fds": True}
-        if cwd:
-            kwargs["cwd"] = cwd
-        if flags:
-            kwargs["creationflags"] = flags
-        if _is_frozen():
-            subprocess.Popen([str(new_exe)], **kwargs)
-        else:
-            subprocess.Popen([sys.executable, str(new_exe)], **kwargs)
-        print(f"[updater] Popen succeeded for {new_exe}")
-    except Exception as exc:
-        print(f"[updater] relaunch failed: {exc}")
-        # Fallback without cwd/flags
+    cwd = str(new_exe.parent) if new_exe.parent.exists() else None
+    flags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags |= subprocess.CREATE_NO_WINDOW
+    if hasattr(subprocess, "DETACHED_PROCESS"):
+        flags |= subprocess.DETACHED_PROCESS
+    kwargs: dict = {"close_fds": True}
+    if cwd:
+        kwargs["cwd"] = cwd
+    if flags:
+        kwargs["creationflags"] = flags
+    cmd = [str(new_exe)] if _is_frozen() else [sys.executable, str(new_exe)]
+
+    for attempt in range(1, 4):
         try:
-            if _is_frozen():
-                subprocess.Popen([str(new_exe)])
-            else:
-                subprocess.Popen([sys.executable, str(new_exe)])
-            print(f"[updater] relaunch fallback succeeded")
-        except Exception as exc2:
-            print(f"[updater] relaunch fallback failed: {exc2}")
-    # Give the new process a moment to start before we exit
+            subprocess.Popen(cmd, **kwargs)
+            print(f"[updater] relaunched {new_exe} (attempt {attempt})")
+            return True
+        except Exception as exc:
+            print(f"[updater] relaunch attempt {attempt} failed: {exc}")
+            try:
+                time.sleep(1)
+            except Exception:
+                pass
+    # Final bare fallback without cwd/flags
     try:
-        time.sleep(0.3)
-    except Exception:
-        pass
-    print(f"[updater] exiting old process {os.getpid()} for update")
-    os._exit(0)
+        subprocess.Popen(cmd)
+        print("[updater] relaunch bare fallback succeeded")
+        return True
+    except Exception as exc2:
+        print(f"[updater] relaunch failed: {exc2}")
+        return False
 
 
 def _cleanup_old_files_deep(app_dir: Path) -> None:
@@ -275,6 +281,88 @@ def _cleanup_old_files_deep(app_dir: Path) -> None:
                 pass
     except Exception:
         pass
+
+
+def resume_pending_update(app_dir: Path) -> Optional[str]:
+    """Finish an interrupted in-place update from the freshly started process.
+
+    install_update() swaps the running exe and copies the new build while the
+    old process is still alive, so some files stay locked and are renamed to
+    ``.old`` (which a live process can never delete). The NEW process — started
+    right after the swap — calls this at startup to:
+
+    1. re-copy any files that failed while the old process was alive,
+    2. remove every ``*.old`` leftover (safe now: the old process has exited),
+    3. prune stale files that are no longer part of the new build,
+    4. drop the staging folder and the ``update_state.json`` marker,
+    5. record the ``old -> new`` notice (returned so the caller can show it).
+
+    Idempotent and never raises: with no marker it is a no-op, so every normal
+    launch is unaffected.
+    """
+    marker = app_dir / _PENDING_UPDATE_FILE
+    if not marker.exists():
+        return None
+
+    state: dict = {}
+    try:
+        state = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    staging = Path(str(state.get("staging") or ""))
+    new_tag = str(state.get("new_tag") or "")
+    old_tag = str(state.get("old_tag") or "")
+
+    # Give the previous process a moment to fully release its image files.
+    try:
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    try:
+        if staging.is_dir() and (staging / "FilePicker.exe").exists():
+            new_files = {f.relative_to(staging) for f in staging.rglob("*") if f.is_file()}
+            for src in sorted(staging.rglob("*")):
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(staging)
+                if rel.name in _PRESERVE_FILES:
+                    continue
+                dst = app_dir / rel
+                try:
+                    # Only top up files that are missing or differ in size —
+                    # the old process usually copied everything already.
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+                        shutil.copy2(src, dst)
+                except OSError:
+                    pass
+            _prune_stale_files(app_dir, new_files)
+    except Exception as exc:
+        print(f"[updater] resume copy warning: {exc}")
+
+    # Remove every *.old leftover — safe now that the old process has exited.
+    _cleanup_old_files_deep(app_dir)
+
+    # Drop the extraction folder and the marker.
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+    except Exception:
+        pass
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    if new_tag and old_tag:
+        notice = f"{old_tag} -> {new_tag}"
+        try:
+            (app_dir / "last_update.txt").write_text(notice, encoding="utf-8")
+        except OSError:
+            pass
+        print(f"[updater] resumed update: {notice}")
+        return notice
+    return None
 
 
 def _write_batch_and_launch(
@@ -411,22 +499,74 @@ class UpdateError(Exception):
     """Raised when an update cannot be applied; carries a user-friendly reason."""
 
 
-def _replace_file(src: Path, dst: Path) -> None:
-    """Copy one file; if the destination is locked (in use), rename it aside
-    first (Windows lets you rename a file that's memory-mapped by a running
-    process, but not overwrite it), then copy the new file in."""
+def _replace_file(src: Path, dst: Path) -> bool:
+    """Copy one file; never raises. Returns True on success.
+
+    If the destination is locked (in use by the running process), Windows lets
+    you RENAME it aside (``.old``) but not overwrite it, so we rename and then
+    copy the new file in. If even that fails, we return False and leave the
+    file for resume_pending_update(), which retries from the freshly started
+    process once the old process has exited and released its locks.
+    """
     try:
         shutil.copy2(src, dst)
-        return
+        return True
     except PermissionError:
         pass
     old = dst.with_name(dst.name + ".old")
     try:
-        dst.rename(old)
-    except PermissionError:
         old.unlink(missing_ok=True)
         dst.rename(old)
-    shutil.copy2(src, dst)
+    except OSError:
+        return False
+    try:
+        shutil.copy2(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_stale_files(app_dir: Path, new_files: set) -> None:
+    """Remove files/dirs in *app_dir* that are not part of the new build.
+
+    Locked leftovers are renamed to ``.old`` (removed by the next-launch deep
+    clean). Never deletes user data (``_PRESERVE_FILES``) or the update marker.
+    Never raises.
+    """
+    try:
+        for existing in sorted(app_dir.rglob("*"), reverse=True):  # files before dirs
+            try:
+                rel = existing.relative_to(app_dir)
+            except ValueError:
+                continue
+            if rel.name in _PRESERVE_FILES or rel.name == _PENDING_UPDATE_FILE:
+                continue
+            if ".old" in str(rel):
+                continue
+            if rel in new_files:
+                continue
+            try:
+                if existing.is_dir():
+                    # Keep the dir if it contains any new file.
+                    keep = any(
+                        str(nf).startswith(str(rel) + os.sep) or str(nf) == str(rel)
+                        for nf in new_files
+                    )
+                    if keep:
+                        continue
+                    if not any(existing.iterdir()):
+                        existing.rmdir()
+                    else:
+                        shutil.rmtree(existing, ignore_errors=True)
+                else:
+                    existing.unlink(missing_ok=True)
+            except (PermissionError, OSError):
+                try:
+                    existing.rename(existing.with_name(existing.name + ".old"))
+                except OSError:
+                    pass
+    except Exception as exc:
+        print(f"[updater] stale cleanup warning: {exc}")
 
 
 def install_update(update: dict, staged_zip: Path) -> bool:
@@ -437,10 +577,18 @@ def install_update(update: dict, staged_zip: Path) -> bool:
     or raises :class:`UpdateError` with a descriptive reason on failure (the
     caller surfaces it to the user instead of silently doing nothing).
 
-    The swap is "mirror to the new build": after it completes, the app folder
-    contains exactly the new build's files (plus preserved user files such as
-    config.json). Old files that are no longer in the new build are removed,
-    locked ones are renamed to ``.old`` (cleaned up on next launch).
+    Swap strategy (Defender-safe; the self-deleting batch updater is disabled):
+
+    * The running exe is renamed to ``FilePicker.exe.old`` FIRST and the new
+      exe is copied in — its name is free after the rename, so the app is
+      always relaunchable and the swap never rolls back mid-way.
+    * All other files are copied best-effort (``_replace_file`` never raises);
+      files locked by the still-running process are renamed to ``.old``.
+    * A ``update_state.json`` marker is written before any file is touched, so
+      the freshly launched process knows there is a swap to finish. It then
+      runs :func:`resume_pending_update`: re-copies anything that was locked,
+      deep-cleans every ``*.old`` (the old process is dead by then), prunes
+      stale files and drops the staging folder.
     """
     exe = _current_exe()          # e.g. .../FilePicker/FilePicker.exe
     app_dir = exe.parent
@@ -448,6 +596,26 @@ def install_update(update: dict, staged_zip: Path) -> bool:
 
     def fail(reason: str) -> None:
         raise UpdateError(reason)
+
+    def abort_pending() -> None:
+        # Remove the marker + staging so a later launch does not try to resume
+        # a swap that never started.
+        try:
+            (app_dir / _PENDING_UPDATE_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(extract_root, ignore_errors=True)
+        except OSError:
+            pass
+        try:
+            staged_zip.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # 0. Clear leftovers from previous attempts (files mapped by THIS process,
+    # if any, are finished by resume_pending_update() after relaunch).
+    _cleanup_old_files_deep(app_dir)
 
     # 1. Extract the new build to a temp folder.
     extract_root = Path(tempfile.gettempdir()) / f"FilePicker-new-{update['version'].lstrip('vV')}"
@@ -457,6 +625,7 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         with zipfile.ZipFile(staged_zip) as zf:
             zf.extractall(extract_root)
     except Exception as exc:
+        abort_pending()
         fail(f"Could not extract the downloaded update: {exc}")
 
     new_dir = extract_root
@@ -468,6 +637,7 @@ def install_update(update: dict, staged_zip: Path) -> bool:
             new_exe = nested[0]
             new_dir = new_exe.parent
         else:
+            abort_pending()
             fail("The downloaded update has no FilePicker.exe inside it.")
 
     # Read the tag marker shipped inside the new build (if present).
@@ -479,29 +649,23 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         except OSError:
             pass
 
-    # Batch updater disabled — it was flagged by Windows Defender as a
-    # dropper (writes a self-deleting .bat that uses PowerShell). Fall back to
-    # the proven in-place swap (renames locked files to .old, cleaned at next
-    # launch). No PowerShell windows, no SmartScreen after the first install.
-    # The .old leftovers are harmless and are deep-cleaned by
-    # _cleanup_old_files_deep on the next successful launch.
-    # if _is_frozen():
-    #     try:
-    #         _write_batch_and_launch(app_dir, new_dir, extract_root, new_tag, old_tag)
-    #         try:
-    #             staged_zip.unlink(missing_ok=True)
-    #         except OSError:
-    #             pass
-    #         print(f"[updater] update {new_tag} staged via batch; exiting for swap...")
-    #         os._exit(0)
-    #     except SystemExit:
-    #         raise
-    #     except Exception as exc:
-    #         print(f"[updater] batch updater failed ({exc}), falling back to in-place")
+    # 1b. Pending-update marker — written BEFORE touching the app so the new
+    # process can finish the swap even if we crash / exit mid-way.
+    try:
+        (app_dir / _PENDING_UPDATE_FILE).write_text(
+            json.dumps({
+                "staging": str(extract_root),
+                "new_tag": new_tag,
+                "old_tag": old_tag,
+            }),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        abort_pending()
+        fail(f"Could not write the update marker: {exc}")
 
-    # --- In-place (proven, no batch, no Defender flag) ---
     # Prefer the project config.json shipped in the new build, unless the
-    # installed app already has one.
+    # installed app already has one (it is never overwritten).
     shipped_config = new_dir / "config.json"
     installed_config = app_dir / "config.json"
     if shipped_config.exists() and not installed_config.exists():
@@ -510,7 +674,9 @@ def install_update(update: dict, staged_zip: Path) -> bool:
         except OSError:
             pass
 
-    # 2. Rename the running exe out of the way
+    # 2. Swap the running exe FIRST: rename it aside, then copy the new exe
+    # in. Its name is free after the rename, so this cannot realistically fail
+    # and the app is always relaunchable.
     old_exe = app_dir / "FilePicker.exe.old"
     if old_exe.exists():
         try:
@@ -520,77 +686,42 @@ def install_update(update: dict, staged_zip: Path) -> bool:
     try:
         exe.rename(old_exe)
     except OSError as exc:
+        abort_pending()
         fail(f"Could not rename the running FilePicker.exe "
              f"(it may be locked): {exc}")
-
-    renamed = True
     try:
-        new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
-        for src in sorted(new_dir.rglob("*")):
-            if src.is_file():
-                rel = src.relative_to(new_dir)
-                if rel.name in _PRESERVE_FILES:
-                    continue
-                dst = app_dir / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                _replace_file(src, dst)
-    except Exception as exc:
+        shutil.copy2(new_exe, exe)
+    except OSError as exc:
+        # Nothing else has been touched yet — restore the old exe and abort.
         try:
-            if renamed and old_exe.exists() and not exe.exists():
-                old_exe.rename(exe)
+            old_exe.rename(exe)
         except OSError:
             pass
-        fail(f"Failed copying the new build into the app folder: {exc}")
+        abort_pending()
+        fail(f"Could not copy the new FilePicker.exe into place: {exc}")
 
-    # 4. Remove stale files so app_dir mirrors the new build.
-    # Deep scan: check every file/dir recursively, not just top-level.
-    # `.old` files are left for next-launch deep clean if locked.
-    try:
-        # Build set of all dirs in new build for quick check
-        new_dirs = {p for p in new_files if (new_dir / p).is_dir()}  # not needed, we check files only
-        for existing in sorted(app_dir.rglob("*"), reverse=True):  # reverse so files before dirs
-            try:
-                rel = existing.relative_to(app_dir)
-            except ValueError:
-                continue
-            if rel.name in _PRESERVE_FILES or rel.suffix == ".old" or existing.suffix == ".old" or ".old" in str(rel):
-                continue
-            if rel in new_files:
-                continue
-            # If it's a directory that contains a new file, don't delete the dir itself
-            # Check if any new_file is inside this dir
-            if existing.is_dir():
-                # Keep the dir if it contains any new file
-                keep = any(str(nf).startswith(str(rel) + os.sep) or str(nf) == str(rel) for nf in new_files)
-                if keep:
-                    continue
-                try:
-                    # Only delete empty dirs that are not in new build
-                    if not any(existing.iterdir()):
-                        existing.rmdir()
-                    else:
-                        shutil.rmtree(existing, ignore_errors=True)
-                except (PermissionError, OSError):
-                    try:
-                        existing.rename(existing.with_name(existing.name + ".old"))
-                    except OSError:
-                        pass
-            else:
-                try:
-                    existing.unlink(missing_ok=True)
-                except (PermissionError, OSError):
-                    try:
-                        existing.rename(existing.with_name(existing.name + ".old"))
-                    except OSError:
-                        pass
-    except Exception as exc:
-        print(f"[updater] stale cleanup warning: {exc}")
+    # 3. Mirror the rest of the new build. Never raises: anything still locked
+    # (DLLs/.pyd mapped by the running process) is renamed to `.old` and the
+    # new file is copied over; failures are finished by resume_pending_update()
+    # in the freshly started process.
+    new_files = {f.relative_to(new_dir) for f in new_dir.rglob("*") if f.is_file()}
+    for src in sorted(new_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(new_dir)
+        if rel.name in _PRESERVE_FILES:
+            continue
+        dst = app_dir / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        _replace_file(src, dst)
 
-    # 4b. Deep clean any leftover .old from previous failed updates (top + deep)
-    try:
-        _cleanup_old_files_deep(app_dir)
-    except Exception as exc:
-        print(f"[updater] .old cleanup warning: {exc}")
+    # 4. Remove stale files so app_dir mirrors the new build; deep-clean any
+    # `.old` (locked ones are left for resume, which runs once we're gone).
+    _prune_stale_files(app_dir, new_files)
+    _cleanup_old_files_deep(app_dir)
 
     # 5. Record installed tag + update notice.
     try:
@@ -599,19 +730,21 @@ def install_update(update: dict, staged_zip: Path) -> bool:
     except OSError as exc:
         print(f"[updater] marker write failed: {exc}")
 
-    # 6. Clean up temp
-    try:
-        shutil.rmtree(extract_root, ignore_errors=True)
-    except OSError:
-        pass
+    # 6. Not needed to clean the zip anymore; resume removes the staging dir.
     try:
         staged_zip.unlink(missing_ok=True)
     except OSError:
         pass
 
-    # 7. Relaunch
-    _relaunch(exe)
-    return True
+    # 7. Relaunch. Only exit once the new process has actually started; the
+    # staging folder + marker stay behind for it to finish the swap. If the
+    # relaunch fails we remain running (the swap is completed on next launch).
+    print(f"[updater] update {new_tag} applied; relaunching…")
+    if _relaunch(exe):
+        print(f"[updater] exiting old process {os.getpid()} for update")
+        os._exit(0)
+    print("[updater] relaunch failed; the pending swap will be finished on next launch")
+    return False
 
 
 def apply_update(update: dict, is_busy: Optional[Callable[[], bool]] = None) -> bool:
