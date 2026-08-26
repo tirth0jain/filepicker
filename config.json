@@ -11,7 +11,8 @@
     "Mild Steel": "MS",
     "Glass": "G",
     "ad": "AD",
-    "Consumables": "CO"
+    "Consumables": "CO",
+    "Abs": "AB"
   },
   "companies": [
     "Ruby Steel",
