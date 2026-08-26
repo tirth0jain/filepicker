@@ -10,7 +10,8 @@
     "Stainless Steel": "SS",
     "Mild Steel": "MS",
     "Glass": "G",
-    "ad": "AD"
+    "ad": "AD",
+    "Consumables": "CO"
   },
   "companies": [
     "Ruby Steel",
