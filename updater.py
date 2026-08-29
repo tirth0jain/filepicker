@@ -54,7 +54,17 @@ _PENDING_UPDATE_FILE = "update_state.json"
 
 # Files that live next to the app but are the user's data / runtime state and
 # must never be deleted or overwritten by an update.
-_PRESERVE_FILES = {"config.json", "last_update.txt", _INSTALLED_TAG_FILE}
+# NOTE: the API token files are never shipped inside the build, so without
+# this list the stale-file prune would delete them during an update (and the
+# next launch's deep `.old` cleanup would finish the job). Preserving them
+# keeps the live GitHub config push and OCR working after an update.
+_PRESERVE_FILES = {
+    "config.json",
+    "last_update.txt",
+    _INSTALLED_TAG_FILE,
+    "github_token.txt",
+    "opencode_token.txt",
+}
 
 
 def _is_frozen() -> bool:
