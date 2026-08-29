@@ -12,7 +12,8 @@
     "Glass": "G",
     "ad": "AD",
     "Consumables": "CO",
-    "Abs": "AB"
+    "Abs": "AB",
+    "Packing": "PA"
   },
   "companies": [
     "Ruby Steel",
