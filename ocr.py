@@ -5,7 +5,8 @@ When ``enable_ocr`` is on, the popup sends the first page of a new download
 Go catalog (`opencode.ai/zen/go/v1`, OpenAI-compatible API) with a prompt
 that asks for:
 
-    Company (Supplier) / Client (Buyer) / Site (Other References)
+    Company (Supplier) / Client (Buyer) / Site (Other References) /
+    Serial Number (Delivery Note No.)
 
 and pre-fills the popup fields from the returned table.
 
@@ -65,24 +66,28 @@ OCR_JPEG_QUALITY = 90
 # at once, OCR is processed in batches of this size: as soon as one of the
 # current calls finishes, the next queued file starts (so at most
 # MAX_CONCURRENT_OCR requests are ever in flight).
-MAX_CONCURRENT_OCR = 5
+MAX_CONCURRENT_OCR = 10
 
 # Cloudflare in front of the OpenCode gateway blocks the default
 # "Python-urllib" user agent (HTTP 403, error code 1010), so every request
 # carries a browser-like application UA.
 _UA = f"FilePicker/{VERSION} (Windows; DeliveryNote OCR)"
 
-# The extraction prompt — verbatim from the feature spec.
+# The extraction prompt — verbatim from the feature spec (Serial Number added
+# in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits).
 OCR_PROMPT = """You are given a delivery note document. Extract the following information and present it in a table format:
 
 1. Company (Supplier) - the company supplying the goods (e.g., Ruby Steel)
 2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
 3. Site - the value present in the "Other References" field (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
+4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 
 Rules:
 - Company is the supplier (from the "From" / "RUBY STEEL" section)
 - Client is the buyer/consignee (from "Buyer (Bill to)" or "Consignee (Ship to)" section)
 - Site is always what appears in the "Other References" field
+- Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
+- If the Delivery Note No. is not present, leave Serial Number empty
 - Case insensitive, convert to Title Case
 
 Output format:
@@ -91,7 +96,8 @@ Output format:
 |------|-------|
 | Company (Supplier) | [Name] |
 | Client (Buyer) | [Name] |
-| Site (Other References) | [Name] |"""
+| Site (Other References) | [Name] |
+| Serial Number (Delivery Note No.) | [Number] |"""
 
 # Labels the model is asked to emit, mapped to our result keys. Matching is
 # case-insensitive and tolerant of extra whitespace/backticks around the row.
@@ -99,6 +105,13 @@ _ROW_PATTERNS = {
     "company": re.compile(r"Company\s*\(Supplier\)", re.IGNORECASE),
     "client": re.compile(r"Client\s*\(Buyer\)", re.IGNORECASE),
     "site": re.compile(r"Site\s*\(Other\s*References\)", re.IGNORECASE),
+    "serial": re.compile(
+        # "Serial Number (Delivery Note No.)" / "Serial Number" /
+        # "Delivery Note No." / "Delivery Note Number" / "Serial No."
+        r"(?:Serial\s*(?:Number|No\.?)|Delivery\s*Note\s*(?:Number|No\.?))"
+        r"\s*(?:\(\s*Delivery\s*Note\s*(?:Number|No\.?)\s*\))?",
+        re.IGNORECASE,
+    ),
 }
 
 # Values that mean "nothing found" — treated as absent.
@@ -181,14 +194,55 @@ def _pil_to_data_url(image, max_dim: int, quality: int) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
+def _clean_serial(value: str) -> str:
+    """Normalise the OCR value for the Serial Number to plain digits.
+
+    The model is asked for the numeric part of "Delivery Note No." but may
+    return the whole reference (e.g. "RS/DC/26-27/55"). The serial is the
+    number after the last "/"; fall back to the last 1-4 digit token
+    anywhere in the value. Returns "" when nothing usable is found.
+    """
+    tail = value.rsplit("/", 1)[-1]
+    nums = re.findall(r"\b\d{1,4}\b", tail)
+    if nums:
+        return nums[-1]
+    nums = re.findall(r"\b\d{1,4}\b", value)
+    if nums:
+        return nums[-1]
+    return ""
+
+
+def serial_from_filename(file_name) -> Optional[str]:
+    """Best-effort Delivery Note serial taken from the download file name.
+
+    Most delivery notes carry their number in the file name (e.g.
+    "RS-DC-26-27-6.pdf" -> "6", "Delivery Note 55.pdf" -> "55"), so this is a
+    useful fallback when OCR cannot read the "Delivery Note No." field.
+    Conservative: financial-year pairs ("26-27") and 4-digit years are removed
+    first so they never win, and only a word-bounded 1-4 digit token (usually
+    the last one) is used. Returns None when nothing plausible is found.
+    """
+    try:
+        stem = Path(str(file_name)).stem
+    except Exception:
+        return None
+    # Drop FY pairs like "26-27" and 4-digit years so "27"/"2026" can't win.
+    cleaned = re.sub(r"\b\d{2}-\d{2}\b", " ", stem)
+    cleaned = re.sub(r"\b(?:19|20)\d{2}\b", " ", cleaned)
+    nums = re.findall(r"\b\d{1,4}\b", cleaned)
+    return nums[-1] if nums else None
+
+
 def parse_table_response(content: str) -> Dict[str, Optional[str]]:
-    """Extract Company/Client/Site from the model's markdown table.
+    """Extract Company/Client/Site/Serial from the model's markdown table.
 
     Tolerates code fences, extra surrounding text, different label casing and
     values wrapped in ``**``. Fields the model couldn't determine (or that
     came back as "N/A") become ``None``.
     """
-    result: Dict[str, Optional[str]] = {"company": None, "client": None, "site": None}
+    result: Dict[str, Optional[str]] = {
+        "company": None, "client": None, "site": None, "serial": None,
+    }
     if not content:
         return result
 
@@ -211,7 +265,10 @@ def parse_table_response(content: str) -> Dict[str, Optional[str]]:
             if value.lower() in _NULL_VALUES:
                 value = ""
             if value:
-                result[key] = value
+                if key == "serial":
+                    value = _clean_serial(value)
+                if value:
+                    result[key] = value
     return result
 
 
@@ -441,5 +498,5 @@ if __name__ == "__main__":
     if out is None:
         print("OCR failed (see logs above).")
         sys.exit(1)
-    for key in ("company", "client", "site"):
+    for key in ("company", "client", "site", "serial"):
         print(f"{key}: {out.get(key)}")

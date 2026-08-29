@@ -119,15 +119,17 @@ While OCR runs, the popup shows `OCR: reading document…`. Results are
 applied only if you haven't started typing; names that already exist in the
 catalog are matched case-insensitively (canonical spelling is used), and
 brand-new names stay typed so you can review (and optionally *Add*) them
-before saving. The key never lands in `config.json`, so it can't leak to the
-public repo.
+before saving. The Serial Number is read from the **Delivery Note No.** field
+(e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't read it, is back-filled from
+the file name (`RS-DC-26-27-6.pdf` → `6`). The key never lands in
+`config.json`, so it can't leak to the public repo.
 
-**Batches of 5, paced to your review:** files are OCR'd in batches of
-**5 concurrent vision calls**, and the next batch starts only once you are
-checking the last file of the current one — after 4 saves the next 5 are
+**Batches of 10, paced to your review:** files are OCR'd in batches of
+**10 concurrent vision calls**, and the next batch starts only once you are
+checking the last file of the current one — after 9 saves the next 10 are
 already being read in the background, so each popup is pre-filled by the
-time you get to it. A folder of 20 notes never fires 20 vision calls at
-once, and OCR doesn't run ahead of what you're actually reviewing.
+time you get to it. A folder of 20 notes never fires more than 10 vision
+calls at once, and OCR doesn't run ahead of what you're actually reviewing.
 
 ## Usage
 

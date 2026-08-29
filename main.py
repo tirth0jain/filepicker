@@ -41,7 +41,7 @@ def _ocr_submit_until(popup_index: int) -> int:
 
     OCR runs in batches of :data:`_OCR_BATCH`. The batch after the current
     one is submitted while the user is checking the LAST file of the current
-    batch ("after 4 saves, the next 5 are being read"), so the next popup is
+    batch ("after 9 saves, the next 10 are being read"), so the next popup is
     pre-filled by the time the user gets to it — without firing vision calls
     for the whole queue at once.
     """
@@ -150,7 +150,7 @@ class FilePickerController:
         self._tray = None
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
-        self._ocr_pool = None  # OcrPool — background OCR (max 5 concurrent)
+        self._ocr_pool = None  # OcrPool — bounded background OCR (see _OCR_BATCH)
         self._file_order: list = []  # completed files in arrival order
         self._popups_shown = 0       # popups displayed so far (1-based next)
         self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
@@ -479,7 +479,7 @@ class FilePickerController:
                     api_base=self.config.ocr_api_base,
                 )
                 if self._ocr_pool.available:
-                    self._set_status("OCR enabled — delivery notes auto-filled (5 concurrent reads)")
+                    self._set_status(f"OCR enabled — delivery notes auto-filled ({_OCR_BATCH} concurrent reads)")
             except Exception as exc:
                 print(f"[filepicker] OCR pool init error: {exc}")
                 self._ocr_pool = None

@@ -1143,7 +1143,7 @@ class FilePickerPopup:
         """Consume the background OCR result for this file (if any).
 
         OCR of every completed download is kicked off eagerly by the
-        controller's OcrPool (bounded to 5 concurrent vision calls), so by
+        controller's OcrPool (bounded to 10 concurrent vision calls), so by
         the time a popup opens the result is usually already cached. If it is
         still in flight we subscribe to its completion; results are applied
         on the UI thread and never clobber anything the user already typed.
@@ -1184,33 +1184,56 @@ class FilePickerPopup:
     def _apply_ocr_outcome(self, result) -> None:
         """Update the status line + fields once an OCR result is available."""
         if not result or not any(result.values()):
-            self._set_ocr_status("OCR: could not read document")
+            # OCR could not read the document — most downloads still carry the
+            # Delivery Note number in the file name, so back-fill the serial.
+            if self._apply_serial_from_filename():
+                self._set_ocr_status(
+                    "OCR: could not read document — serial from filename", _SUCCESS
+                )
+            else:
+                self._set_ocr_status("OCR: could not read document")
             return
-        if self._apply_ocr_result(result):
-            self._set_ocr_status(
-                "OCR: Company/Client/Site filled — check before saving", _SUCCESS
-            )
-        else:
-            self._set_ocr_status("OCR: done (fields already filled)")
+        changed = self._apply_ocr_result(result)
+        # OCR missed the "Delivery Note No." field but the file name usually
+        # carries the serial — back-fill it as a fallback (never clobbers).
+        if not self._serial_var.get().strip() and self._apply_serial_from_filename():
+            changed = True
+        self._set_ocr_status(
+            "OCR: fields filled — check before saving" if changed
+            else "OCR: done (fields already filled)",
+            _SUCCESS,
+        )
 
     def _apply_ocr_result(self, result: Dict[str, str]) -> bool:
-        """Pre-fill Company/Client/Site from the OCR table.
+        """Pre-fill Company/Client/Site/Serial from the OCR table.
 
-        Never clobbers fields the user already typed (if client or site has
-        any text, the whole result is skipped). Catalog entries are matched
-        case-insensitively so the canonical spelling is used when one exists;
-        unknown names stay typed as-is and flow through the normal
-        Save / Add flows for the user to confirm.
+        Never clobbers fields the user already typed. The Serial field is
+        filled independently of the dropdowns (as long as it is still empty);
+        the Company/Client/Site part is skipped if the user already started
+        filling client or site. Catalog entries are matched case-insensitively
+        so the canonical spelling is used when one exists; unknown names stay
+        typed as-is and flow through the normal Save / Add flows for the user
+        to confirm.
         """
-        # If the user already started filling client/site, leave everything alone.
+        changed = False
+
+        # Serial Number (free-text field) — digits only, 1-4 chars, already
+        # normalised by the OCR parser.
+        serial = (result.get("serial") or "").strip()
+        if serial and not self._serial_var.get().strip():
+            self._serial_var.set(serial)
+            changed = True
+
+        # If the user already started filling client/site, leave the dropdown
+        # fields alone (the serial above is still applied, though).
         if self.client_dropdown.entry.get().strip() or self.site_dropdown.entry.get().strip():
-            return False
+            return changed
 
         company = (result.get("company") or "").strip()
         client = (result.get("client") or "").strip()
         site = (result.get("site") or "").strip()
         if not (company or client or site):
-            return False
+            return changed
 
         # Company (CTkOptionMenu): canonical catalog spelling when a
         # case-insensitive match exists, else keep the OCR text as-is (and
@@ -1232,6 +1255,25 @@ class FilePickerPopup:
             self.site_dropdown.set(site)
 
         self._refresh_preview()
+        return True
+
+    def _apply_serial_from_filename(self) -> bool:
+        """Fill the serial field from the download file name (fallback).
+
+        Most delivery notes carry their "Delivery Note No." in the file name
+        (e.g. ``RS-DC-26-27-6.pdf`` -> ``6``). Only applied while the serial
+        field is still empty. Returns True when the field was filled.
+        """
+        if self._serial_var.get().strip():
+            return False
+        try:
+            from ocr import serial_from_filename
+            serial = serial_from_filename(self.file_path)
+        except Exception:
+            return False
+        if not serial:
+            return False
+        self._serial_var.set(serial)
         return True
 
     @staticmethod
