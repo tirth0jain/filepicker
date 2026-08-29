@@ -44,20 +44,45 @@ jobs:
           # single huge file exceeds MSVC's heap ("fatal error C1002").
           python-version: '3.11'
 
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/pip/cache
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py311-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka
+          # Nuitka is pinned to the exact version used in dev. An unpinned
+          # `pip install nuitka` would upgrade Nuitka between builds and
+          # invalidate the entire compile cache below (Nuitka's clcache is
+          # keyed on the generated C, which changes with the Nuitka version),
+          # turning every build into a full 15-25 min rebuild.
+          pip install nuitka==4.1.3
 
       # Nuitka compiles Python -> C -> machine code, which is slow on a cold
-      # cache. Nuitka's cache lives at a fixed location (%LOCALAPPDATA%\Nuitka
-      # on Windows); caching it means only changed files recompile on
-      # subsequent commits, cutting rebuild time dramatically.
+      # cache. We cache two things:
+      #   1. %LOCALAPPDATA%\Nuitka — Nuitka's own cache (downloaded ccache
+      #      binary, module bytecode cache, ...).
+      #   2. dist/main.build — Nuitka's per-build working directory. It is
+      #      reused between builds via SCons signatures, so on the next commit
+      #      only modules whose source changed are recompiled (and the link
+      #      step reuses the cached object files). This is what actually makes
+      #      rebuilds fast: without it every commit is a full 520-module
+      #      compile taking 15-25 minutes.
+      # The cache key intentionally changes with requirements.txt/code so each
+      # build saves a fresh snapshot, while restore-keys always falls back to
+      # the previous snapshot when the exact key misses (SCons then does the
+      # incremental recompile).
       - name: Cache Nuitka build cache
         uses: actions/cache@v4
         with:
-          path: ~/AppData/Local/Nuitka
+          path: |
+            ~/AppData/Local/Nuitka
+            dist/main.build
           key: nuitka-${{ runner.os }}-py311-${{ hashFiles('**/*.py', 'requirements.txt') }}
           restore-keys: |
             nuitka-${{ runner.os }}-py311-
