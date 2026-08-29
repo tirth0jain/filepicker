@@ -1,8 +1,13 @@
-customtkinter>=5.2.0
-watchdog>=4.0.0
-Pillow>=10.0.0
-PyMuPDF>=1.24.0
-openpyxl>=3.1.0
-xlrd>=2.0.1
-pystray>=0.19.0
-python-docx>=1.1.0
+# Pinned exactly to the versions verified in dev (Python 3.11, Windows).
+# Exact pins keep CI builds reproducible and keep the GitHub Actions
+# Nuitka compile cache valid across runs: an unpinned "pip install" would
+# silently bump a dependency on every build and force Nuitka to recompile
+# many modules (whole-cache miss -> 15-25 min builds).
+customtkinter==6.0.0
+watchdog==6.0.0
+Pillow==12.3.0
+PyMuPDF==1.28.2
+openpyxl==3.1.5
+xlrd==2.0.2
+pystray==0.19.5
+python-docx==1.2.0
