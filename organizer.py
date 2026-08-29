@@ -13,11 +13,18 @@ And, when the Doc Type is ``DC``, an extra copy is placed into::
 from __future__ import annotations
 
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
 import filename as fn
+
+# Organize runs on worker threads (one per save) while the popup loop already
+# shows the next file. Without a lock, two files with identical metadata and
+# the same serial race each other in resolve_collision() — both see the
+# target as free and the second copy silently overwrites the first.
+_ORGANIZE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -70,6 +77,12 @@ def organize(request: OrganizeRequest) -> OrganizeResult:
     the watch-folder original after a successful run.
     """
     result = OrganizeResult()
+    with _ORGANIZE_LOCK:  # serialise collision resolution + copies
+        _organize_locked(request, result)
+    return result
+
+
+def _organize_locked(request: OrganizeRequest, result: OrganizeResult) -> None:
 
     if not request.source.exists():
         result.errors.append(f"Source file not found: {request.source}")

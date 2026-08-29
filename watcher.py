@@ -144,12 +144,14 @@ def wait_until_stable(
     path: Path,
     on_completed: Callable[[Path], None],
     stable_window: float = _STABLE_WINDOW,
-    max_attempts: int = 120,
+    max_attempts: int = 300,
 ) -> None:
     """Block until ``path`` is no longer growing and is not locked.
 
     Runs in its own worker thread. Calls ``on_completed`` once the file is
-    ready, or logs a warning if it never settles in time.
+    ready, or logs a warning if it never settles in time (0.1s between checks
+    → 300 attempts = 30s of continuous activity before forcing a hand-off,
+    so a multi-GB copy still being written is not handed off mid-write).
     """
     last_size = _DEFAULT_SIZE
     stable_since: Optional[float] = None

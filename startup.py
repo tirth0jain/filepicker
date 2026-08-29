@@ -32,13 +32,40 @@ def _startup_dir() -> Path:
     )
 
 
+def _is_frozen() -> bool:
+    """True when running from a compiled (Nuitka) binary.
+
+    Mirrors updater._is_frozen: checks the Nuitka markers AND the executable
+    name, so a shortcut always points at FilePicker.exe — never at a
+    ``pythonw.exe main.py`` pair (the regression the updater hit when
+    ``sys.frozen`` was not set).
+    """
+    if getattr(sys, "frozen", False):
+        return True
+    if bool(getattr(sys, "nuitka_standalone", False)):
+        return True
+    if globals().get("__compiled__"):
+        return True
+    try:
+        if Path(sys.executable).name.lower() == "filepicker.exe":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ps_quote(value: str) -> str:
+    """Escape a value for embedding inside a PowerShell single-quoted string."""
+    return value.replace("'", "''")
+
+
 def _target() -> tuple:
     """Return ``(target, args, working_dir)`` for the app.
 
     - Compiled binary: the .exe itself.
     - Dev mode: pythonw.exe (no console) with main.py as an argument.
     """
-    if getattr(sys, "frozen", False):
+    if _is_frozen():
         exe = Path(sys.executable)
         return str(exe), "", str(exe.parent)
 
@@ -64,10 +91,10 @@ def install() -> bool:
     target, args, workdir = _target()
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
-        f"$s = $ws.CreateShortcut('{lnk}'); "
-        f"$s.TargetPath = '{target}'; "
-        f"$s.Arguments = '{args}'; "
-        f"$s.WorkingDirectory = '{workdir}'; "
+        f"$s = $ws.CreateShortcut('{_ps_quote(str(lnk))}'); "
+        f"$s.TargetPath = '{_ps_quote(target)}'; "
+        f"$s.Arguments = '{_ps_quote(args)}'; "
+        f"$s.WorkingDirectory = '{_ps_quote(workdir)}'; "
         "$s.Save()"
     )
     try:
@@ -101,7 +128,7 @@ def _read_shortcut(lnk: Path):
     """Return ``(target, arguments)`` of an existing .lnk, or None on failure."""
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
-        f"$s = $ws.CreateShortcut('{lnk}'); "
+        f"$s = $ws.CreateShortcut('{_ps_quote(str(lnk))}'); "
         "Write-Output $s.TargetPath; "
         "Write-Output $s.Arguments"
     )

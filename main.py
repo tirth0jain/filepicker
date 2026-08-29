@@ -28,10 +28,26 @@ if _APP_DIR not in sys.path:
 import customtkinter as ctk
 
 from config import ConfigManager
+from ocr import MAX_CONCURRENT_OCR as _OCR_BATCH
 from organizer import OrganizeRequest, organize
 from popup import FilePickerPopup
 from version import VERSION
 from watcher import DownloadWatcher
+
+
+def _ocr_submit_until(popup_index: int) -> int:
+    """How many files (in arrival order) must have OCR started when the popup
+    with 1-based index ``popup_index`` opens.
+
+    OCR runs in batches of :data:`_OCR_BATCH`. The batch after the current
+    one is submitted while the user is checking the LAST file of the current
+    batch ("after 4 saves, the next 5 are being read"), so the next popup is
+    pre-filled by the time the user gets to it — without firing vision calls
+    for the whole queue at once.
+    """
+    batch = (popup_index + _OCR_BATCH - 1) // _OCR_BATCH
+    next_batch = _OCR_BATCH if popup_index % _OCR_BATCH == 0 else 0
+    return batch * _OCR_BATCH + next_batch
 
 
 def _setup_file_logging() -> None:
@@ -134,7 +150,10 @@ class FilePickerController:
         self._tray = None
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
-        self._ocr_pool = None  # OcrPool — eager background OCR (max 5 concurrent)
+        self._ocr_pool = None  # OcrPool — background OCR (max 5 concurrent)
+        self._file_order: list = []  # completed files in arrival order
+        self._popups_shown = 0       # popups displayed so far (1-based next)
+        self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -188,15 +207,7 @@ class FilePickerController:
     def _on_file_completed(self, path: Path) -> None:
         """Called from the watcher's worker thread when a file settles."""
         self._popup_queue.put(path)
-        # Eager OCR: read every completed file in the background (bounded to
-        # 5 concurrent vision calls) so its popup is pre-filled by the time
-        # the user gets to it — even when many files land at once.
-        pool = getattr(self, "_ocr_pool", None)
-        if pool is not None:
-            try:
-                pool.submit(path)
-            except Exception as exc:
-                print(f"[filepicker] OCR submit error: {exc}")
+        self._file_order.append(Path(path))
 
     def _poll_popups(self) -> None:
         """Main-thread polling loop that shows one popup at a time."""
@@ -228,6 +239,8 @@ class FilePickerController:
         self._root.after(100, self._poll_popups)
 
     def _show_popup(self, path: Path) -> None:
+        self._popups_shown += 1
+        self._submit_ocr_window(_ocr_submit_until(self._popups_shown))
         popup = FilePickerPopup(
             config=self.config,
             file_path=path,
@@ -241,6 +254,27 @@ class FilePickerController:
             popup.show()
         finally:
             self._current_popup = None
+
+    def _submit_ocr_window(self, submit_until: int) -> None:
+        """Start OCR for the files the user is about to review (batches).
+
+        Deliberately NOT the whole queue: only the current batch plus the
+        next one are submitted up front (see :func:`_ocr_submit_until`), so a
+        folder of 20 notes does not fire 20 vision calls immediately — the
+        next batch is read while the user checks the last file of the
+        current one. Submissions are deduped by the pool.
+        """
+        pool = getattr(self, "_ocr_pool", None)
+        if pool is None:
+            return
+        end = min(submit_until, len(self._file_order))
+        while self._ocr_submitted < end:
+            path = self._file_order[self._ocr_submitted]
+            self._ocr_submitted += 1
+            try:
+                pool.submit(path)
+            except Exception as exc:
+                print(f"[filepicker] OCR submit error: {exc}")
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:

@@ -122,11 +122,12 @@ brand-new names stay typed so you can review (and optionally *Add*) them
 before saving. The key never lands in `config.json`, so it can't leak to the
 public repo.
 
-**Batches of 5:** every file that lands in the watch folder is read in the
-background as it arrives (not when its popup opens), so popups open already
-pre-filled. When you drop many files at once, at most **5 vision calls run
-concurrently** — as one finishes, the next queued file starts, so a folder
-of 20 notes is read in ~4 waves instead of 20 sequential waits.
+**Batches of 5, paced to your review:** files are OCR'd in batches of
+**5 concurrent vision calls**, and the next batch starts only once you are
+checking the last file of the current one — after 4 saves the next 5 are
+already being read in the background, so each popup is pre-filled by the
+time you get to it. A folder of 20 notes never fires 20 vision calls at
+once, and OCR doesn't run ahead of what you're actually reviewing.
 
 ## Usage
 

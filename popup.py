@@ -465,25 +465,55 @@ class FilePickerPopup:
             except Exception:
                 pass
             self._preview = None
-            self.preview_pane.pack_forget()
+            try:
+                self.preview_pane.pack_forget()
+            except tk.TclError:
+                pass
             self.window.geometry("560x820")
             self.preview_btn.configure(text="👁 Preview")
             return
 
         # --- Open the preview: embed it and expand the window right. ---
-        self.preview_pane.pack(side="left", fill="both", expand=True)
+        # An older build's preview close destroyed the container pane itself,
+        # which made the next "Preview" click fail with a dead widget. Recreate
+        # the pane if it is gone so open -> close -> open always works.
+        try:
+            if not self.preview_pane.winfo_exists():
+                self._rebuild_preview_pane()
+        except tk.TclError:
+            self._rebuild_preview_pane()
+        try:
+            self.preview_pane.pack(side="left", fill="both", expand=True)
+        except tk.TclError:
+            self._rebuild_preview_pane()
+            self.preview_pane.pack(side="left", fill="both", expand=True)
         try:
             self._preview = PreviewWindow(
                 self.window, self.file_path, container=self.preview_pane
             )
         except Exception as exc:
             self._preview = None
-            self.preview_pane.pack_forget()
+            try:
+                self.preview_pane.pack_forget()
+            except tk.TclError:
+                pass
             self.window.geometry("560x820")
             print(f"[filepicker] preview error: {exc}")
             return
         self.window.geometry("1180x820")
         self.preview_btn.configure(text="✕ Close Preview")
+
+    def _rebuild_preview_pane(self) -> None:
+        """(Re)create the embedded preview pane inside the popup's body.
+
+        Normally the pane is built once in ``_build_ui`` and reused for every
+        preview open/close cycle. It is only ever gone if a preview close
+        (from an older build) destroyed the frame itself, so this rebuilds it
+        to recover without restarting the popup.
+        """
+        self.preview_pane = ctk.CTkFrame(self._body, fg_color=_BG)
+        self.preview_pane.pack(side="left", fill="both", expand=True)
+        self.preview_pane.pack_forget()
 
     @staticmethod
     def _human_size(num: float) -> str:
@@ -520,6 +550,7 @@ class FilePickerPopup:
         # on the right that the window expands into when Preview is opened.
         body = ctk.CTkFrame(container, fg_color=_BG)
         body.pack(fill="both", expand=True)
+        self._body = body  # keeps the preview pane rebuildable (see _rebuild_preview_pane)
 
         self.form_frame = ctk.CTkFrame(body, fg_color=_BG, width=524)
         self.form_frame.pack(side="left", fill="y")
@@ -881,16 +912,22 @@ class FilePickerPopup:
 
         def place_chip(text, fg, hover, txt, command):
             nonlocal row_frame, row_width
+            est = measure_font.measure(text) + 28  # text + padding
+            # Wrap BEFORE constructing the chip: the chip must become a child
+            # of the row it packs into. The old order (chip first, wrap after)
+            # packed the chip into the previous row AND left an empty row
+            # frame behind it — a childless CTkFrame requests 200px height, so
+            # the materials section ballooned and pushed the serial number /
+            # Save buttons out of the (fixed-size, non-scrollable) popup.
+            if row_width + est > wrap_width:
+                row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
+                row_frame.pack(fill="x", padx=8, pady=(0, 8))
+                row_width = 0
             chip = ctk.CTkButton(
                 row_frame, text=text, width=0, height=28,
                 fg_color=fg, hover_color=hover, text_color=txt,
                 corner_radius=14, command=command,
             )
-            est = measure_font.measure(text) + 28  # text + padding
-            if row_width + est > wrap_width:
-                row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
-                row_frame.pack(fill="x", padx=8, pady=(0, 8))
-                row_width = 0
             chip.pack(side="left", padx=(0, 6))
             row_width += est + 6
             return chip

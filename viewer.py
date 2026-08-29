@@ -158,6 +158,7 @@ class PreviewWindow:
     def __init__(self, parent, file_path, container=None) -> None:
         self.file_path = Path(file_path)
         self.parent = parent
+        self._destroyed = False  # set by destroy(); guards async/after callbacks
 
         if container is not None:
             # Embedded mode: build into the supplied frame. All preview
@@ -200,12 +201,29 @@ class PreviewWindow:
     # Shared helpers
     # ------------------------------------------------------------------
     def destroy(self) -> None:
-        """Release the file handle(s) and remove the preview UI."""
+        """Release the file handle(s) and remove the preview UI.
+
+        Embedded mode: ``self.window`` is the popup's container frame — it
+        belongs to the popup and is re-used for the next preview, so only our
+        own children are destroyed, never the frame itself (destroying it made
+        the next "Preview" click fail with a dead widget). Standalone mode:
+        the whole window is destroyed. Idempotent — the second call is a no-op.
+        """
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
         self._release_resources()
-        try:
-            self.window.destroy()
-        except tk.TclError:
-            pass
+        if getattr(self, "_embedded", False):
+            try:
+                for child in list(self.window.winfo_children()):
+                    child.destroy()
+            except tk.TclError:
+                pass
+        else:
+            try:
+                self.window.destroy()
+            except tk.TclError:
+                pass
 
     def _release_resources(self) -> None:
         """Close any open file handles so the source file can be deleted on
@@ -459,6 +477,8 @@ class PreviewWindow:
         ).start()
 
     def _finish_async(self, idx: int, zoom: float, img) -> None:
+        if getattr(self, "_destroyed", False):
+            return
         self._pending.discard(idx)
         if img is None or zoom != self._zoom:
             return  # stale (zoom changed while rendering)
@@ -536,6 +556,8 @@ class PreviewWindow:
             self._page_cache.clear()
 
     def _fit_width(self) -> None:
+        if getattr(self, "_destroyed", False):
+            return
         self.window.update_idletasks()
         canvas_w = self._canvas.winfo_width() or (self.window.winfo_width() - 20)
         if canvas_w < 100:

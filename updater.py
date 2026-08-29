@@ -185,7 +185,14 @@ def check_for_update(strict: bool = True) -> Optional[dict]:
         # recorded installed tag differs (don't re-download the exact build).
         installed = _installed_tag().strip().lower().lstrip("v")
         latest_norm = latest_tag.strip().lower().lstrip("v")
-        if installed == latest_norm or installed == current_ver:
+        if installed == latest_norm:
+            return None
+        # build.py ships the marker as bare "v0.6.3" (no build id); a fresh
+        # install of the latest version is already up to date — don't offer a
+        # redundant same-version re-download until an auto-update has recorded
+        # the real tag (which includes the build id).
+        inst_ver, inst_build = _split_tag(installed)
+        if not inst_build and inst_ver == current_ver:
             return None
 
     # Find the Windows zip asset for this app.
