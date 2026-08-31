@@ -14,7 +14,8 @@
     "Consumables": "CO",
     "Abs": "AB",
     "Packing": "PA",
-    "fitting": "FI"
+    "fitting": "FI",
+    "silicon": "SI"
   },
   "companies": [
     "Ruby Steel",
