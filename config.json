@@ -15,7 +15,8 @@
     "Abs": "AB",
     "Packing": "PA",
     "fitting": "FI",
-    "silicon": "SI"
+    "silicon": "SI",
+    "EPDM RUBBER": "ER"
   },
   "companies": [
     "Ruby Steel",
