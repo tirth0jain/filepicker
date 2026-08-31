@@ -13,7 +13,8 @@
     "ad": "AD",
     "Consumables": "CO",
     "Abs": "AB",
-    "Packing": "PA"
+    "Packing": "PA",
+    "fitting": "FI"
   },
   "companies": [
     "Ruby Steel",
