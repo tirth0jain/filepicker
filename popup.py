@@ -91,7 +91,7 @@ class SearchableDropdown(ctk.CTkFrame):
             self.entry.configure(width=width)
         self.entry.pack(fill="x")
         # Pack this frame itself into its parent (the popup form).
-        self.pack(fill="x", pady=(0, 12))
+        self.pack(fill="x", pady=(0, 8))
 
         # Dropdown window (overrideredirect Toplevel with a Listbox)
         # Created lazily on first open so winfo_toplevel() is valid.
@@ -477,7 +477,7 @@ class FilePickerPopup:
                 self.preview_pane.pack_forget()
             except tk.TclError:
                 pass
-            self.window.geometry("560x820")
+            self.window.geometry(f"560x{self._win_h}")
             self.preview_btn.configure(text="👁 Preview")
             return
 
@@ -505,10 +505,10 @@ class FilePickerPopup:
                 self.preview_pane.pack_forget()
             except tk.TclError:
                 pass
-            self.window.geometry("560x820")
+            self.window.geometry(f"560x{self._win_h}")
             print(f"[filepicker] preview error: {exc}")
             return
-        self.window.geometry("1180x820")
+        self.window.geometry(f"1180x{self._win_h}")
         self.preview_btn.configure(text="✕ Close Preview")
 
     def _rebuild_preview_pane(self) -> None:
@@ -539,8 +539,12 @@ class FilePickerPopup:
         self.window.title(f"FilePicker v{VERSION} — New Download")
         # Open pinned to the top of the screen (title bar touches the top
         # edge) and horizontally centered, so it never needs to be dragged up.
+        # The height is clamped to the screen so the bottom controls (Save /
+        # Skip) are never cut off on shorter displays (e.g. 1366x768 laptops).
         _screen_w = self.window.winfo_screenwidth()
-        self.window.geometry(f"560x820+{max((_screen_w - 560) // 2, 0)}+0")
+        _screen_h = self.window.winfo_screenheight()
+        self._win_h = max(min(820, _screen_h - 20), 700)
+        self.window.geometry(f"560x{self._win_h}+{max((_screen_w - 560) // 2, 0)}+0")
         self.window.configure(fg_color=_BG)
         self.window.resizable(True, True)  # height adjustable
         self.window.minsize(560, 700)
@@ -555,7 +559,7 @@ class FilePickerPopup:
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         container = ctk.CTkFrame(self.window, fg_color=_BG, corner_radius=0)
-        container.pack(fill="both", expand=True, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=14, pady=12)
 
         # Horizontal body: the metadata form on the left, and a preview pane
         # on the right that the window expands into when Preview is opened.
@@ -576,17 +580,17 @@ class FilePickerPopup:
 
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
-        self._banner.pack(fill="x", pady=(0, 16))
+        self._banner.pack(fill="x", pady=(0, 10))
 
         banner_header = ctk.CTkFrame(self._banner, fg_color="transparent")
-        banner_header.pack(fill="x", padx=14, pady=(12, 2))
+        banner_header.pack(fill="x", padx=12, pady=(8, 0))
         self._banner_name = ctk.CTkLabel(
             banner_header, text="", font=ctk.CTkFont(size=15, weight="bold"),
             text_color=_TEXT, wraplength=380, justify="left",
         )
         self._banner_name.pack(side="left", anchor="w")
         self.preview_btn = ctk.CTkButton(
-            banner_header, text="👁 Preview", width=96, height=30,
+            banner_header, text="👁 Preview", width=96, height=28,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
             font=ctk.CTkFont(size=12, weight="bold"), command=self._toggle_preview,
         )
@@ -595,27 +599,27 @@ class FilePickerPopup:
         self._banner_size = ctk.CTkLabel(
             self._banner, text="", font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
         )
-        self._banner_size.pack(anchor="w", padx=14, pady=(0, 12))
+        self._banner_size.pack(anchor="w", padx=12, pady=(0, 8))
 
         # OCR status line — stays empty (invisible) unless enable_ocr is on.
         self._ocr_label = ctk.CTkLabel(
             f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED, anchor="w",
         )
-        self._ocr_label.pack(fill="x", pady=(0, 8))
+        self._ocr_label.pack(fill="x", pady=(0, 4))
 
         # -- Company ----------------------------------------------------
         ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.company_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._company_var,
             command=self._on_company_change, fg_color=_BG_FIELD,
             button_color=_ACCENT, button_hover_color=_ACCENT,
         )
-        self.company_combo.pack(fill="x", pady=(0, 12))
+        self.company_combo.pack(fill="x", pady=(0, 8))
 
         # -- Client -----------------------------------------------------
         ctk.CTkLabel(f, text="Client", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.client_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_client_change,
         )
@@ -625,7 +629,7 @@ class FilePickerPopup:
 
         # -- Site -------------------------------------------------------
         ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.site_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_site_change,
         )
@@ -635,18 +639,18 @@ class FilePickerPopup:
 
         # -- Document type ----------------------------------------------
         ctk.CTkLabel(f, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.doc_type_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._doc_type_var,
             command=lambda _d: self._refresh_preview(),
             fg_color=_BG_FIELD, button_color=_ACCENT, button_hover_color=_ACCENT,
         )
-        self.doc_type_combo.pack(fill="x", pady=(0, 12))
+        self.doc_type_combo.pack(fill="x", pady=(0, 8))
 
         # -- Materials (multi-select) -----------------------------------
         ctk.CTkLabel(f, text="Material (multi-select)",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
         self.material_frame.pack(fill="x", pady=(0, 8))
         # Scrollable chip area (plain Canvas + scrollbar — the same pattern as
@@ -698,12 +702,12 @@ class FilePickerPopup:
         # -- Serial number ----------------------------------------------
         ctk.CTkLabel(f, text="Serial Number",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
         self.serial_entry = ctk.CTkEntry(
             f, textvariable=self._serial_var, fg_color=_BG_FIELD,
             border_color=_BG_FIELD, text_color=_TEXT,
         )
-        self.serial_entry.pack(fill="x", pady=(0, 12))
+        self.serial_entry.pack(fill="x", pady=(0, 8))
 
         # -- Received copy checkbox -------------------------------------
         self.received_check = ctk.CTkCheckBox(
@@ -711,11 +715,11 @@ class FilePickerPopup:
             variable=self._received_var, fg_color=_ACCENT,
             hover_color=_ACCENT, text_color=_TEXT,
         )
-        self.received_check.pack(anchor="w", pady=(0, 16))
+        self.received_check.pack(anchor="w", pady=(0, 10))
 
         # -- Buttons ----------------------------------------------------
         btn_row = ctk.CTkFrame(f, fg_color=_BG)
-        btn_row.pack(fill="x", pady=(8, 0))
+        btn_row.pack(fill="x", pady=(4, 0))
 
         self.save_btn = ctk.CTkButton(
             btn_row, text="Save & Organize", command=self._submit,
@@ -736,7 +740,7 @@ class FilePickerPopup:
             f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
             wraplength=500, justify="left",
         )
-        self.preview_label.pack(fill="x", pady=(12, 0))
+        self.preview_label.pack(fill="x", pady=(6, 0))
         self._refresh_preview()
 
     # ------------------------------------------------------------------
