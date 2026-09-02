@@ -74,18 +74,21 @@ MAX_CONCURRENT_OCR = 10
 _UA = f"FilePicker/{VERSION} (Windows; DeliveryNote OCR)"
 
 # The extraction prompt — verbatim from the feature spec (Serial Number added
-# in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits).
+# in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits.
+# Site made strictly "Other References"-only in 0.6.6: the model must never
+# substitute a "Reference No." / "Ref No." value for the missing site.)
 OCR_PROMPT = """You are given a delivery note document. Extract the following information and present it in a table format:
 
 1. Company (Supplier) - the company supplying the goods (e.g., Ruby Steel)
 2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
-3. Site - the value present in the "Other References" field (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
+3. Site - ONLY the value of the field literally labelled "Other References" (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
 4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 
 Rules:
 - Company is the supplier (from the "From" / "RUBY STEEL" section)
 - Client is the buyer/consignee (from "Buyer (Bill to)" or "Consignee (Ship to)" section)
-- Site is always what appears in the "Other References" field
+- Site MUST come ONLY from the field literally labelled "Other References". NEVER use "Reference No.", "Ref No.", "SR. No.", "Bill No.", "Invoice No.", "Delivery Note No.", "PO No." or any other field for Site
+- If the document has no "Other References" field, leave the Site cell EMPTY (do not substitute any other value)
 - Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 - If the Delivery Note No. is not present, leave Serial Number empty
 - Case insensitive, convert to Title Case
@@ -233,6 +236,33 @@ def serial_from_filename(file_name) -> Optional[str]:
     return nums[-1] if nums else None
 
 
+def _looks_like_reference(value: str) -> bool:
+    """True when *value* looks like a reference/order number, not a site name.
+
+    The Site row must come ONLY from "Other References", but the vision model
+    sometimes answers it with a "Reference No."-style value instead (or
+    substitutes one when "Other References" is missing). Sites are names
+    ("Kalpataru Vivant (T-A)"); reference numbers are codes ("REF-12345",
+    "RS/DC/26-27/6", "2026-27-0144", "Ref No. 1234"). Rejecting those makes
+    the popup leave Site empty so the user adds the real site themselves.
+    """
+    v = value.strip()
+    if not v:
+        return True
+    # Starts with a reference-type label: "Ref No. 123", "REFERENCE : ...",
+    # "SR. NO.", "No. 123", ...
+    if re.match(
+        r"(?i)^\s*(?:ref(?:erence)?|sr|s\.?\s*no\.?|no\.?)\s*(?:no\.?)?\s*[:#.\-]",
+        v,
+    ):
+        return True
+    # Compact code with no spaces that contains a digit: "DN-4521",
+    # "RS/DC/26-27/6", "2026-27-0144", "PO-123", "12345".
+    if " " not in v and re.search(r"\d", v):
+        return True
+    return False
+
+
 def parse_table_response(content: str) -> Dict[str, Optional[str]]:
     """Extract Company/Client/Site/Serial from the model's markdown table.
 
@@ -267,6 +297,12 @@ def parse_table_response(content: str) -> Dict[str, Optional[str]]:
             if value:
                 if key == "serial":
                     value = _clean_serial(value)
+                elif key == "site":
+                    # Site is "Other References"-only; anything that looks like
+                    # a reference number instead is treated as absent so the
+                    # user fills the real site in themselves.
+                    if _looks_like_reference(value):
+                        value = ""
                 if value:
                     result[key] = value
     return result
