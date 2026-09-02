@@ -2,9 +2,9 @@
 
 The generated filename strictly follows the format::
 
-    {Company}-{Doc Type}-{Financial Year}-{Site Name}-{Material Shortcodes}-{Serial}-{Status}.{ext}
+    {Company}-{Doc Type}-{Financial Year}-{Site Name}-{Serial}-{Material Shortcodes}-{Status}.{ext}
 
-e.g. ``Acme-DC-26-27-Site 1 - Mumbai-A+C-0001-Received.pdf``
+e.g. ``Acme-DC-26-27-Site 1 - Mumbai-0001-A+C-Received.pdf``
 """
 
 from __future__ import annotations
@@ -115,8 +115,8 @@ def build_filename(
             sanitize(doc_type),
             fy,
             sanitize(site_name),
-            codes,
             sanitize(serial),
+            codes,
             sanitize(status),
         ]
     )

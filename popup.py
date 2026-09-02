@@ -17,6 +17,7 @@ import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
+from tkinter import ttk
 from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
@@ -37,6 +38,13 @@ _MAX_DROPDOWN_RESULTS = 5
 
 # How often the open popup polls GitHub for live config (ms).
 _CONFIG_POLL_MS = 30_000
+
+# Material chips panel: at most this many rows of chips are visible at once;
+# any extra rows scroll inside the panel (a large catalog must never push the
+# Serial number / Save buttons out of the fixed-height popup window).
+_MATERIAL_ROWS_VISIBLE = 3
+_MATERIAL_ROW_PITCH = 36   # 28px chip + 8px bottom padding per row
+_MATERIAL_TOP_PAD = 8
 
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
@@ -529,7 +537,10 @@ class FilePickerPopup:
     def _build_window(self) -> None:
         self.window = ctk.CTkToplevel()
         self.window.title(f"FilePicker v{VERSION} — New Download")
-        self.window.geometry("560x820")
+        # Open pinned to the top of the screen (title bar touches the top
+        # edge) and horizontally centered, so it never needs to be dragged up.
+        _screen_w = self.window.winfo_screenwidth()
+        self.window.geometry(f"560x820+{max((_screen_w - 560) // 2, 0)}+0")
         self.window.configure(fg_color=_BG)
         self.window.resizable(True, True)  # height adjustable
         self.window.minsize(560, 700)
@@ -638,6 +649,49 @@ class FilePickerPopup:
                      text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
         self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
         self.material_frame.pack(fill="x", pady=(0, 8))
+        # Scrollable chip area (plain Canvas + scrollbar — the same pattern as
+        # viewer.py): the chip rows pack into _material_inner and scroll when
+        # they exceed the visible height (capped at _MATERIAL_ROWS_VISIBLE).
+        self._material_canvas = tk.Canvas(
+            self.material_frame, bg=_BG_SECONDARY, highlightthickness=0, bd=0,
+            height=_MATERIAL_ROW_PITCH * _MATERIAL_ROWS_VISIBLE - _MATERIAL_TOP_PAD,
+        )
+        self._material_vsb = ttk.Scrollbar(
+            self.material_frame, orient="vertical", command=self._material_canvas.yview,
+        )
+        self._material_canvas.configure(yscrollcommand=self._material_vsb.set)
+        self._material_canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
+        self._material_vsb.pack(side="right", fill="y", padx=(0, 6), pady=6)
+        self._material_inner = tk.Frame(self._material_canvas, bg=_BG_SECONDARY)
+        self._mat_win = self._material_canvas.create_window(
+            (0, 0), window=self._material_inner, anchor="nw",
+        )
+        self._material_inner.bind(
+            "<Configure>",
+            lambda _e: self._material_canvas.configure(
+                scrollregion=self._material_canvas.bbox("all")),
+        )
+        self._material_canvas.bind(
+            "<Configure>",
+            lambda e: self._material_canvas.itemconfigure(self._mat_win, width=e.width),
+        )
+        # Mouse wheel over the panel scrolls it (chips are child widgets, so
+        # a plain widget binding would never see the wheel event).
+        def _material_wheel(event) -> None:
+            try:
+                if not self._material_canvas.winfo_exists():
+                    return
+                x = self._material_canvas.winfo_pointerx()
+                y = self._material_canvas.winfo_pointery()
+                wx = self._material_canvas.winfo_rootx()
+                wy = self._material_canvas.winfo_rooty()
+                if (wx <= x < wx + self._material_canvas.winfo_width()
+                        and wy <= y < wy + self._material_canvas.winfo_height()):
+                    self._material_canvas.yview_scroll(int(-event.delta / 120), "units")
+            except tk.TclError:
+                pass
+
+        self._material_canvas.bind_all("<MouseWheel>", _material_wheel, add=True)
         self._material_chips: Dict[str, ctk.CTkButton] = {}
         self._render_material_chips()
 
@@ -899,19 +953,20 @@ class FilePickerPopup:
     # Material chip rendering
     # ------------------------------------------------------------------
     def _render_material_chips(self) -> None:
-        for child in self.material_frame.winfo_children():
+        for child in self._material_inner.winfo_children():
             child.destroy()
         self._material_chips.clear()
 
         # Measure text so chips pack tightly with no big gaps between them.
         measure_font = tkfont.Font(family="Segoe UI", size=13)
         wrap_width = 500
-        row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
-        row_frame.pack(fill="x", padx=8, pady=8)
+        row_frame = ctk.CTkFrame(self._material_inner, fg_color="transparent")
+        row_frame.pack(fill="x", padx=8, pady=6)
         row_width = 0
+        rows = 1
 
         def place_chip(text, fg, hover, txt, command):
-            nonlocal row_frame, row_width
+            nonlocal row_frame, row_width, rows
             est = measure_font.measure(text) + 28  # text + padding
             # Wrap BEFORE constructing the chip: the chip must become a child
             # of the row it packs into. The old order (chip first, wrap after)
@@ -920,9 +975,10 @@ class FilePickerPopup:
             # the materials section ballooned and pushed the serial number /
             # Save buttons out of the (fixed-size, non-scrollable) popup.
             if row_width + est > wrap_width:
-                row_frame = ctk.CTkFrame(self.material_frame, fg_color="transparent")
-                row_frame.pack(fill="x", padx=8, pady=(0, 8))
+                row_frame = ctk.CTkFrame(self._material_inner, fg_color="transparent")
+                row_frame.pack(fill="x", padx=8, pady=(0, 6))
                 row_width = 0
+                rows += 1
             chip = ctk.CTkButton(
                 row_frame, text=text, width=0, height=28,
                 fg_color=fg, hover_color=hover, text_color=txt,
@@ -946,6 +1002,13 @@ class FilePickerPopup:
         place_chip(
             "+ Add Material", _BG_FIELD, "#33334a", _ACCENT,
             self._prompt_add_material,
+        )
+
+        # Cap the visible chip area at _MATERIAL_ROWS_VISIBLE rows; extra rows
+        # scroll (mouse wheel over the panel). Shrinks to fit small catalogs.
+        self._material_canvas.configure(
+            height=_MATERIAL_ROW_PITCH * min(rows, _MATERIAL_ROWS_VISIBLE)
+            - _MATERIAL_TOP_PAD
         )
 
     def _toggle_material(self, name: str) -> None:

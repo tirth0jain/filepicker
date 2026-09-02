@@ -30,8 +30,8 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   - **Images** (Pillow) — zoomable, PNG-compressed, scrollable.
   - **Excel** (openpyxl/xlrd) — shown as a table with a sheet selector.
 - **Strict filename format** —
-  `{Company}-{Doc Type}-{FY}-{Site Name}-{Material Shortcodes}-{Serial}-{Status}.{ext}`
-  e.g. `Acme-DC-26-27-Site 1 - Mumbai-A+C-0001-Received.pdf`.
+  `{Company}-{Doc Type}-{FY}-{Site Name}-{Serial}-{Material Shortcodes}-{Status}.{ext}`
+  e.g. `Acme-DC-26-27-Site 1 - Mumbai-0001-A+C-Received.pdf`.
 - **Financial Year** auto-calculated for the Indian fiscal year (Apr 1–Mar 31):
   Aug 2026 → `26-27`, Feb 2026 → `25-26`.
 - **Directory routing** — copies the file (once) into:
