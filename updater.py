@@ -272,30 +272,36 @@ def _relaunch(new_exe: Path) -> bool:
         return False
 
 
-def _cleanup_old_files_deep(app_dir: Path) -> None:
+def _cleanup_old_files_deep(
+    app_dir: Path,
+    retries: int = 3,
+    retry_delay: float = 0.5,
+) -> None:
     """Remove every `*.old` file/dir recursively (leftovers from a swap).
 
     The old `_cleanup_old_files` only checked the top level; Nuitka leaves
     `.old` files deep inside (e.g. `lib/...`), so we must walk recursively.
+    Deletions are retried a few times: right after a relaunch the old image
+    files can still be briefly locked (dying process, Defender scan,
+    Explorer), and a single attempt would silently leave them behind.
     """
+    def _remove(path: Path) -> bool:
+        for _ in range(retries):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+                if not path.exists():
+                    return True
+            except OSError:
+                pass
+            time.sleep(retry_delay)
+        return False
+
     try:
-        for old in app_dir.rglob("*.old"):
-            try:
-                if old.is_dir():
-                    shutil.rmtree(old, ignore_errors=True)
-                else:
-                    old.unlink(missing_ok=True)
-            except OSError:
-                pass
-        # Also clean stray `*.old` at top that rglob may miss if app_dir itself is `*.old`
-        for old in app_dir.glob("*.old"):
-            try:
-                if old.is_dir():
-                    shutil.rmtree(old, ignore_errors=True)
-                else:
-                    old.unlink(missing_ok=True)
-            except OSError:
-                pass
+        for old in list(app_dir.rglob("*.old")):
+            _remove(old)
     except Exception:
         pass
 

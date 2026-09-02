@@ -277,6 +277,42 @@ class ConfigManager:
             return False
         return self.apply_github_config(remote)
 
+    def force_sync_from_github(self, timeout: float = 10.0) -> Optional[bool]:
+        """Manual "Force sync" — make the local catalog match GitHub exactly,
+        deletions included.
+
+        The automatic syncs union-merge so a site added locally is never lost,
+        but that also means entries deleted on GitHub stay forever on every
+        machine. This tray-triggered option instead REPLACES the shared
+        catalog keys (companies, company_initials, clients, materials,
+        doc_types) with the remote values, so a site/client/material deleted
+        on the repo disappears locally too. Local-only keys stay untouched
+        (watch_directory, root_directory, enable_ocr, ocr_model,
+        ocr_api_base).
+
+        Returns None when the fetch failed, True when the local config was
+        overwritten/saved, False when it already matched the repo.
+        """
+        if not self.enable_live_config:
+            return False
+        remote = self.fetch_github_config(timeout=timeout)
+        if remote is None:
+            return None
+        with self._lock:
+            changed = False
+            for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
+                if key in remote and remote[key] != self._data.get(key):
+                    self._data[key] = deepcopy(remote[key])
+                    changed = True
+            for key in ("enable_live_config", "enable_github_push", "auto_start"):
+                if key in remote and remote[key] != self._data.get(key):
+                    self._data[key] = remote[key]
+                    changed = True
+            if changed:
+                print("[config] Force sync: local catalog replaced with repo values")
+                self.save()
+            return changed
+
     def apply_github_config(self, remote: Dict[str, Any]) -> bool:
         """Merge the live GitHub config into the local one.
 

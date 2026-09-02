@@ -194,6 +194,36 @@ class FilePickerController:
         except Exception:
             pass
 
+    def _schedule_old_cleanup_retries(self, minutes: float = 2.0) -> None:
+        """Keep retrying the `.old` cleanup shortly after startup.
+
+        Right after a relaunch, leftover `*.old` files can still be briefly
+        locked (the dying process's image, a Defender scan, Explorer), so the
+        single startup pass can miss them. Retry every 15s for the first few
+        minutes until no `.old` files remain.
+        """
+        try:
+            from updater import _cleanup_old_files_deep
+        except ImportError:
+            return
+
+        def retry() -> None:
+            if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
+                app_dir = Path(sys.executable).resolve().parent
+            else:
+                app_dir = Path(__file__).resolve().parent
+            deadline = time.monotonic() + minutes * 60
+            while time.monotonic() < deadline:
+                try:
+                    _cleanup_old_files_deep(app_dir)
+                    if not list(app_dir.rglob("*.old")):
+                        return
+                except Exception:
+                    pass
+                time.sleep(15)
+
+        threading.Thread(target=retry, name="filepicker-old-cleanup", daemon=True).start()
+
     def _show_update_notice_if_any(self) -> None:
         """Show a popup if the app was just updated (old -> new)."""
         try:
@@ -219,6 +249,8 @@ class FilePickerController:
                 break
             if cmd == "check_update":
                 self._check_update_now()
+            elif cmd == "force_sync":
+                self._force_sync_now()
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -466,6 +498,7 @@ class FilePickerController:
         except Exception as exc:
             print(f"[filepicker] update resume error: {exc}")
         self._cleanup_old_files()
+        self._schedule_old_cleanup_retries()
         self._show_update_notice_if_any()
 
         # Background OCR pool: every completed file is read eagerly (up to 5
@@ -516,6 +549,7 @@ class FilePickerController:
             self._tray = TrayIcon(
                 on_check_update=self._tray_check_update,
                 on_quit=self._tray_quit,
+                on_force_sync=self._tray_force_sync,
             )
             self._tray.start()
         except Exception as exc:
@@ -532,8 +566,48 @@ class FilePickerController:
         # Called from the pystray thread; marshal onto the Tk main thread.
         self._ui_commands.put("check_update")
 
+    def _tray_force_sync(self) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put("force_sync")
+
     def _tray_quit(self) -> None:
         self._ui_commands.put("quit")
+
+    def _force_sync_now(self) -> None:
+        """Manual "Force sync with repo" from the tray.
+
+        Replaces the local catalog with the GitHub config (deletions
+        included) on a background thread, then refreshes the open popup if
+        anything changed.
+        """
+        def work() -> None:
+            try:
+                sync_result = self.config.force_sync_from_github(timeout=10.0)
+                if sync_result is None:
+                    print("[filepicker] force sync FAILED (could not fetch repo config)")
+                    return
+                if not sync_result:
+                    print("[filepicker] force sync: local config already matches repo")
+                    return
+
+                def done() -> None:
+                    popup = getattr(self, "_current_popup", None)
+                    if popup is not None:
+                        try:
+                            if popup.window.winfo_exists():
+                                popup.refresh_from_config()
+                        except Exception as exc:
+                            print(f"[filepicker] force sync refresh error: {exc}")
+                    print("[filepicker] force sync applied: local catalog now matches repo")
+
+                try:
+                    self._root.after(0, done)
+                except Exception:
+                    pass
+            except Exception as exc:
+                print(f"[filepicker] force sync error: {exc}")
+
+        threading.Thread(target=work, name="filepicker-force-sync", daemon=True).start()
 
     def _check_update_now(self) -> None:
         """Manual 'Check for updates' from the tray (runs on the main thread)."""
