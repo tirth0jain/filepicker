@@ -2,9 +2,13 @@
 
 The generated filename strictly follows the format::
 
-    {Company}-{Doc Type}-{Financial Year}-{Site Name}-{Serial}-{Material Shortcodes}-{Status}.{ext}
+    {Company}-{Doc Type}-{Financial Year}-{Serial}-{Site Name}-{Material Shortcodes}.{ext}
 
-e.g. ``Acme-DC-26-27-Site 1 - Mumbai-0001-A+C-Received.pdf``
+e.g. ``Acme-DC-26-27-0001-Site 1 - Mumbai-A+C.pdf``
+
+The Received/Submitted status is deliberately NOT part of the filename — it is
+reflected only in the destination folder structure
+(``.../<Doc Type>/<Received or Submitted>/``).
 """
 
 from __future__ import annotations
@@ -93,17 +97,22 @@ def build_filename(
     selected_materials,
     materials_map: dict,
     serial: str,
-    status: str,
     extension: str,
     now: Optional[datetime.date] = None,
     initials_map: Optional[dict] = None,
 ) -> str:
     """Assemble the fully formatted file name.
 
-    ``status`` should be either ``"Received"`` or ``"Submitted"``.
+    Parts always appear in this order:
+
+        {Company}-{Doc Type}-{FY}-{Serial}-{Site Name}-{Material Shortcodes}.{ext}
+
     ``extension`` should be provided without a leading dot (e.g. ``"pdf"``).
     ``initials_map`` optionally maps a company name to its short initials used
     in the filename (otherwise initials are derived from the name).
+
+    The Received/Submitted ``status`` is intentionally absent: it lives only
+    in the destination folder (``.../<Doc Type>/<Received or Submitted>/``).
     """
     fy = financial_year(now)
     codes = material_shortcodes(selected_materials, materials_map)
@@ -114,10 +123,9 @@ def build_filename(
             company_code,
             sanitize(doc_type),
             fy,
-            sanitize(site_name),
             sanitize(serial),
+            sanitize(site_name),
             codes,
-            sanitize(status),
         ]
     )
     ext = extension.lstrip(".") if extension else ""

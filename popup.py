@@ -1420,7 +1420,6 @@ class FilePickerPopup:
         import filename as fn
 
         ext = self.file_path.suffix.lstrip(".") or "pdf"
-        status = "Received" if self._received_var.get() else "Submitted"
         try:
             name = fn.build_filename(
                 company=self._company_var.get(),
@@ -1429,7 +1428,6 @@ class FilePickerPopup:
                 selected_materials=self._selected_materials,
                 materials_map=self._materials_map,
                 serial=self._serial_var.get(),
-                status=status,
                 extension=ext,
             )
         except Exception:

@@ -96,7 +96,6 @@ def _organize_locked(request: OrganizeRequest, result: OrganizeResult) -> None:
         selected_materials=request.materials,
         materials_map=request.materials_map,
         serial=request.serial,
-        status=request.status,
         extension=ext,
         initials_map=request.initials_map,
     )
