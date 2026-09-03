@@ -223,16 +223,27 @@ def _levenshtein(a: str, b: str) -> int:
 def _site_tokens_near(a: str, b: str) -> bool:
     """True when two (already normalized) words are the same word.
 
-    Allows exactly one wrong/extra/missing letter ("shital" vs "sital",
-    "bag" vs "baug") but nothing looser — this is *near*, not similar.
-    Tokens containing digits must match exactly so "Tower 1" is never the
-    same site as "Tower 2" and "Site A1" is never "Site A2".
+    Numbers are "don't care": "T1"/"T2", "Tower 1"/"Tower 2" and "Site A1"/
+    "Site A2" are the same site — vendors and OCR write the numeral
+    inconsistently, so it never decides a match. Otherwise allows exactly one
+    wrong/extra/missing letter ("shital" vs "sital", "bag" vs "baug") and
+    nothing looser — this is *near*, not similar.
     """
     if a == b:
         return True
+    if a.isdigit() and b.isdigit():
+        return True
+    # Compare digit-stripped forms with the same one-letter tolerance:
+    # "t1" vs "t2" -> "t" == "t"; "block3" vs "block4" -> "block" == "block".
+    a_letters = re.sub(r"\d", "", a)
+    b_letters = re.sub(r"\d", "", b)
+    if a_letters and b_letters:
+        if a_letters == b_letters:
+            return True
+        if len(a_letters) >= 2 and len(b_letters) >= 2 \
+                and _levenshtein(a_letters, b_letters) <= 1:
+            return True
     if not a or not b:
-        return False
-    if any(ch.isdigit() for ch in a) or any(ch.isdigit() for ch in b):
         return False
     if len(a) < 2 or len(b) < 2:
         return False
@@ -264,15 +275,15 @@ def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
 def find_near_site(existing_sites, candidate) -> Optional[str]:
     """The existing site that is the *same place* as ``candidate``, else None.
 
-    Matching ignores case, punctuation, spacing and articles (a/an/the),
-    tolerates one-letter spelling variants per word ("shital bag" vs
-    "Sital Baug") and at most one extra word (brand prefixes like "Lodha").
-    Names that differ only in spacing/punctuation ("T-A" vs "TA" vs "T A")
-    are equivalent. Deliberately strict: sites that merely share words are
-    NOT matched ("Sai Baug" is never "Sital Baug"), digit-bearing tokens must
-    match exactly ("Tower 1" is never "Tower 2"), and single-letter tokens
-    are exact-only ("Site A" is never "Site B"). Returns the canonical
-    existing spelling.
+    Matching ignores case, punctuation, spacing, articles (a/an/the) and
+    numbers — "T1"/"T2"/"Tower 1"/"Tower 2" are the same site, so the exact
+    numeral never blocks a match. Tolerates one-letter spelling variants per
+    word ("shital bag" vs "Sital Baug") and at most one extra word (brand
+    prefixes like "Lodha"). Names that differ only in spacing/punctuation
+    ("T-A" vs "TA" vs "T A") are equivalent. Deliberately strict: sites that
+    merely share words are NOT matched ("Sai Baug" is never "Sital Baug"),
+    and single-letter tokens are exact-only ("Site A" is never "Site B").
+    Returns the canonical existing spelling.
     """
     cand = normalize_site_name(candidate)
     if not cand:
