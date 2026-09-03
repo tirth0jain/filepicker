@@ -25,8 +25,11 @@ from watchdog.observers import Observer
 _TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".opdownload", ".partial")
 # The default size to assume a file has when only metadata is available.
 _DEFAULT_SIZE = 0
-# Seconds to require a stable size before declaring a file "done".
-_STABLE_WINDOW = 0.4
+# Seconds to require a stable size before declaring a file "done". Must be
+# longer than the pauses between write bursts of a slow download (browsers
+# write in bursts; a 0.4s pause mid-transfer is normal, 3s of total silence
+# means the transfer really ended / the connection died).
+_STABLE_WINDOW = 3.0
 # Retry back-off for files that are still locked.
 _LOCK_RETRY_DELAY = 0.1
 
@@ -88,6 +91,11 @@ class WatcherHandler(FileSystemEventHandler):
         self.handle_dirs = handle_dirs
         self._tracker = _StableTracker()
         self._recently_handled: Dict[str, float] = {}
+        # Paths that were already handed off to the popup queue. A file is
+        # handed off at most once per download: without this, a file that
+        # keeps growing past the 60s dedupe TTL (huge/slow transfer) would be
+        # debounced again and pop up a SECOND (partial) popup.
+        self._handed_off: set = set()
         self._handled_lock = threading.Lock()
         self._handled_ttl = 60.0
 
@@ -106,11 +114,26 @@ class WatcherHandler(FileSystemEventHandler):
         self._maybe_queue_path(Path(event.dest_path))
 
     def on_deleted(self, event) -> None:
-        # A file was removed (e.g. organised away). Forget it so a later
-        # download with the same name is detected again.
+        # A file was removed (e.g. organised away or deleted by Skip All).
+        # Forget it so a later download with the same name is detected again.
         key = str(Path(event.src_path))
         with self._handled_lock:
             self._recently_handled.pop(key, None)
+            self._handed_off.discard(key)
+
+    def mark_handed_off(self, path: Path) -> bool:
+        """Record that *path* was handed off to the popup queue.
+
+        Returns False when it was already handed off (the caller then skips
+        enqueuing again), so several debounce workers finishing for the same
+        path only ever produce one popup.
+        """
+        key = str(path)
+        with self._handled_lock:
+            if key in self._handed_off:
+                return False
+            self._handed_off.add(key)
+            return True
 
     def _maybe_queue(self, event) -> None:
         if event.is_directory and not self.handle_dirs:
@@ -133,7 +156,14 @@ class WatcherHandler(FileSystemEventHandler):
                          if now - t > self._handled_ttl]
                 for k in stale:
                     del self._recently_handled[k]
-            if key in self._recently_handled:
+            if len(self._handed_off) > 500:
+                for k in list(self._handed_off):
+                    try:
+                        if not Path(k).exists():
+                            self._handed_off.discard(k)
+                    except OSError:
+                        self._handed_off.discard(k)
+            if key in self._recently_handled or key in self._handed_off:
                 return
             self._recently_handled[key] = now
 
@@ -144,14 +174,17 @@ def wait_until_stable(
     path: Path,
     on_completed: Callable[[Path], None],
     stable_window: float = _STABLE_WINDOW,
-    max_attempts: int = 300,
+    max_attempts: int = 3600,
 ) -> None:
     """Block until ``path`` is no longer growing and is not locked.
 
     Runs in its own worker thread. Calls ``on_completed`` once the file is
     ready, or logs a warning if it never settles in time (0.1s between checks
-    → 300 attempts = 30s of continuous activity before forcing a hand-off,
-    so a multi-GB copy still being written is not handed off mid-write).
+    → 3600 attempts = 6 minutes of *continuous* activity before forcing a
+    hand-off, so a multi-GB copy over a slow connection — which can write for
+    minutes on end — is never handed off mid-write; only a file that truly
+    never stops growing (e.g. a streaming log dropped into the folder) is
+    handed off anyway).
     """
     last_size = _DEFAULT_SIZE
     stable_since: Optional[float] = None
@@ -210,9 +243,19 @@ class DownloadWatcher:
             # Debounce in a dedicated worker thread. This MUST NOT run on the
             # watchdog dispatch thread: wait_until_stable sleeps, and blocking
             # that thread would stall detection of every subsequent file.
+            def settled(p: Path) -> None:
+                # The file may have been deleted meanwhile (e.g. "Skip All &
+                # Delete"): never queue a popup for a file that is gone. And
+                # hand each file off at most once per download.
+                if not Path(p).exists():
+                    return
+                if not event_handler.mark_handed_off(p):
+                    return
+                self._queue.put(p)
+
             threading.Thread(
                 target=wait_until_stable,
-                args=(path, self._queue.put, self.stable_window),
+                args=(path, settled, self.stable_window),
                 name="filepicker-debounce",
                 daemon=True,
             ).start()

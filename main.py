@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import List
 
 # Ensure the app's own folder is importable no matter the working directory.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -278,6 +279,7 @@ class FilePickerController:
             file_path=path,
             on_submit=self._handle_submit,
             on_skip=self._handle_skip,
+            on_skip_all=lambda p=path: self._handle_skip_all(p),
             ocr_pool=self._ocr_pool,
         )
         self._current_popup = popup
@@ -322,6 +324,54 @@ class FilePickerController:
 
     def _handle_skip(self) -> None:
         self._set_status("Skipped — file left untouched in watch folder.")
+
+    def _skip_all_pending(self, current_path: Path) -> List[Path]:
+        """Collect and clear every pending popup file (current + queued).
+
+        Called after the popup already closed itself, so the files can be
+        deleted. Returns the paths in deletion order (current popup's file
+        first, then the remaining queue).
+        """
+        pending = [Path(p) for p in list(self._popup_queue.queue)]
+        try:
+            while True:
+                self._popup_queue.get_nowait()
+        except queue.Empty:
+            pass
+        current = Path(current_path)
+        if current not in pending:
+            pending.insert(0, current)
+        return pending
+
+    def _handle_skip_all(self, current_path) -> None:
+        """"Skip All & Delete": drop every queued popup and remove those files
+        from the watch folder.
+
+        The popup that triggered this already released itself (preview closed,
+        window destroyed) before calling back — an open popup holds the file
+        open on Windows and would block the deletion. Deletion runs on a
+        background thread with the same in-use retry as the normal flow.
+        """
+        paths = self._skip_all_pending(Path(current_path))
+
+        def work() -> None:
+            removed = 0
+            for p in paths:
+                if self._delete_original(p):
+                    removed += 1
+            if removed == len(paths):
+                self._set_status(
+                    f"Skipped all — {removed} file(s) removed from watch folder."
+                )
+            else:
+                self._set_status(
+                    f"Skipped all — removed {removed}/{len(paths)} file(s) "
+                    "(some were still locked; remove them manually)."
+                )
+
+        threading.Thread(
+            target=work, name="filepicker-skip-all-delete", daemon=True
+        ).start()
 
     def _organize(self, payload: dict) -> None:
         source: Path = payload["file_path"]

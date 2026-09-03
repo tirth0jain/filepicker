@@ -403,12 +403,17 @@ class FilePickerPopup:
         on_submit: Callable[[dict], None],
         on_skip: Callable[[], None],
         ocr_pool=None,
+        on_skip_all: Optional[Callable[[], None]] = None,
     ) -> None:
         self.config = config
         self.file_path = Path(file_path)
         self.on_submit = on_submit
         self.on_skip = on_skip
         self.ocr_pool = ocr_pool  # OcrPool (eager background OCR) or None
+        # "Skip All & Delete": called (after this popup released itself) so
+        # the controller can drop every queued popup and remove the files
+        # from the watch folder. None hides the button.
+        self.on_skip_all = on_skip_all
 
         # Internal UI state.
         self._company_var = tk.StringVar()
@@ -734,6 +739,18 @@ class FilePickerPopup:
             font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
         )
         self.skip_btn.pack(side="left", expand=True, fill="x")
+
+        # "Skip All & Delete" — skips every queued popup AND removes those
+        # files from the watch folder. Only shown when the controller wires
+        # on_skip_all (the popup releases itself before deleting so Windows
+        # can remove the files — an open popup/preview keeps them locked).
+        if self.on_skip_all is not None:
+            self.skip_all_btn = ctk.CTkButton(
+                btn_row, text="Skip All & Delete", command=self._skip_all,
+                fg_color="#3a2b2b", hover_color="#4a3535", width=140, height=40,
+                font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+            )
+            self.skip_all_btn.pack(side="left", fill="y", padx=(8, 0))
 
         # -- Live preview ----------------------------------------------
         self.preview_label = ctk.CTkLabel(
@@ -1476,6 +1493,21 @@ class FilePickerPopup:
     def _skip(self) -> None:
         self._release()
         self.on_skip()
+
+    def _skip_all(self) -> None:
+        """Dismiss this popup AND every queued popup, deleting the files.
+
+        The popup (and its preview, which holds the file open) is fully
+        released FIRST — Windows cannot delete files that another process
+        has open. Only then is the controller told to clear the queue and
+        remove the files from the watch folder.
+        """
+        self._release()
+        try:
+            if self.on_skip_all is not None:
+                self.on_skip_all()
+        except Exception as exc:
+            print(f"[filepicker] skip-all error: {exc}")
 
     def _release(self) -> None:
         # Stop live config polling first so no after() fires on a destroyed window.
