@@ -16,7 +16,8 @@
     "fitting": "FI",
     "silicon": "SI",
     "EPDM RUBBER": "ER",
-    "ad": "AD"
+    "ad": "AD",
+    "GI SHEET": "GS"
   },
   "companies": [
     "Ruby Steel",
