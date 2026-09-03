@@ -155,6 +155,7 @@ class FilePickerController:
         self._file_order: list = []  # completed files in arrival order
         self._popups_shown = 0       # popups displayed so far (1-based next)
         self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
+        self._ocr_lock = threading.Lock()  # guards _ocr_submitted (watcher + UI threads)
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -239,6 +240,16 @@ class FilePickerController:
         """Called from the watcher's worker thread when a file settles."""
         self._popup_queue.put(path)
         self._file_order.append(Path(path))
+        # Submit OCR for the new file IMMEDIATELY (when the pacing window
+        # allows) — the first batch of 10 files (or fewer) is always read in
+        # the background as files arrive, never only once a popup opens. The
+        # ceiling only covers the batch the user is in plus the next one, so
+        # a 30-file folder doesn't fire 30 vision calls at once.
+        try:
+            self._submit_ocr_window(
+                _ocr_submit_until(max(1, self._popups_shown + 1)))
+        except Exception as exc:
+            print(f"[filepicker] background OCR submit error: {exc}")
 
     def _poll_popups(self) -> None:
         """Main-thread polling loop that shows one popup at a time."""
@@ -290,25 +301,31 @@ class FilePickerController:
             self._current_popup = None
 
     def _submit_ocr_window(self, submit_until: int) -> None:
-        """Start OCR for the files the user is about to review (batches).
+        """Start OCR for files up to index ``submit_until`` (batches).
 
-        Deliberately NOT the whole queue: only the current batch plus the
-        next one are submitted up front (see :func:`_ocr_submit_until`), so a
-        folder of 20 notes does not fire 20 vision calls immediately — the
-        next batch is read while the user checks the last file of the
-        current one. Submissions are deduped by the pool.
+        Called from two places:
+        - every file arrival (``_on_file_completed``, watcher thread) — so
+          the current batch is always being read in the background while the
+          user works through its popups;
+        - when a popup opens (``_show_popup``) — which widens the window by
+          one batch once the user reaches the last file of the current batch,
+          so the next 10 are being read before their popups appear.
+
+        Submissions are deduped by the pool, and the cursor is lock-guarded
+        because arrivals come from the watcher thread.
         """
         pool = getattr(self, "_ocr_pool", None)
         if pool is None:
             return
-        end = min(submit_until, len(self._file_order))
-        while self._ocr_submitted < end:
-            path = self._file_order[self._ocr_submitted]
-            self._ocr_submitted += 1
-            try:
-                pool.submit(path)
-            except Exception as exc:
-                print(f"[filepicker] OCR submit error: {exc}")
+        with self._ocr_lock:
+            end = min(submit_until, len(self._file_order))
+            while self._ocr_submitted < end:
+                path = self._file_order[self._ocr_submitted]
+                self._ocr_submitted += 1
+                try:
+                    pool.submit(path)
+                except Exception as exc:
+                    print(f"[filepicker] OCR submit error: {exc}")
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
