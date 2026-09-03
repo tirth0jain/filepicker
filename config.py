@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import threading
 from copy import deepcopy
@@ -178,6 +179,120 @@ def _read_github_token() -> Optional[str]:
             return text or None
     except OSError:
         pass
+    return None
+
+
+# --------------------------------------------------------------------------
+# Site near-match ("almost or near same, never merely similar")
+# --------------------------------------------------------------------------
+# Articles that never tell two sites apart ("The Sital Baug" == "Sital Baug").
+# Only a LEADING article is dropped: a trailing "a"/"an"/"the" token is a
+# real designation letter ("Kalpataru Vivant (T-A)", "Site A") that must be
+# kept — "Site A" is NOT "Site B".
+_SITE_ARTICLES = {"a", "an", "the"}
+
+
+def normalize_site_name(name) -> str:
+    """Fold a site name into its comparable form.
+
+    Lowercases, turns every non-alphanumeric run (punctuation, spacing,
+    brackets, "&") into a single space, and drops a leading article
+    (a/an/the) — so "The LODHA Shital-Baug" and "Lodha shital baug" compare
+    equal, while "Site A" and "Kalpataru Vivant (T-A)" keep their letters.
+    """
+    text = re.sub(r"[^0-9a-z]+", " ", str(name).lower())
+    tokens = [t for t in text.split() if t]
+    if tokens and tokens[0] in _SITE_ARTICLES:
+        tokens = tokens[1:]
+    return " ".join(tokens)
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Edit distance between two short strings (small, O(n*m) is fine)."""
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(a) + 1))
+    for j, ch_b in enumerate(b, 1):
+        cur = [j]
+        for i, ch_a in enumerate(a, 1):
+            cur.append(min(prev[i] + 1, cur[-1] + 1, prev[i - 1] + (ch_a != ch_b)))
+        prev = cur
+    return prev[-1]
+
+
+def _site_tokens_near(a: str, b: str) -> bool:
+    """True when two (already normalized) words are the same word.
+
+    Allows exactly one wrong/extra/missing letter ("shital" vs "sital",
+    "bag" vs "baug") but nothing looser — this is *near*, not similar.
+    Tokens containing digits must match exactly so "Tower 1" is never the
+    same site as "Tower 2" and "Site A1" is never "Site A2".
+    """
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    if any(ch.isdigit() for ch in a) or any(ch.isdigit() for ch in b):
+        return False
+    if len(a) < 2 or len(b) < 2:
+        return False
+    return _levenshtein(a, b) <= 1
+
+
+def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
+    """True when every token of *sub* occurs in *seq* in order, near-identical.
+
+    The lists may differ by at most one token (e.g. a brand prefix:
+    "Lodha Shital Baug" vs "sital baug" is the same site, so the single
+    extra word is tolerated). Every token of the shorter list must match a
+    token of the longer one within one letter.
+    """
+    if len(sub) > len(seq):
+        seq, sub = sub, seq
+    if abs(len(seq) - len(sub)) > 1:
+        return False
+    i = 0
+    for tok in sub:
+        while i < len(seq) and not _site_tokens_near(tok, seq[i]):
+            i += 1
+        if i >= len(seq):
+            return False
+        i += 1
+    return True
+
+
+def find_near_site(existing_sites, candidate) -> Optional[str]:
+    """The existing site that is the *same place* as ``candidate``, else None.
+
+    Matching ignores case, punctuation, spacing and articles (a/an/the),
+    tolerates one-letter spelling variants per word ("shital bag" vs
+    "Sital Baug") and at most one extra word (brand prefixes like "Lodha").
+    Names that differ only in spacing/punctuation ("T-A" vs "TA" vs "T A")
+    are equivalent. Deliberately strict: sites that merely share words are
+    NOT matched ("Sai Baug" is never "Sital Baug"), digit-bearing tokens must
+    match exactly ("Tower 1" is never "Tower 2"), and single-letter tokens
+    are exact-only ("Site A" is never "Site B"). Returns the canonical
+    existing spelling.
+    """
+    cand = normalize_site_name(candidate)
+    if not cand:
+        return None
+    cand_tokens = cand.split()
+    cand_squeezed = cand.replace(" ", "")
+    for site in existing_sites:
+        norm = normalize_site_name(site)
+        if not norm:
+            continue
+        if norm == cand:
+            return str(site)
+        # Same words with only spacing/punctuation differences:
+        # "T-A" vs "TA" vs "T A", "Sital Baug" vs "sitalbaug".
+        if norm.replace(" ", "") == cand_squeezed:
+            return str(site)
+        # Same words in order, every word within one letter, at most one
+        # extra/missing word (brand prefixes like "Lodha").
+        if _token_subsequence_matches(norm.split(), cand_tokens):
+            return str(site)
     return None
 
 
@@ -649,6 +764,25 @@ class ConfigManager:
     def sites_for(self, client: str) -> List[str]:
         return list(self._clients_dict().get(client.strip().lower(), []))
 
+    def find_near_site(self, existing_sites, candidate) -> Optional[str]:
+        """The existing site that is the same place as ``candidate``, else None.
+
+        See :func:`find_near_site` — near-match, never merely similar:
+        case/spacing/punctuation/articles ignored, one-letter variants and
+        one extra word tolerated, digit-bearing tokens exact-only.
+        """
+        return find_near_site(existing_sites, candidate)
+
+    def all_sites(self) -> List[str]:
+        """Every site name across all clients (for the OCR known-sites list)."""
+        out: List[str] = []
+        for sites in self._clients_dict().values():
+            for s in sites:
+                name = str(s).strip()
+                if name and name not in out:
+                    out.append(name)
+        return out
+
     def _clients_dict(self) -> Dict[str, List[str]]:
         """The raw {client -> [sites]} map with case-insensitive keys."""
         clients = self.load().get("clients", {})
@@ -719,19 +853,35 @@ class ConfigManager:
         if pushed:
             self._push_async(reason=f"FilePicker: add client '{client}'")
 
-    def add_site(self, client: str, site: str) -> None:
-        """Add a new site under ``client``; create the client if needed."""
+    def add_site(self, client: str, site: str) -> str:
+        """Add a new site under ``client``; create the client if needed.
+
+        Near-same sites are never duplicated: when ``site`` is the same place
+        as an existing site (same words, ignoring case/spacing/punctuation/
+        articles, at most one letter off per word and at most one extra word
+        like a brand prefix), the existing canonical spelling is returned and
+        nothing is added. Returns the effective site name — the existing
+        canonical spelling, or the newly added name.
+        """
+        site = site.strip()
+        if not site:
+            return ""
         pushed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
             key = self._canonical_key(clients, client)
             sites = clients.setdefault(key, [])
-            if not self._ci_matches(sites, site):
-                sites.append(site)
-                self.save()
-                pushed = True
+            canonical = find_near_site(list(sites), site)
+            if canonical is not None:
+                if canonical != site:
+                    print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
+                return canonical
+            sites.append(site)
+            self.save()
+            pushed = True
         if pushed:
             self._push_async(reason=f"FilePicker: add site '{site}' to '{client}'")
+        return site
 
     @staticmethod
     def _canonical_key(d: dict, name: str) -> str:

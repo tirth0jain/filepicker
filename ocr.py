@@ -102,6 +102,39 @@ Output format:
 | Site (Other References) | [Name] |
 | Serial Number (Delivery Note No.) | [Number] |"""
 
+# Known-Sites section appended to the base prompt (see build_ocr_prompt).
+# The model gets the current site catalog so a document that writes a site
+# slightly differently ("sital baug") is resolved to the existing name
+# ("Sital Baug") instead of becoming a duplicate site in the config.
+_KNOWN_SITES_SECTION = """
+
+Known Sites (the current site list from the app's config):
+{sites}
+
+Site matching rule (IMPORTANT): the "Other References" value in the document is
+usually one of the Known Sites above written slightly differently — different
+letters, spacing, punctuation, or with/without articles ("a"/"an"/"the"), or an
+extra word like a brand name ("Lodha Shital Baug" vs "sital baug"). When the
+value is the same place as one of the Known Sites, output the Known Site name
+EXACTLY as listed above instead of the document's spelling. Only output a name
+NOT on the list when it clearly matches no Known Site (e.g. a brand-new site)."""
+
+
+def build_ocr_prompt(known_sites=None) -> str:
+    """The OCR prompt, with the current known site names appended.
+
+    ``known_sites`` is the list of site names already in the config (from all
+    clients). When it is empty/None the bare :data:`OCR_PROMPT` is returned so
+    the CLI and the default code path are unchanged.
+    """
+    if not known_sites:
+        return OCR_PROMPT
+    sites = [str(s).strip() for s in known_sites if str(s).strip()]
+    if not sites:
+        return OCR_PROMPT
+    listed = "\n".join(f"- {s}" for s in sites)
+    return OCR_PROMPT + _KNOWN_SITES_SECTION.format(sites=listed)
+
 # Labels the model is asked to emit, mapped to our result keys. Matching is
 # case-insensitive and tolerant of extra whitespace/backticks around the row.
 _ROW_PATTERNS = {
@@ -316,12 +349,17 @@ def extract_delivery_note(
     prompt: str = OCR_PROMPT,
     max_tokens: int = OCR_MAX_TOKENS,
     timeout: float = OCR_TIMEOUT,
+    known_sites: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site} (None on failure).
 
-    Never raises: network/render/model errors are logged and return None so
-    the popup can simply skip auto-fill.
+    When ``known_sites`` is given (names already in the config), the prompt is
+    rebuilt with them so the model resolves near-same site spellings to the
+    existing names. Never raises: network/render/model errors are logged and
+    return None so the popup can simply skip auto-fill.
     """
+    if known_sites is not None:
+        prompt = build_ocr_prompt(known_sites)
     data_url = render_to_data_url(Path(file_path))
     if data_url is None:
         return None
@@ -407,11 +445,15 @@ class OcrPool:
         model: str = OCR_MODEL,
         api_base: str = OCR_API_BASE,
         max_concurrent: int = MAX_CONCURRENT_OCR,
+        known_sites_provider: Optional[Callable[[], List[str]]] = None,
     ) -> None:
         self._token = token
         self._model = model
         self._api_base = api_base
         self._max = max(1, max_concurrent)
+        # Called per file (just before the vision call) to fetch the current
+        # site catalog, so sites added mid-batch are known to later reads.
+        self._known_sites_provider = known_sites_provider
         self._queue: "queue.Queue" = queue.Queue()
         self._lock = threading.Lock()
         self._results: Dict[str, Optional[Dict[str, Optional[str]]]] = {}
@@ -491,9 +533,17 @@ class OcrPool:
                 self._queue.task_done()
 
     def _work(self, file_path: Path, key: str) -> None:
+        known_sites = None
+        if self._known_sites_provider is not None:
+            try:
+                known_sites = self._known_sites_provider()
+            except Exception as exc:
+                print(f"[ocr] known-sites fetch error: {exc}")
+                known_sites = None
         try:
             result = extract_delivery_note(
-                file_path, token=self._token, model=self._model, api_base=self._api_base,
+                file_path, token=self._token, model=self._model,
+                api_base=self._api_base, known_sites=known_sites,
             )
         except Exception as exc:  # belt & braces: extract never raises
             print(f"[ocr] OCR error for {file_path}: {exc}")

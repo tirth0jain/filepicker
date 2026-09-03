@@ -510,6 +510,10 @@ class FilePickerController:
                     token=self.config.opencode_token,
                     model=self.config.ocr_model,
                     api_base=self.config.ocr_api_base,
+                    # The current site catalog is sent with every read so the
+                    # AI resolves near-same spellings ("sital baug") to the
+                    # existing site names instead of inventing duplicates.
+                    known_sites_provider=self.config.all_sites,
                 )
                 if self._ocr_pool.available:
                     self._set_status(f"OCR enabled — delivery notes auto-filled ({_OCR_BATCH} concurrent reads)")

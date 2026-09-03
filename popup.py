@@ -1147,9 +1147,11 @@ class FilePickerPopup:
             self._populate_sites(self._client_var.get())
             return
         client = self._client_var.get()
-        self.config.add_site(client, site)
+        # add_site dedupes near-same sites and returns the name to use
+        # (existing canonical spelling, or the newly added one).
+        effective = self.config.add_site(client, site)
         self._populate_sites(client)
-        self.site_dropdown.set(site)
+        self.site_dropdown.set(effective)
         self._refresh_preview()
 
     # ------------------------------------------------------------------
@@ -1319,6 +1321,13 @@ class FilePickerPopup:
             self._client_var.set(client_value)
             self._populate_sites(client_value)
         if site:
+            # Site: resolve near-same spellings to the catalog name (the AI
+            # may still return "sital baug" when the config has "Sital Baug"),
+            # and when the site is genuinely new, add it to the config + push
+            # to GitHub right away so the next popup offers it.
+            effective_client = self._client_var.get().strip()
+            if effective_client:
+                site = self._ensure_site_in_config(effective_client, site)
             self.site_dropdown.set(site)
 
         self._refresh_preview()
@@ -1351,6 +1360,40 @@ class FilePickerPopup:
             if str(value).strip().lower() == lowered:
                 return str(value)
         return None
+
+    def _ensure_site_in_config(self, client: str, site: str) -> str:
+        """Canonicalize *site* against the catalog; add + push brand-new sites.
+
+        Returns the site name to use:
+
+        - the existing catalog spelling when *site* is the same place as one
+          of the client's sites (near-match: case/spacing/articles/1-letter
+          variants/tolerated extra word) — nothing is added;
+        - otherwise *site* is added to the config for *client* (which is
+          created if missing) and pushed back to GitHub, so the site appears
+          in the dropdown of this and every later popup.
+
+        The dropdown values are refreshed so the returned name is selectable.
+        """
+        site = (site or "").strip()
+        client = (client or "").strip()
+        if not site or not client:
+            return site
+        try:
+            canonical = self.config.find_near_site(self.config.sites_for(client), site)
+            if canonical is not None:
+                return str(canonical)
+            effective = self.config.add_site(client, site)
+        except Exception as exc:
+            print(f"[filepicker] could not add site '{site}': {exc}")
+            return site
+        # New site: refresh the dropdown so it is offered right away.
+        try:
+            values = self.config.sites_for(client) + [ADD_NEW_SITE_OPTION]
+            self.site_dropdown.configure(values=values)
+        except Exception:
+            pass
+        return effective
 
     # ------------------------------------------------------------------
     # Preview + submit
@@ -1395,6 +1438,16 @@ class FilePickerPopup:
             except Exception:
                 pass
             return
+        # Every saved site lands in the config: near-same spellings resolve to
+        # the existing catalog name, and genuinely new sites (typed or from
+        # OCR) are added + pushed to GitHub so the next popup offers them.
+        site = self._ensure_site_in_config(client, site)
+        if site != self.site_dropdown.get():
+            try:
+                self.site_dropdown.set(site)
+            except Exception:
+                pass
+            self._refresh_preview()
         payload = {
             "file_path": self.file_path,
             "company": self._company_var.get(),
