@@ -119,21 +119,45 @@ value is the same place as one of the Known Sites, output the Known Site name
 EXACTLY as listed above instead of the document's spelling. Only output a name
 NOT on the list when it clearly matches no Known Site (e.g. a brand-new site)."""
 
+# Known-Clients section (same idea as Known Sites: the model resolves a client
+# written slightly differently to the existing catalog name so one place never
+# becomes many clients).
+_KNOWN_CLIENTS_SECTION = """
 
-def build_ocr_prompt(known_sites=None) -> str:
-    """The OCR prompt, with the current known site names appended.
+Known Clients (the current client list from the app's config):
+{clients}
 
-    ``known_sites`` is the list of site names already in the config (from all
-    clients). When it is empty/None the bare :data:`OCR_PROMPT` is returned so
-    the CLI and the default code path are unchanged.
+Client matching rule (IMPORTANT): the Client (Buyer/Consignee) value in the
+document is usually one of the Known Clients above written slightly differently
+— different letters, spacing, punctuation, with/without articles
+("a"/"an"/"the"), numbers, or an extra word ("Larsen and Toubro" vs
+"Larsen & Toubro"). When the value is the same place as one of the Known
+Clients, output the Known Client name EXACTLY as listed above instead of the
+document's spelling. Only output a name NOT on the list when it clearly matches
+no Known Client (e.g. a brand-new client)."""
+
+
+def build_ocr_prompt(known_sites=None, known_clients=None) -> str:
+    """The OCR prompt, with the current known site/client names appended.
+
+    ``known_sites`` / ``known_clients`` are the lists of names already in the
+    config. When both are empty/None the bare :data:`OCR_PROMPT` is returned
+    so the CLI and the default code path are unchanged.
     """
-    if not known_sites:
+    if not known_sites and not known_clients:
         return OCR_PROMPT
-    sites = [str(s).strip() for s in known_sites if str(s).strip()]
-    if not sites:
+    parts = [OCR_PROMPT]
+    sites = [str(s).strip() for s in known_sites or [] if str(s).strip()]
+    if sites:
+        parts.append(_KNOWN_SITES_SECTION.format(
+            sites="\n".join(f"- {s}" for s in sites)))
+    clients = [str(c).strip() for c in known_clients or [] if str(c).strip()]
+    if clients:
+        parts.append(_KNOWN_CLIENTS_SECTION.format(
+            clients="\n".join(f"- {c}" for c in clients)))
+    if len(parts) == 1:
         return OCR_PROMPT
-    listed = "\n".join(f"- {s}" for s in sites)
-    return OCR_PROMPT + _KNOWN_SITES_SECTION.format(sites=listed)
+    return "".join(parts)
 
 # Labels the model is asked to emit, mapped to our result keys. Matching is
 # case-insensitive and tolerant of extra whitespace/backticks around the row.
@@ -350,16 +374,18 @@ def extract_delivery_note(
     max_tokens: int = OCR_MAX_TOKENS,
     timeout: float = OCR_TIMEOUT,
     known_sites: Optional[List[str]] = None,
+    known_clients: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site} (None on failure).
 
-    When ``known_sites`` is given (names already in the config), the prompt is
-    rebuilt with them so the model resolves near-same site spellings to the
-    existing names. Never raises: network/render/model errors are logged and
-    return None so the popup can simply skip auto-fill.
+    When ``known_sites`` / ``known_clients`` are given (names already in the
+    config), the prompt is rebuilt with them so the model resolves near-same
+    site/client spellings to the existing names. Never raises:
+    network/render/model errors are logged and return None so the popup can
+    simply skip auto-fill.
     """
-    if known_sites is not None:
-        prompt = build_ocr_prompt(known_sites)
+    if known_sites is not None or known_clients is not None:
+        prompt = build_ocr_prompt(known_sites, known_clients)
     data_url = render_to_data_url(Path(file_path))
     if data_url is None:
         return None
@@ -446,14 +472,17 @@ class OcrPool:
         api_base: str = OCR_API_BASE,
         max_concurrent: int = MAX_CONCURRENT_OCR,
         known_sites_provider: Optional[Callable[[], List[str]]] = None,
+        known_clients_provider: Optional[Callable[[], List[str]]] = None,
     ) -> None:
         self._token = token
         self._model = model
         self._api_base = api_base
         self._max = max(1, max_concurrent)
         # Called per file (just before the vision call) to fetch the current
-        # site catalog, so sites added mid-batch are known to later reads.
+        # site/client catalog, so names added mid-batch are known to later
+        # reads.
         self._known_sites_provider = known_sites_provider
+        self._known_clients_provider = known_clients_provider
         self._queue: "queue.Queue" = queue.Queue()
         self._lock = threading.Lock()
         self._results: Dict[str, Optional[Dict[str, Optional[str]]]] = {}
@@ -540,10 +569,18 @@ class OcrPool:
             except Exception as exc:
                 print(f"[ocr] known-sites fetch error: {exc}")
                 known_sites = None
+        known_clients = None
+        if self._known_clients_provider is not None:
+            try:
+                known_clients = self._known_clients_provider()
+            except Exception as exc:
+                print(f"[ocr] known-clients fetch error: {exc}")
+                known_clients = None
         try:
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
                 api_base=self._api_base, known_sites=known_sites,
+                known_clients=known_clients,
             )
         except Exception as exc:  # belt & braces: extract never raises
             print(f"[ocr] OCR error for {file_path}: {exc}")

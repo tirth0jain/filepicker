@@ -1132,10 +1132,12 @@ class FilePickerPopup:
             # Nothing entered; revert to the previously selected client.
             self._reload_client_options()
             return
-        self.config.add_client(client)
+        # add_client dedupes near-same clients and returns the name to use
+        # (existing canonical spelling, or the newly added one).
+        effective = self.config.add_client(client)
         self._reload_client_options()
-        self.client_dropdown.set(client)
-        self._populate_sites(client)
+        self.client_dropdown.set(effective)
+        self._populate_sites(effective)
         self._refresh_preview()
 
     def _reload_client_options(self) -> None:
@@ -1332,7 +1334,11 @@ class FilePickerPopup:
         # Client + Site (searchable dropdowns): same canonical lookup;
         # unknown names stay typed and can be added at Save time.
         if client:
-            canonical_client = self._ci_canonical(list(self.config.clients.keys()), client)
+            # Near-match, same rule as sites: "Larsen and Toubro" resolves
+            # to the catalog's "Larsen & Toubro", never a duplicate.
+            canonical_client = self.config.find_near(
+                list(self.config.clients.keys()), client
+            )
             client_value = canonical_client if canonical_client else client
             self.client_dropdown.set(client_value)
             self._client_var.set(client_value)
@@ -1456,6 +1462,17 @@ class FilePickerPopup:
         # Every saved site lands in the config: near-same spellings resolve to
         # the existing catalog name, and genuinely new sites (typed or from
         # OCR) are added + pushed to GitHub so the next popup offers them.
+        # Same-place CLIENT names resolve to the catalog spelling too, so the
+        # folder path is canonical ("Larsen and Toubro" -> "Larsen & Toubro").
+        try:
+            canonical_client = self.config.find_near(
+                list(self.config.clients.keys()), client
+            )
+            if canonical_client and canonical_client != client:
+                client = canonical_client
+                self.client_dropdown.set(client)
+        except Exception:
+            pass
         site = self._ensure_site_in_config(client, site)
         if site != self.site_dropdown.get():
             try:

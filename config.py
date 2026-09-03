@@ -183,9 +183,11 @@ def _read_github_token() -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
-# Site near-match ("almost or near same, never merely similar")
+# Name near-match ("almost or near same, never merely similar")
 # --------------------------------------------------------------------------
-# Articles that never tell two sites apart ("The Sital Baug" == "Sital Baug").
+# Used for both SITES and CLIENTS: the exact same rules dedupe a client
+# written slightly differently ("Larsen and Toubro" vs "Larsen & Toubro").
+# Articles that never tell two names apart ("The Sital Baug" == "Sital Baug").
 # Only a LEADING article is dropped: a trailing "a"/"an"/"the" token is a
 # real designation letter ("Kalpataru Vivant (T-A)", "Site A") that must be
 # kept — "Site A" is NOT "Site B".
@@ -272,39 +274,45 @@ def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
     return True
 
 
-def find_near_site(existing_sites, candidate) -> Optional[str]:
-    """The existing site that is the *same place* as ``candidate``, else None.
+def find_near_name(existing_names, candidate) -> Optional[str]:
+    """The existing catalog name that is the *same place* as ``candidate``.
 
-    Matching ignores case, punctuation, spacing, articles (a/an/the) and
-    numbers — "T1"/"T2"/"Tower 1"/"Tower 2" are the same site, so the exact
-    numeral never blocks a match. Tolerates one-letter spelling variants per
-    word ("shital bag" vs "Sital Baug") and at most one extra word (brand
-    prefixes like "Lodha"). Names that differ only in spacing/punctuation
-    ("T-A" vs "TA" vs "T A") are equivalent. Deliberately strict: sites that
-    merely share words are NOT matched ("Sai Baug" is never "Sital Baug"),
-    and single-letter tokens are exact-only ("Site A" is never "Site B").
-    Returns the canonical existing spelling.
+    Applies to site and client names alike. Matching ignores case,
+    punctuation, spacing, articles (a/an/the) and numbers — "T1"/"T2"/"Tower
+    1"/"Tower 2" are the same site, so the exact numeral never blocks a
+    match. Tolerates one-letter spelling variants per word ("shital bag" vs
+    "Sital Baug", "Larsen and Toubro" vs "Larsen & Toubro") and at most one
+    extra word (brand prefixes like "Lodha"). Names that differ only in
+    spacing/punctuation ("T-A" vs "TA" vs "T A") are equivalent. Deliberately
+    strict: names that merely share words are NOT matched ("Sai Baug" is
+    never "Sital Baug"), and single-letter tokens are exact-only ("Site A" is
+    never "Site B"). Returns the canonical existing spelling.
     """
     cand = normalize_site_name(candidate)
     if not cand:
         return None
     cand_tokens = cand.split()
     cand_squeezed = cand.replace(" ", "")
-    for site in existing_sites:
-        norm = normalize_site_name(site)
+    for name in existing_names:
+        norm = normalize_site_name(name)
         if not norm:
             continue
         if norm == cand:
-            return str(site)
+            return str(name)
         # Same words with only spacing/punctuation differences:
         # "T-A" vs "TA" vs "T A", "Sital Baug" vs "sitalbaug".
         if norm.replace(" ", "") == cand_squeezed:
-            return str(site)
+            return str(name)
         # Same words in order, every word within one letter, at most one
         # extra/missing word (brand prefixes like "Lodha").
         if _token_subsequence_matches(norm.split(), cand_tokens):
-            return str(site)
+            return str(name)
     return None
+
+
+def find_near_site(existing_sites, candidate) -> Optional[str]:
+    """Compatibility alias of :func:`find_near_name` for site name lists."""
+    return find_near_name(existing_sites, candidate)
 
 
 class ConfigManager:
@@ -778,11 +786,25 @@ class ConfigManager:
     def find_near_site(self, existing_sites, candidate) -> Optional[str]:
         """The existing site that is the same place as ``candidate``, else None.
 
-        See :func:`find_near_site` — near-match, never merely similar:
-        case/spacing/punctuation/articles ignored, one-letter variants and
-        one extra word tolerated, digit-bearing tokens exact-only.
+        See :func:`find_near_name` — near-match, never merely similar:
+        case/spacing/punctuation/articles/numbers ignored, one-letter
+        variants and one extra word tolerated, single letters exact-only.
         """
         return find_near_site(existing_sites, candidate)
+
+    def find_near(self, existing_names, candidate) -> Optional[str]:
+        """The catalog name that is the same place as ``candidate``.
+
+        The generic near-match (used for CLIENT names as well as sites — the
+        rules are identical: numbers ignored, one-letter variants and one
+        extra word tolerated, case/spacing/punctuation/articles don't
+        matter). See :func:`find_near_name`.
+        """
+        return find_near_name(existing_names, candidate)
+
+    def all_clients(self) -> List[str]:
+        """Every client name (for the OCR known-clients list)."""
+        return [str(k) for k in self.clients]
 
     def all_sites(self) -> List[str]:
         """Every site name across all clients (for the OCR known-sites list)."""
@@ -853,26 +875,44 @@ class ConfigManager:
         if pushed:
             self._push_async(reason=f"FilePicker: add company '{company}'")
 
-    def add_client(self, client: str, sites: Optional[List[str]] = None) -> None:
+    def add_client(self, client: str, sites: Optional[List[str]] = None) -> str:
+        """Add a new client (optionally with its sites).
+
+        Near-same clients are never duplicated: when ``client`` is the same
+        place as an existing client (same words, ignoring case/spacing/
+        punctuation/articles/numbers, at most one letter off per word and at
+        most one extra word), the existing canonical spelling is returned and
+        nothing is added. Returns the effective client name.
+        """
+        client = client.strip()
+        if not client:
+            return ""
         pushed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
-            if not self._ci_matches(clients.keys(), client):
-                clients[client] = list(sites or [])
-                self.save()
-                pushed = True
+            canonical = find_near_name(list(clients.keys()), client)
+            if canonical is not None:
+                if canonical != client:
+                    print(f"[config] client '{client}' is the same client as '{canonical}' — reusing existing name")
+                return canonical
+            clients[client] = list(sites or [])
+            self.save()
+            pushed = True
         if pushed:
             self._push_async(reason=f"FilePicker: add client '{client}'")
+        return client
 
     def add_site(self, client: str, site: str) -> str:
         """Add a new site under ``client``; create the client if needed.
 
-        Near-same sites are never duplicated: when ``site`` is the same place
-        as an existing site (same words, ignoring case/spacing/punctuation/
-        articles, at most one letter off per word and at most one extra word
-        like a brand prefix), the existing canonical spelling is returned and
-        nothing is added. Returns the effective site name — the existing
-        canonical spelling, or the newly added name.
+        Near-same entries are never duplicated — neither the client nor the
+        site: when ``site`` is the same place as an existing site (same
+        words, ignoring case/spacing/punctuation/articles/numbers, at most
+        one letter off per word and at most one extra word like a brand
+        prefix), the existing canonical spelling is returned and nothing is
+        added; a client written slightly differently reuses the existing
+        client ("L&T ECC Division" -> "L&T ECC"). Returns the effective site
+        name — the existing canonical spelling, or the newly added name.
         """
         site = site.strip()
         if not site:
@@ -881,8 +921,14 @@ class ConfigManager:
         with self._lock:
             clients = self.load().setdefault("clients", {})
             key = self._canonical_key(clients, client)
+            if key == client and key not in clients:
+                # No exact (case-insensitive) client match — reuse a
+                # near-same client instead of creating a duplicate.
+                near = find_near_name(list(clients.keys()), client)
+                if near is not None:
+                    key = str(near)
             sites = clients.setdefault(key, [])
-            canonical = find_near_site(list(sites), site)
+            canonical = find_near_name(list(sites), site)
             if canonical is not None:
                 if canonical != site:
                     print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
@@ -891,7 +937,7 @@ class ConfigManager:
             self.save()
             pushed = True
         if pushed:
-            self._push_async(reason=f"FilePicker: add site '{site}' to '{client}'")
+            self._push_async(reason=f"FilePicker: add site '{site}' to '{key}'")
         return site
 
     @staticmethod
