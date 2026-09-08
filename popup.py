@@ -452,7 +452,8 @@ class FilePickerPopup:
         self._client_var = tk.StringVar()
         self._doc_type_var = tk.StringVar(value="DC")
         self._serial_var = tk.StringVar()
-        self._received_var = tk.BooleanVar(value=True)
+        # Received Copy is UNCHECKED by default (unchecked = Submitted).
+        self._received_var = tk.BooleanVar(value=False)
         self._selected_materials: List[str] = []
         # Company name placed by OCR that is NOT in the catalog — kept across
         # live-config refreshes until the user picks a menu value.
@@ -587,27 +588,23 @@ class FilePickerPopup:
         self.window.minsize(560, 700)
         self.window.protocol("WM_DELETE_WINDOW", self._skip)
 
-        # Modal behaviour: grab all input until dismissed. The grab is
-        # released while the popup is minimized and re-applied when it is
-        # restored (see _on_window_unmap/_on_window_map), so minimizing
-        # never leaves the app stuck behind an invisible grabbed window.
-        # NOTE: the popup is deliberately NOT transient() — a childless
-        # transient window has no taskbar entry on Windows, so once
-        # minimized there would be nothing to restore it from.
-        self.window.grab_set()
-        self._grabbed = True
-        self.window.bind("<Unmap>", self._on_window_unmap)
-        self.window.bind("<Map>", self._on_window_map)
+        # Deliberately NOT transient() (a childless transient window has no
+        # taskbar entry on Windows — nothing to restore the popup from after
+        # minimizing) and deliberately NO grab_set(): a grabbed Tk window on
+        # Windows confines the pointer, so the native title-bar minimize
+        # button becomes unreachable/ignored. Without the grab the popup is
+        # still topmost and focused; the user can minimize it from the title
+        # bar (or the in-banner "—" button) and restore it from the taskbar.
 
         # Material hotkeys: hold Alt and tap a material's 2-letter code
         # (e.g. Alt+AL = Aluminium, Alt+SS = Stainless Steel) to toggle it.
         # Bound on the window so it works from ANY field in the popup —
-        # not just the materials area.
+        # not just the materials area. Alt+RC toggles the Received checkbox.
         self._material_by_code: Dict[str, str] = {}
         self._alt_seq = ""
         self._alt_seq_after = None
         self.window.bind("<Alt-KeyPress>", self._on_alt_key)
-        self.window.bind("<Alt-KeyRelease>", lambda _e: self._reset_alt_seq())
+        self.window.bind("<Alt-KeyRelease>", self._on_alt_release)
         self.window.bind("<FocusOut>", lambda _e: self._reset_alt_seq())
 
     # ------------------------------------------------------------------
@@ -1117,15 +1114,20 @@ class FilePickerPopup:
         self._refresh_preview()
 
     # ------------------------------------------------------------------
-    # Material hotkeys (Alt + 2-letter code) — work from any field
+    # Hotkeys (Alt + 2-letter code) — work from any field
     # ------------------------------------------------------------------
+    # Alt+RC toggles the Received-copy checkbox (the "RC" pseudo-code; no
+    # material uses it).
+    _ALT_ACTION_CODE = "RC"
+
     def _on_alt_key(self, event) -> None:
-        """Alt + <2-letter code> toggles that material (Alt+AL = Aluminium).
+        """Alt + <2-letter code> toggles a material (Alt+AL = Aluminium).
 
         The user holds Alt and taps the two letters of the material's code;
         the first pair that forms a known code toggles it. Bound on the
         window, so it works while any field (client search, serial, ...)
-        has focus — not just the materials area.
+        has focus — not just the materials area. Alt+RC toggles the
+        Received-copy checkbox instead.
         """
         keysym = getattr(event, "keysym", "") or ""
         self._alt_seq, matched = alt_seq_step(self._alt_seq, keysym)
@@ -1133,14 +1135,33 @@ class FilePickerPopup:
             name = self._material_by_code.get(matched)
             if name is not None:
                 self._toggle_material(name)
-        # Safety reset: if Alt is released without an event (rare), the
-        # pending sequence must not linger and fire on the next Alt key.
+            elif matched == self._ALT_ACTION_CODE:
+                self._received_var.set(not self._received_var.get())
+        self._arm_alt_timer()
+
+    def _on_alt_release(self, _event=None) -> None:
+        """Decide what survives an Alt release.
+
+        A half-typed chord survives only when the pending letter could form
+        a same-letter code (SS, TT, ...): those two keys physically cannot
+        be pressed together, so Alt+S, release, Alt+S within a second must
+        still toggle Stainless Steel. Everything else resets on release.
+        """
+        if self._alt_seq and (self._alt_seq.upper() * 2) in self._material_by_code:
+            # Keep the pending letter alive for the second chord — the
+            # timer runs from this release (1s window, as requested).
+            self._arm_alt_timer()
+        else:
+            self._reset_alt_seq()
+
+    def _arm_alt_timer(self, ms: int = 1000) -> None:
+        """(Re)arm the pending-chord timeout; expiry discards it."""
         if self._alt_seq_after is not None:
             try:
                 self.window.after_cancel(self._alt_seq_after)
             except Exception:
                 pass
-        self._alt_seq_after = self.window.after(1500, self._reset_alt_seq)
+        self._alt_seq_after = self.window.after(ms, self._reset_alt_seq)
 
     def _reset_alt_seq(self) -> None:
         self._alt_seq = ""
@@ -1166,31 +1187,6 @@ class FilePickerPopup:
         """Minimize the popup to the taskbar (restore from the taskbar entry)."""
         try:
             self.window.iconify()
-        except tk.TclError:
-            pass
-
-    def _on_window_unmap(self, _event=None) -> None:
-        """Release the modal grab while minimized so the app stays usable."""
-        try:
-            if not self.window.winfo_exists():
-                return
-            if self.window.state() == "iconic":
-                try:
-                    self.window.grab_release()
-                except tk.TclError:
-                    pass
-                self._grabbed = False
-        except tk.TclError:
-            pass
-
-    def _on_window_map(self, _event=None) -> None:
-        """Re-establish the modal grab when the popup is restored."""
-        try:
-            if not self.window.winfo_exists():
-                return
-            if self.window.state() != "iconic" and not self._grabbed:
-                self.window.grab_set()
-                self._grabbed = True
         except tk.TclError:
             pass
 
@@ -1702,10 +1698,6 @@ class FilePickerPopup:
             self.client_dropdown._close()
             self.site_dropdown._close()
         except Exception:
-            pass
-        try:
-            self.window.grab_release()
-        except tk.TclError:
             pass
         self.window.destroy()
 

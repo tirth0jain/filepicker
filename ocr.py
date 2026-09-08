@@ -47,9 +47,12 @@ OCR_API_BASE = "https://opencode.ai/zen/go/v1"
 # runs out of room before producing the answer table (see OCR_MAX_TOKENS).
 OCR_MODEL = "deepseek-v4-flash-vision-exp"
 
-# The model burns ~1500 tokens reasoning on a simple delivery note; 4096
-# leaves room for harder documents without truncating the answer table.
-OCR_MAX_TOKENS = 4096
+# The model burns ~1500 tokens reasoning on a simple delivery note, and
+# harder documents (long tables, faint scans, the full known-sites/clients
+# lists in the prompt) have consumed the whole old 4096-token budget on
+# reasoning alone, leaving nothing for the answer table. 8192 gives it
+# room while staying under any gateway cap.
+OCR_MAX_TOKENS = 8192
 
 # Total wall-clock budget for one OCR call (seconds). Vision + reasoning on a
 # busy gateway can take a while; 120s keeps the popup snappy while allowing
