@@ -4,7 +4,7 @@ The generated filename strictly follows the format::
 
     {Company}-{Doc Type}-{Financial Year}-{Serial}-{Site Name}-{Material Shortcodes}.{ext}
 
-e.g. ``Acme-DC-26-27-0001-Site 1 - Mumbai-A+C.pdf``
+e.g. ``Acme-DC-26-27-0001-Site 1 - Mumbai-AL1+MS1.pdf``
 
 The Received/Submitted status is deliberately NOT part of the filename — it is
 reflected only in the destination folder structure
@@ -52,19 +52,40 @@ def financial_year(now: Optional[datetime.date] = None) -> str:
     return f"{(year - 1) % 100:02d}-{year:02d}"
 
 
-def material_shortcodes(selected_names, materials_map) -> str:
-    """Join the shortcodes of the selected materials with ``+``.
+def material_code(name: str, stored: Optional[str] = None) -> str:
+    """The 2-letter shortcode for a material (e.g. Aluminium -> "AL").
 
-    Unknown material names are mapped to their first letter so nothing breaks.
-    Every code has ``1`` appended (e.g. ``A`` -> ``A1``, ``SS`` -> ``SS1``)
-    so the tag is not a single common letter.
+    ``stored`` is the code from the config: codes that are already at least
+    two letters (SS, GI, ...) are returned verbatim; single-letter leftovers
+    from older configs ("A" for Aluminium) are expanded to two letters
+    derived from the material name. Unknown/empty codes are derived from the
+    name as well, so every code is exactly two letters.
+    """
+    code = (stored or "").strip().upper()
+    if len(code) >= 2:
+        return code
+    words = [w for w in re.split(r"[\s&/_-]+", name) if w]
+    if not words:
+        return code or "XX"
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    word = words[0]
+    if len(word) >= 2:
+        return word[:2].upper()
+    return (word + "X").upper()
+
+
+def material_shortcodes(selected_names, materials_map) -> str:
+    """Join the 2-letter shortcodes of the selected materials with ``+``.
+
+    Unknown material names get a 2-letter code derived from the name so
+    nothing breaks. Every code has ``1`` appended (e.g. ``AL`` -> ``AL1``,
+    ``SS`` -> ``SS1``) so the tag is never a bare letter.
     """
     codes = []
     for name in selected_names:
-        code = materials_map.get(name)
-        if not code:
-            code = sanitize(name)[:1] or "?"
-        # Material codes are always suffixed with "1" (e.g. A -> A1, SS -> SS1).
+        code = material_code(name, materials_map.get(name))
+        # Material codes are always suffixed with "1" (e.g. AL -> AL1, SS -> SS1).
         # Avoid doubling if the stored code already ends with "1".
         if not code.endswith("1"):
             code = f"{code}1"

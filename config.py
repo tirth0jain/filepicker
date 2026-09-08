@@ -37,14 +37,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "root_directory": "D:/Company_Data",
     "doc_types": ["DC", "Tax Invoice", "Purchase Order", "MTC"],
     "materials": {
-        "Aluminium": "A",
-        "Carbon": "C",
+        "Aluminium": "AL",
+        "Carbon": "CA",
         "Stainless Steel": "SS",
         "Mild Steel": "MS",
         "Galvanized Iron": "GI",
     },
-    # NOTE: material codes are suffixed with "1" at filename time
-    # (A -> A1, SS -> SS1) so single-letter tags are searchable.
+    # NOTE: material codes are exactly two letters (AL, SS, ...) and are
+    # suffixed with "1" at filename time (AL -> AL1, SS -> SS1) so the tag
+    # is never a bare letter.
     # Top-level company names (shown as a dropdown; the first is the default).
     "companies": ["Company A", "Company B"],
     # Optional per-company initials used in filenames (e.g. "Ruby Steel": "RS").

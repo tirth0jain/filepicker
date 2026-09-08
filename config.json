@@ -8,11 +8,11 @@
     "MTC"
   ],
   "materials": {
-    "Aluminium": "A",
-    "Fastner": "F",
+    "Aluminium": "AL",
+    "Fastner": "FA",
     "Stainless Steel": "SS",
     "Mild Steel": "MS",
-    "Glass": "G",
+    "Glass": "GL",
     "Consumables": "CO",
     "Packing": "PA",
     "fitting": "FI",
@@ -20,7 +20,7 @@
     "EPDM RUBBER": "ER",
     "ad": "AD",
     "GI SHEET": "GS",
-    "Carbon": "C",
+    "Carbon": "CA",
     "Galvanized Iron": "GI"
   },
   "companies": [

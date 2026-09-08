@@ -22,6 +22,7 @@ from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
+import filename as fn
 from config import ConfigManager
 from version import VERSION
 
@@ -42,9 +43,40 @@ _CONFIG_POLL_MS = 30_000
 # Material chips panel: at most this many rows of chips are visible at once;
 # any extra rows scroll inside the panel (a large catalog must never push the
 # Serial number / Save buttons out of the fixed-height popup window).
-_MATERIAL_ROWS_VISIBLE = 3
+_MATERIAL_ROWS_VISIBLE = 5
 _MATERIAL_ROW_PITCH = 36   # 28px chip + 8px bottom padding per row
 _MATERIAL_TOP_PAD = 8
+
+
+def material_display_order(materials_map, selected) -> List:
+    """Chip display order for a popup: selected materials move to the top.
+
+    Cosmetic only — the underlying map/config order is never changed. Each
+    group (selected first, then the rest) is sorted alphabetically by the
+    material's shortcode, so deselecting returns a chip to its sorted spot.
+    """
+    items = sorted(
+        materials_map.items(),
+        key=lambda kv: (str(kv[1]).upper(), str(kv[0]).lower()),
+    )
+    sel = [it for it in items if it[0] in selected]
+    rest = [it for it in items if it[0] not in selected]
+    return sel + rest
+
+
+def alt_seq_step(pending: str, keysym: str) -> tuple:
+    """One Alt+<key> step of the material hotkey chord (Alt+AL toggles Aluminium).
+
+    Returns ``(new_pending, matched_code)``: the new pending letter sequence
+    and, once two letters form a complete code, that code (the caller toggles
+    the material and starts fresh). Non-letter keys never affect the chord.
+    """
+    if len(keysym) != 1 or not keysym.isalpha():
+        return pending, None
+    seq = (pending + keysym.lower())[-2:]
+    if len(seq) < 2:
+        return seq, None
+    return "", seq.upper()
 
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
@@ -555,9 +587,28 @@ class FilePickerPopup:
         self.window.minsize(560, 700)
         self.window.protocol("WM_DELETE_WINDOW", self._skip)
 
-        # Modal behaviour: grab all input until dismissed.
-        self.window.transient()
+        # Modal behaviour: grab all input until dismissed. The grab is
+        # released while the popup is minimized and re-applied when it is
+        # restored (see _on_window_unmap/_on_window_map), so minimizing
+        # never leaves the app stuck behind an invisible grabbed window.
+        # NOTE: the popup is deliberately NOT transient() — a childless
+        # transient window has no taskbar entry on Windows, so once
+        # minimized there would be nothing to restore it from.
         self.window.grab_set()
+        self._grabbed = True
+        self.window.bind("<Unmap>", self._on_window_unmap)
+        self.window.bind("<Map>", self._on_window_map)
+
+        # Material hotkeys: hold Alt and tap a material's 2-letter code
+        # (e.g. Alt+AL = Aluminium, Alt+SS = Stainless Steel) to toggle it.
+        # Bound on the window so it works from ANY field in the popup —
+        # not just the materials area.
+        self._material_by_code: Dict[str, str] = {}
+        self._alt_seq = ""
+        self._alt_seq_after = None
+        self.window.bind("<Alt-KeyPress>", self._on_alt_key)
+        self.window.bind("<Alt-KeyRelease>", lambda _e: self._reset_alt_seq())
+        self.window.bind("<FocusOut>", lambda _e: self._reset_alt_seq())
 
     # ------------------------------------------------------------------
     # UI construction
@@ -594,6 +645,15 @@ class FilePickerPopup:
             text_color=_TEXT, wraplength=380, justify="left",
         )
         self._banner_name.pack(side="left", anchor="w")
+        # Minimize: the popup (and its modal grab) must not block the user
+        # from going elsewhere — the window minimizes to the taskbar and is
+        # restored from there. Title-bar minimize works too.
+        self.minimize_btn = ctk.CTkButton(
+            banner_header, text="—", width=40, height=28,
+            fg_color=_BG_FIELD, hover_color="#33334a",
+            text_color=_TEXT_MUTED, command=self._minimize_popup,
+        )
+        self.minimize_btn.pack(side="right", anchor="e", padx=(0, 6))
         self.preview_btn = ctk.CTkButton(
             banner_header, text="👁 Preview", width=96, height=28,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
@@ -767,7 +827,13 @@ class FilePickerPopup:
         data = self.config.load()
         companies = data.get("companies", [])
         clients = data.get("clients", {})
-        self._materials_map = dict(data.get("materials", {}))
+        # Every material code is exactly two letters (see filename.material_code);
+        # single-letter leftovers in the config ("A") are shown/used as "AL".
+        self._materials_map = {
+            name: fn.material_code(name, code)
+            for name, code in dict(data.get("materials", {})).items()
+        }
+        self._rebuild_material_index()
 
         # Company dropdown (first entry is the default).
         company_names = list(companies)
@@ -860,11 +926,15 @@ class FilePickerPopup:
             changed = True
 
         # -- Materials --------------------------------------------------
-        new_materials = dict(data.get("materials", {}))
+        new_materials = {
+            name: fn.material_code(name, code)
+            for name, code in dict(data.get("materials", {})).items()
+        }
         if new_materials != self._materials_map:
             self._materials_map = new_materials
             # Keep only selected materials that still exist
             self._selected_materials = [m for m in self._selected_materials if m in new_materials]
+            self._rebuild_material_index()
             self._render_material_chips()
             changed = True
 
@@ -1009,13 +1079,17 @@ class FilePickerPopup:
             row_width += est + 6
             return chip
 
-        for name in self._materials_map:
-            selected = name in self._selected_materials
+        # Display order: selected materials move to the top row (cosmetic
+        # only — the config order is never changed); each group is sorted
+        # alphabetically by shortcode, so deselecting returns the chip to
+        # its sorted position.
+        for name, code in material_display_order(self._materials_map, self._selected_materials):
+            selected_now = name in self._selected_materials
             chip = place_chip(
-                f"{name} ({self._materials_map[name]})",
-                _ACCENT if selected else _BG_FIELD,
-                _ACCENT_HOVER if selected else "#33334a",
-                "#ffffff" if selected else _TEXT,
+                f"{name} ({code})",
+                _ACCENT if selected_now else _BG_FIELD,
+                _ACCENT_HOVER if selected_now else "#33334a",
+                "#ffffff" if selected_now else _TEXT,
                 lambda n=name: self._toggle_material(n),
             )
             self._material_chips[name] = chip
@@ -1040,6 +1114,84 @@ class FilePickerPopup:
         self._render_material_chips()
         self._refresh_preview()
 
+    # ------------------------------------------------------------------
+    # Material hotkeys (Alt + 2-letter code) — work from any field
+    # ------------------------------------------------------------------
+    def _on_alt_key(self, event) -> None:
+        """Alt + <2-letter code> toggles that material (Alt+AL = Aluminium).
+
+        The user holds Alt and taps the two letters of the material's code;
+        the first pair that forms a known code toggles it. Bound on the
+        window, so it works while any field (client search, serial, ...)
+        has focus — not just the materials area.
+        """
+        keysym = getattr(event, "keysym", "") or ""
+        self._alt_seq, matched = alt_seq_step(self._alt_seq, keysym)
+        if matched:
+            name = self._material_by_code.get(matched)
+            if name is not None:
+                self._toggle_material(name)
+        # Safety reset: if Alt is released without an event (rare), the
+        # pending sequence must not linger and fire on the next Alt key.
+        if self._alt_seq_after is not None:
+            try:
+                self.window.after_cancel(self._alt_seq_after)
+            except Exception:
+                pass
+        self._alt_seq_after = self.window.after(1500, self._reset_alt_seq)
+
+    def _reset_alt_seq(self) -> None:
+        self._alt_seq = ""
+        if self._alt_seq_after is not None:
+            try:
+                self.window.after_cancel(self._alt_seq_after)
+            except Exception:
+                pass
+            self._alt_seq_after = None
+
+    def _rebuild_material_index(self) -> None:
+        """Map normalized 2-letter code -> material name (for Alt hotkeys)."""
+        self._material_by_code = {}
+        for name, code in self._materials_map.items():
+            key = str(code).strip().upper()
+            if key and key not in self._material_by_code:
+                self._material_by_code[key] = name
+
+    # ------------------------------------------------------------------
+    # Minimize support
+    # ------------------------------------------------------------------
+    def _minimize_popup(self) -> None:
+        """Minimize the popup to the taskbar (restore from the taskbar entry)."""
+        try:
+            self.window.iconify()
+        except tk.TclError:
+            pass
+
+    def _on_window_unmap(self, _event=None) -> None:
+        """Release the modal grab while minimized so the app stays usable."""
+        try:
+            if not self.window.winfo_exists():
+                return
+            if self.window.state() == "iconic":
+                try:
+                    self.window.grab_release()
+                except tk.TclError:
+                    pass
+                self._grabbed = False
+        except tk.TclError:
+            pass
+
+    def _on_window_map(self, _event=None) -> None:
+        """Re-establish the modal grab when the popup is restored."""
+        try:
+            if not self.window.winfo_exists():
+                return
+            if self.window.state() != "iconic" and not self._grabbed:
+                self.window.grab_set()
+                self._grabbed = True
+        except tk.TclError:
+            pass
+
     def _prompt_add_material(self) -> None:
         self._ask_text(
             "Add Material",
@@ -1053,10 +1205,14 @@ class FilePickerPopup:
         name = name.strip()
         if not name:
             return
-        # Auto-derive a shortcode from the first letters if not provided.
+        # Auto-derive a 2-letter shortcode from the name if not provided.
         shortcode = self._derive_shortcode(name)
         self.config.add_material(name, shortcode)
-        self._materials_map = self.config.materials
+        self._materials_map = {
+            n: fn.material_code(n, c)
+            for n, c in self.config.materials.items()
+        }
+        self._rebuild_material_index()
         if name not in self._selected_materials:
             self._selected_materials.append(name)
         self._render_material_chips()
@@ -1064,13 +1220,9 @@ class FilePickerPopup:
 
     @staticmethod
     def _derive_shortcode(name: str) -> str:
-        # First letters of each word, uppercased (e.g. "Galvanized Iron" -> "GI").
-        parts = [p for p in name.replace("-", " ").split() if p]
-        if not parts:
-            return "?"
-        if len(parts) == 1:
-            return parts[0][:2].upper() if len(parts[0]) >= 2 else parts[0][:1].upper()
-        return "".join(p[0] for p in parts[:2]).upper()
+        # Every material code is exactly two letters (e.g. "Aluminium" -> "AL",
+        # "Galvanized Iron" -> "GI"), derived from the material name.
+        return fn.material_code(name)
 
     # ------------------------------------------------------------------
     # Dropdown handlers

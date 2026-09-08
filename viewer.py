@@ -386,15 +386,15 @@ class PreviewWindow:
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
             command=self._prev_page,
         )
-        self._prev_btn.pack(side="left", padx=(8, 4), pady=8)
+        self._prev_btn.pack(side="left", padx=(8, 4), pady=3)
         self._page_label = ctk.CTkLabel(toolbar, text="", text_color=_TEXT)
-        self._page_label.pack(side="left", padx=4)
+        self._page_label.pack(side="left", padx=4, pady=3)
         self._next_btn = ctk.CTkButton(
             toolbar, text="Next ▶", width=80, height=30,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
             command=self._next_page,
         )
-        self._next_btn.pack(side="left", padx=4, pady=8)
+        self._next_btn.pack(side="left", padx=4, pady=3)
 
         self._add_zoom_controls(toolbar)
 
@@ -523,23 +523,23 @@ class PreviewWindow:
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
             command=self._zoom_out,
         )
-        self._zoom_out_btn.pack(side="left", padx=4, pady=8)
+        self._zoom_out_btn.pack(side="left", padx=4, pady=3)
         self._zoom_label = ctk.CTkLabel(
             toolbar, text="100%", text_color=_TEXT, width=52,
         )
-        self._zoom_label.pack(side="left", padx=4)
+        self._zoom_label.pack(side="left", padx=4, pady=3)
         self._zoom_in_btn = ctk.CTkButton(
             toolbar, text="+", width=36, height=30,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
             command=self._zoom_in,
         )
-        self._zoom_in_btn.pack(side="left", padx=4, pady=8)
+        self._zoom_in_btn.pack(side="left", padx=4, pady=3)
         self._fit_btn = ctk.CTkButton(
             toolbar, text="Fit Width", width=84, height=30,
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
             command=self._fit_width,
         )
-        self._fit_btn.pack(side="left", padx=4, pady=8)
+        self._fit_btn.pack(side="left", padx=4, pady=3)
 
     def _zoom_in(self) -> None:
         self._zoom = min(self._zoom + _ZOOM_STEP, _ZOOM_MAX)
