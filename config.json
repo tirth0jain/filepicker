@@ -1,11 +1,8 @@
 {
-  "watch_directory": "D:/Users/Downloads/Source",
+  "watch_directory": "Z:/Unsorted",
   "root_directory": "Z:/Sorted",
   "doc_types": [
-    "DC",
-    "Tax Invoice",
-    "Purchase Order",
-    "MTC"
+    "DC"
   ],
   "materials": {
     "Aluminium": "AL",
@@ -25,9 +22,7 @@
   },
   "companies": [
     "Ruby Steel",
-    "Ruby Steel Railings & Facades",
-    "Company A",
-    "Company B"
+    "Ruby Steel Railings & Facades"
   ],
   "company_initials": {
     "Ruby Steel": "RS"
@@ -35,6 +30,7 @@
   "enable_live_config": true,
   "enable_github_push": true,
   "auto_start": true,
+  "enable_ocr": true,
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
@@ -247,13 +243,6 @@
       "Lodha Sital Baug",
       "LODHA - BRADBURY-bellevue",
       "Lodha Regalia"
-    ],
-    "Alpha Infra": [
-      "Site 1 - Mumbai",
-      "Site 2 - Pune"
-    ],
-    "Beta Projects": [
-      "Plant Central"
     ]
   }
 }
