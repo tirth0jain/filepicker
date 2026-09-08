@@ -31,6 +31,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -72,6 +73,14 @@ MAX_CONCURRENT_OCR = 10
 # "Python-urllib" user agent (HTTP 403, error code 1010), so every request
 # carries a browser-like application UA.
 _UA = f"FilePicker/{VERSION} (Windows; DeliveryNote OCR)"
+
+# OpenCode Go (see https://opencode.ai/docs/go/) now requires every request
+# to carry a stable conversation/session ID in `x-opencode-session` —
+# without it the gateway answers 400 "MissingSessionID" and the request
+# cannot be routed/cached efficiently. One ID per app run is exactly right
+# for FilePicker: all OCR reads share the same prompt text, so a stable ID
+# lets the gateway reuse prompt caches across the whole batch.
+OCR_SESSION_ID = str(uuid.uuid4())
 
 # The extraction prompt — verbatim from the feature spec (Serial Number added
 # in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits.
@@ -410,6 +419,7 @@ def extract_delivery_note(
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": _UA,
+            "x-opencode-session": OCR_SESSION_ID,
         },
         method="POST",
     )
