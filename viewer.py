@@ -517,7 +517,12 @@ class PreviewWindow:
     # Zoom helpers (shared by image & PDF views)
     # ------------------------------------------------------------------
     def _add_zoom_controls(self, toolbar) -> None:
-        ctk.CTkFrame(toolbar, width=24, fg_color="transparent").pack(side="left")
+        # Spacer between the page controls and the zoom controls. Must be a
+        # plain tk.Frame with an explicit height: an empty *customtkinter*
+        # frame requests 200px height by default, which would stretch the
+        # whole toolbar into a huge dark-grey bar (prev/next buttons floating
+        # vertically centered inside it).
+        tk.Frame(toolbar, width=24, height=30, bg=_BG_SECONDARY).pack(side="left")
         self._zoom_out_btn = ctk.CTkButton(
             toolbar, text="-", width=36, height=30,
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,

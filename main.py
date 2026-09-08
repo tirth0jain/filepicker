@@ -586,9 +586,19 @@ class FilePickerController:
                 )
                 if self._ocr_pool.available:
                     self._set_status(f"OCR enabled — delivery notes auto-filled ({_OCR_BATCH} concurrent reads)")
+                else:
+                    self._set_status("OCR enabled but no API key found")
+                print(f"[filepicker] OCR pool ready (model={self.config.ocr_model}, "
+                      f"concurrent={_OCR_BATCH}, "
+                      f"token={'yes' if self._ocr_pool.available else 'MISSING'})")
             except Exception as exc:
                 print(f"[filepicker] OCR pool init error: {exc}")
                 self._ocr_pool = None
+        else:
+            # Never silent: a later "OCR didn't run" is diagnosable from the
+            # log alone (this flag reads LOCAL config.json only).
+            print('[filepicker] OCR disabled — "enable_ocr" is false/missing '
+                  "in config.json (set it to true to auto-fill delivery notes)")
 
         watch_dir = self.config.watch_directory
         watcher = DownloadWatcher(

@@ -44,8 +44,8 @@ _CONFIG_POLL_MS = 30_000
 # any extra rows scroll inside the panel (a large catalog must never push the
 # Serial number / Save buttons out of the fixed-height popup window).
 _MATERIAL_ROWS_VISIBLE = 5
-_MATERIAL_ROW_PITCH = 36   # 28px chip + 8px bottom padding per row
-_MATERIAL_TOP_PAD = 8
+# Nominal row pitch for the panel height (28px chip + 6px gap + slack).
+_MATERIAL_ROW_PITCH = 36
 
 
 def material_display_order(materials_map, selected) -> List:
@@ -123,7 +123,7 @@ class SearchableDropdown(ctk.CTkFrame):
             self.entry.configure(width=width)
         self.entry.pack(fill="x")
         # Pack this frame itself into its parent (the popup form).
-        self.pack(fill="x", pady=(0, 8))
+        self.pack(fill="x", pady=(0, 6))
 
         # Dropdown window (overrideredirect Toplevel with a Listbox)
         # Created lazily on first open so winfo_toplevel() is valid.
@@ -482,9 +482,9 @@ class FilePickerPopup:
         self._config_poll_after = None
         self._start_config_poll()
 
-        # OCR auto-fill (only when enabled in config.json).
-        if self.config.enable_ocr:
-            self._start_ocr()
+        # OCR auto-fill status (shows the disabled/no-key reason explicitly —
+        # never silently nothing).
+        self._start_ocr()
 
     def _set_banner(self) -> None:
         try:
@@ -615,7 +615,7 @@ class FilePickerPopup:
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         container = ctk.CTkFrame(self.window, fg_color=_BG, corner_radius=0)
-        container.pack(fill="both", expand=True, padx=14, pady=12)
+        container.pack(fill="both", expand=True, padx=14, pady=10)
 
         # Horizontal body: the metadata form on the left, and a preview pane
         # on the right that the window expands into when Preview is opened.
@@ -636,10 +636,10 @@ class FilePickerPopup:
 
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
-        self._banner.pack(fill="x", pady=(0, 10))
+        self._banner.pack(fill="x", pady=(0, 6))
 
         banner_header = ctk.CTkFrame(self._banner, fg_color="transparent")
-        banner_header.pack(fill="x", padx=12, pady=(8, 0))
+        banner_header.pack(fill="x", padx=12, pady=(6, 0))
         self._banner_name = ctk.CTkLabel(
             banner_header, text="", font=ctk.CTkFont(size=15, weight="bold"),
             text_color=_TEXT, wraplength=380, justify="left",
@@ -664,27 +664,28 @@ class FilePickerPopup:
         self._banner_size = ctk.CTkLabel(
             self._banner, text="", font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
         )
-        self._banner_size.pack(anchor="w", padx=12, pady=(0, 8))
+        self._banner_size.pack(anchor="w", padx=12, pady=(0, 6))
 
-        # OCR status line — stays empty (invisible) unless enable_ocr is on.
+        # OCR status line — shows OCR progress, or the exact reason OCR is off
+        # (disabled in config / no API key), never silently nothing.
         self._ocr_label = ctk.CTkLabel(
             f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED, anchor="w",
         )
-        self._ocr_label.pack(fill="x", pady=(0, 4))
+        self._ocr_label.pack(fill="x", pady=(0, 2))
 
         # -- Company ----------------------------------------------------
         ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.company_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._company_var,
             command=self._on_company_change, fg_color=_BG_FIELD,
             button_color=_ACCENT, button_hover_color=_ACCENT,
         )
-        self.company_combo.pack(fill="x", pady=(0, 8))
+        self.company_combo.pack(fill="x", pady=(0, 6))
 
         # -- Client -----------------------------------------------------
         ctk.CTkLabel(f, text="Client", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.client_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_client_change,
         )
@@ -694,7 +695,7 @@ class FilePickerPopup:
 
         # -- Site -------------------------------------------------------
         ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.site_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_site_change,
         )
@@ -704,26 +705,26 @@ class FilePickerPopup:
 
         # -- Document type ----------------------------------------------
         ctk.CTkLabel(f, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.doc_type_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._doc_type_var,
             command=lambda _d: self._refresh_preview(),
             fg_color=_BG_FIELD, button_color=_ACCENT, button_hover_color=_ACCENT,
         )
-        self.doc_type_combo.pack(fill="x", pady=(0, 8))
+        self.doc_type_combo.pack(fill="x", pady=(0, 6))
 
         # -- Materials (multi-select) -----------------------------------
         ctk.CTkLabel(f, text="Material (multi-select)",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
-        self.material_frame.pack(fill="x", pady=(0, 8))
+        self.material_frame.pack(fill="x", pady=(0, 6))
         # Scrollable chip area (plain Canvas + scrollbar — the same pattern as
         # viewer.py): the chip rows pack into _material_inner and scroll when
         # they exceed the visible height (capped at _MATERIAL_ROWS_VISIBLE).
         self._material_canvas = tk.Canvas(
             self.material_frame, bg=_BG_SECONDARY, highlightthickness=0, bd=0,
-            height=_MATERIAL_ROW_PITCH * _MATERIAL_ROWS_VISIBLE - _MATERIAL_TOP_PAD,
+            height=_MATERIAL_ROW_PITCH * _MATERIAL_ROWS_VISIBLE,
         )
         self._material_vsb = ttk.Scrollbar(
             self.material_frame, orient="vertical", command=self._material_canvas.yview,
@@ -767,12 +768,12 @@ class FilePickerPopup:
         # -- Serial number ----------------------------------------------
         ctk.CTkLabel(f, text="Serial Number",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
         self.serial_entry = ctk.CTkEntry(
             f, textvariable=self._serial_var, fg_color=_BG_FIELD,
             border_color=_BG_FIELD, text_color=_TEXT,
         )
-        self.serial_entry.pack(fill="x", pady=(0, 8))
+        self.serial_entry.pack(fill="x", pady=(0, 6))
 
         # -- Received copy checkbox -------------------------------------
         self.received_check = ctk.CTkCheckBox(
@@ -780,11 +781,11 @@ class FilePickerPopup:
             variable=self._received_var, fg_color=_ACCENT,
             hover_color=_ACCENT, text_color=_TEXT,
         )
-        self.received_check.pack(anchor="w", pady=(0, 10))
+        self.received_check.pack(anchor="w", pady=(0, 6))
 
         # -- Buttons ----------------------------------------------------
         btn_row = ctk.CTkFrame(f, fg_color=_BG)
-        btn_row.pack(fill="x", pady=(4, 0))
+        btn_row.pack(fill="x", pady=(2, 0))
 
         self.save_btn = ctk.CTkButton(
             btn_row, text="Save & Organize", command=self._submit,
@@ -817,7 +818,7 @@ class FilePickerPopup:
             f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
             wraplength=500, justify="left",
         )
-        self.preview_label.pack(fill="x", pady=(6, 0))
+        self.preview_label.pack(fill="x", pady=(4, 0))
         self._refresh_preview()
 
     # ------------------------------------------------------------------
@@ -1101,9 +1102,10 @@ class FilePickerPopup:
 
         # Cap the visible chip area at _MATERIAL_ROWS_VISIBLE rows; extra rows
         # scroll (mouse wheel over the panel). Shrinks to fit small catalogs.
+        # Height = pitch * rows: a 34px pitch (28px chip + 6px gap) means the
+        # full last row is visible without extra top padding.
         self._material_canvas.configure(
             height=_MATERIAL_ROW_PITCH * min(rows, _MATERIAL_ROWS_VISIBLE)
-            - _MATERIAL_TOP_PAD
         )
 
     def _toggle_material(self, name: str) -> None:
@@ -1390,7 +1392,12 @@ class FilePickerPopup:
         """
         pool = getattr(self, "ocr_pool", None)
         if pool is None:
-            return  # feature disabled
+            # The controller only wires the pool when enable_ocr is true in
+            # config.json — say so instead of failing silently.
+            self._set_ocr_status(
+                "OCR: disabled — set \"enable_ocr\": true in config.json"
+            )
+            return
         if not pool.available:
             self._set_ocr_status(
                 "OCR: no API key — put opencode_token.txt next to the exe "

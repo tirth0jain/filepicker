@@ -587,6 +587,7 @@ class OcrPool:
                 print(f"[ocr] known-clients fetch error: {exc}")
                 known_clients = None
         try:
+            print(f"[ocr] reading {file_path.name} …")
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
                 api_base=self._api_base, known_sites=known_sites,
@@ -595,6 +596,12 @@ class OcrPool:
         except Exception as exc:  # belt & braces: extract never raises
             print(f"[ocr] OCR error for {file_path}: {exc}")
             result = None
+        if result and any(result.values()):
+            print(f"[ocr] {file_path.name}: company={result.get('company')!r} "
+                  f"client={result.get('client')!r} site={result.get('site')!r} "
+                  f"serial={result.get('serial')!r}")
+        else:
+            print(f"[ocr] {file_path.name}: no fields extracted")
         with self._lock:
             self._results[key] = result
             self._active.discard(key)
