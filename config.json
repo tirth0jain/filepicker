@@ -2,7 +2,10 @@
   "watch_directory": "Z:/Unsorted",
   "root_directory": "Z:/Sorted",
   "doc_types": [
-    "DC"
+    "DC",
+    "Tax Invoice",
+    "Purchase Order",
+    "MTC"
   ],
   "materials": {
     "Aluminium": "AL",
@@ -22,7 +25,9 @@
   },
   "companies": [
     "Ruby Steel",
-    "Ruby Steel Railings & Facades"
+    "Ruby Steel Railings & Facades",
+    "Company A",
+    "Company B"
   ],
   "company_initials": {
     "Ruby Steel": "RS"
@@ -243,6 +248,13 @@
       "Lodha Sital Baug",
       "LODHA - BRADBURY-bellevue",
       "Lodha Regalia"
+    ],
+    "Alpha Infra": [
+      "Site 1 - Mumbai",
+      "Site 2 - Pune"
+    ],
+    "Beta Projects": [
+      "Plant Central"
     ]
   }
 }
