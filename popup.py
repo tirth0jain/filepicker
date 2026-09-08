@@ -78,6 +78,85 @@ def alt_seq_step(pending: str, keysym: str) -> tuple:
         return seq, None
     return "", seq.upper()
 
+
+def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
+    """Build the "file already exists" question dialog.
+
+    Returns ``(dialog, callback)`` where ``callback["value"]`` is set to
+    ``"skip"`` or ``"replace"`` when a button is pressed (the dialog is
+    destroyed with it). Closing the window counts as "skip".
+    """
+    dialog = ctk.CTkToplevel(root)
+    dialog.title("File already exists")
+    dialog.configure(fg_color=_BG)
+    dialog.attributes("-topmost", True)
+    dialog.resizable(False, False)
+
+    # Center over the popup/screen, like every other FilePicker window.
+    try:
+        sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+        dialog.geometry(f"500x240+{max((sw - 500) // 2, 0)}+{max((sh - 240) // 3, 0)}")
+    except tk.TclError:
+        pass
+
+    callback = {"value": None}
+
+    def choose(choice: str) -> None:
+        callback["value"] = choice
+        try:
+            dialog.destroy()
+        except tk.TclError:
+            pass
+
+    ctk.CTkLabel(
+        dialog, text="⚠ This filename already exists in the sorted folders",
+        font=ctk.CTkFont(size=15, weight="bold"), text_color=_TEXT,
+    ).pack(anchor="w", padx=18, pady=(18, 6))
+    ctk.CTkLabel(
+        dialog,
+        text=f"\"{filename}\" already exists at:\n{existing_path.parent}\n\n"
+             "The new download would be saved with the same name.\n"
+             "What should FilePicker do?",
+        font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
+        wraplength=460,
+    ).pack(anchor="w", padx=18, pady=(0, 12))
+
+    btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+    btn_row.pack(fill="x", padx=18, pady=(0, 16))
+    skip_btn = ctk.CTkButton(
+        btn_row, text="Skip New File", command=lambda: choose("skip"),
+        fg_color=_BG_FIELD, hover_color="#33334a", height=38,
+        font=ctk.CTkFont(size=13), text_color=_TEXT,
+    )
+    skip_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+    replace_btn = ctk.CTkButton(
+        btn_row, text="Replace Old with New", command=lambda: choose("replace"),
+        fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
+        font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff",
+    )
+    replace_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+    # Safe default: closing the dialog (or pressing Enter) keeps the old file.
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("skip"))
+    try:
+        skip_btn.focus_set()
+    except tk.TclError:
+        pass
+    return dialog, callback
+
+
+def ask_duplicate_action(root, filename: str, existing_path: Path) -> str:
+    """Ask what to do when the output filename already exists in sorted.
+
+    Blocks (modal) until the user answers. Returns ``"skip"`` — keep the old
+    file and leave the new download in the watch folder — or ``"replace"`` —
+    overwrite the old file with the new one. Closing the dialog counts as
+    ``"skip"`` (the safe default).
+    """
+    dialog, callback = _duplicate_dialog_ui(root, filename, existing_path)
+    dialog.wait_window()
+    return callback["value"] or "skip"
+
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",

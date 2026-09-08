@@ -70,6 +70,44 @@ def _destination_for(root: Path, company: str, client: str, site: str,
     )
 
 
+def output_paths(request: OrganizeRequest) -> List[Path]:
+    """The exact destination paths :func:`organize` would write to.
+
+    No copies are made. The controller uses this to de-dup *before* writing:
+    when one of these paths already exists (same filename as the one the
+    program is about to output), the user is asked whether to skip the new
+    file or replace the old one. The primary path is always first; the
+    ``All DC`` extra copy (DC only) comes second.
+    """
+    ext = request.source.suffix.lstrip(".").lower()
+    base_name = fn.build_filename(
+        company=request.company,
+        doc_type=request.doc_type,
+        site_name=request.site,
+        selected_materials=request.materials,
+        materials_map=request.materials_map,
+        serial=request.serial,
+        extension=ext,
+        initials_map=request.initials_map,
+    )
+    paths = [
+        _destination_for(
+            request.root, request.company, request.client,
+            request.site, request.doc_type, request.status,
+        )
+        / base_name,
+    ]
+    if request.doc_type.strip().upper() == "DC":
+        paths.append(
+            request.root
+            / fn.sanitize(request.company)
+            / "All DC"
+            / fn.sanitize(request.status)
+            / base_name
+        )
+    return paths
+
+
 def organize(request: OrganizeRequest) -> OrganizeResult:
     """Copy the source file into all required destination folders.
 
@@ -88,17 +126,8 @@ def _organize_locked(request: OrganizeRequest, result: OrganizeResult) -> None:
         result.errors.append(f"Source file not found: {request.source}")
         return result
 
-    ext = request.source.suffix.lstrip(".").lower()
-    base_name = fn.build_filename(
-        company=request.company,
-        doc_type=request.doc_type,
-        site_name=request.site,
-        selected_materials=request.materials,
-        materials_map=request.materials_map,
-        serial=request.serial,
-        extension=ext,
-        initials_map=request.initials_map,
-    )
+    targets = output_paths(request)
+    base_name = targets[0].name
 
     def place_copy(dest_dir: Path) -> Optional[Path]:
         """Copy the source into ``dest_dir`` (handling collisions)."""
@@ -117,17 +146,10 @@ def _organize_locked(request: OrganizeRequest, result: OrganizeResult) -> None:
         result.destinations.append(target)
         return target
 
-    # --- Destination folder (single copy; no per-material subfolders) ----
-    dest_dir = _destination_for(
-        request.root, request.company, request.client,
-        request.site, request.doc_type, request.status,
-    )
-    if place_copy(dest_dir) is None and result.errors:
+    # --- Destination folder(s): primary first, then the "All DC" copy. ----
+    if place_copy(targets[0].parent) is None and result.errors:
         return result
-
-    # --- Global "All DC" folder (only when Doc Type == "DC") ------------
-    if request.doc_type.strip().upper() == "DC":
-        all_dc_dir = request.root / fn.sanitize(request.company) / "All DC" / fn.sanitize(request.status)
-        place_copy(all_dc_dir)
+    for target in targets[1:]:
+        place_copy(target.parent)
 
     return result

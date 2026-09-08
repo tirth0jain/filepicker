@@ -30,8 +30,8 @@ import customtkinter as ctk
 
 from config import ConfigManager
 from ocr import MAX_CONCURRENT_OCR as _OCR_BATCH
-from organizer import OrganizeRequest, organize
-from popup import FilePickerPopup
+from organizer import OrganizeRequest, organize, output_paths
+from popup import FilePickerPopup, ask_duplicate_action
 from version import VERSION
 from watcher import DownloadWatcher
 
@@ -329,11 +329,45 @@ class FilePickerController:
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
+        # De-dup: if the exact output filename already exists in the sorted
+        # folders, ask the user BEFORE organizing — Skip New File (keep the
+        # old file, leave the new download in the watch folder) or Replace
+        # Old with New (overwrite). Runs on the main thread while
+        # _popup_active is still True, so no other popup can appear above
+        # the question dialog.
+        request = OrganizeRequest(
+            source=payload["file_path"],
+            company=payload["company"],
+            client=payload["client"],
+            site=payload["site"],
+            doc_type=payload["doc_type"],
+            materials=payload["materials"],
+            materials_map=self.config.materials,
+            serial=payload["serial"],
+            status=payload["status"],
+            root=Path(self.config.root_directory),
+            initials_map=self.config.company_initials,
+        )
+        try:
+            existing = [p for p in output_paths(request) if p.exists()]
+        except Exception as exc:
+            print(f"[filepicker] duplicate check error (proceeding): {exc}")
+            existing = []
+        if existing:
+            choice = ask_duplicate_action(self._root, request.source.name, existing[0])
+            if choice != "replace":
+                self._set_status(
+                    f"Skipped — '{existing[0].name}' already exists in sorted "
+                    "folders; new file left in watch folder."
+                )
+                return
+            request.replace = True
+
         self._organize_active = True
 
         def run() -> None:
             try:
-                self._organize(payload)
+                self._organize(request)
             finally:
                 self._organize_active = False
 
@@ -390,21 +424,8 @@ class FilePickerController:
             target=work, name="filepicker-skip-all-delete", daemon=True
         ).start()
 
-    def _organize(self, payload: dict) -> None:
-        source: Path = payload["file_path"]
-        request = OrganizeRequest(
-            source=source,
-            company=payload["company"],
-            client=payload["client"],
-            site=payload["site"],
-            doc_type=payload["doc_type"],
-            materials=payload["materials"],
-            materials_map=self.config.materials,
-            serial=payload["serial"],
-            status=payload["status"],
-            root=Path(self.config.root_directory),
-            initials_map=self.config.company_initials,
-        )
+    def _organize(self, request: OrganizeRequest) -> None:
+        source = request.source
         result = organize(request)
 
         if result.success:
