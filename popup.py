@@ -515,7 +515,7 @@ class FilePickerPopup:
                 self.preview_pane.pack_forget()
             except tk.TclError:
                 pass
-            self.window.geometry(f"560x{self._win_h}")
+            self._center_window(560)
             self.preview_btn.configure(text="👁 Preview")
             return
 
@@ -543,11 +543,26 @@ class FilePickerPopup:
                 self.preview_pane.pack_forget()
             except tk.TclError:
                 pass
-            self.window.geometry(f"560x{self._win_h}")
+            self._center_window(560)
             print(f"[filepicker] preview error: {exc}")
             return
-        self.window.geometry(f"1180x{self._win_h}")
+        self._center_window(1180)
         self.preview_btn.configure(text="✕ Close Preview")
+
+    def _center_window(self, width: int) -> None:
+        """Resize to ``width`` and re-center the popup horizontally.
+
+        The popup opens centered at 560px; opening the preview widens it to
+        1180px and would otherwise just grow to the right, off-centre. Re-
+        centering on both open and close keeps the window's centre on the
+        screen centre at either size. The vertical position is preserved.
+        """
+        try:
+            x = max((self.window.winfo_screenwidth() - width) // 2, 0)
+            y = self.window.winfo_y()
+            self.window.geometry(f"{width}x{self._win_h}+{x}+{y}")
+        except tk.TclError:
+            pass
 
     def _rebuild_preview_pane(self) -> None:
         """(Re)create the embedded preview pane inside the popup's body.
