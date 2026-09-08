@@ -154,7 +154,9 @@
     "RAHEJA UNIVERSAL LTD": [],
     "RAJESH SALUJA": [],
     "RAK ITALIANO OVERSEAS LLP": [],
-    "Raymond Limited": [],
+    "Raymond Limited": [
+      "Raymond Primium T-B"
+    ],
     "Reliance Industries Ltd- MHA": [],
     "RENNY THOMAS": [],
     "RK INTERIROS CFS INDIA PVT LTD- HYDRABAD": [],
@@ -177,7 +179,9 @@
     "SANKPAL REALTY": [],
     "SEJAL INTELLIGENT FACADE SOLUTIONS": [],
     "SEJAL SHAKTI REALTORS LLP": [],
-    "SHAPOORJI & PALLONJI CO. LTD": [],
+    "SHAPOORJI & PALLONJI CO. LTD": [
+      "Spcl"
+    ],
     "SHETH DEVELOPERS PVT. LTD.,": [],
     "SHREE CHHEDA & CHHEDA ENTERPRISES": [],
     "SHREE HAZARIMAL SOMANI MEMORIAL TRUST": [],
@@ -233,7 +237,8 @@
     "Cowtown Infotech Services Limited": [
       "LODHA - MULUND BAYA- Regalia",
       "Lodha Sital Baug",
-      "LODHA - BRADBURY-bellevue"
+      "LODHA - BRADBURY-bellevue",
+      "Lodha Regalia"
     ]
   }
 }
