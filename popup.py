@@ -607,6 +607,22 @@ class FilePickerPopup:
         self.window.bind("<Alt-KeyRelease>", self._on_alt_release)
         self.window.bind("<FocusOut>", lambda _e: self._reset_alt_seq())
 
+        # RIGHT Alt chords: Tk on Windows does not reliably set its Alt
+        # modifier for the right Alt key, so <Alt-KeyPress> never fires for
+        # it. Track the physical Alt_R key and route its letters through a
+        # plain <KeyPress> binding instead. Left-Alt letters keep the
+        # modifier path; a Mod1 event seen here means <Alt-KeyPress> already
+        # handled it, so nothing is ever toggled twice.
+        self._right_alt_down = False
+        self.window.bind("<KeyPress>", self._on_any_key)
+        self.window.bind("<KeyRelease>", self._on_any_key_release)
+
+        # Ctrl shortcuts (work from any field): Ctrl+S = Save & Organize,
+        # Ctrl+Delete = Skip / Keep Original, Ctrl+P = open/close Preview.
+        self.window.bind("<Control-s>", lambda _e: self._submit())
+        self.window.bind("<Control-Delete>", lambda _e: self._skip())
+        self.window.bind("<Control-p>", lambda _e: self._toggle_preview())
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -1153,6 +1169,33 @@ class FilePickerPopup:
             self._arm_alt_timer()
         else:
             self._reset_alt_seq()
+
+    def _on_any_key(self, event) -> None:
+        """Plain KeyPress catcher — makes RIGHT Alt chords work.
+
+        Tk on Windows does not reliably set its Alt modifier for the right
+        Alt key, so letters pressed with right Alt held arrive here without
+        ever firing the <Alt-KeyPress> binding. The physical Alt_R key is
+        tracked instead; its letters are routed into the same chord logic.
+        """
+        keysym = getattr(event, "keysym", "") or ""
+        if keysym == "Alt_R":
+            self._right_alt_down = True
+            return
+        if not self._right_alt_down:
+            return
+        if event.state & 0x8:  # Mod1 set -> <Alt-KeyPress> already handled it
+            return
+        self._on_alt_key(event)
+
+    def _on_any_key_release(self, event) -> None:
+        if getattr(event, "keysym", "") != "Alt_R":
+            return
+        if not self._right_alt_down:
+            return
+        self._right_alt_down = False
+        # Same pending-chord semantics as a left-Alt release.
+        self._on_alt_release()
 
     def _arm_alt_timer(self, ms: int = 1000) -> None:
         """(Re)arm the pending-chord timeout; expiry discards it."""
