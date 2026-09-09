@@ -35,8 +35,8 @@
   },
   "enable_live_config": true,
   "enable_github_push": true,
-  "auto_start": true,
   "enable_ocr": true,
+  "auto_start": true,
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
