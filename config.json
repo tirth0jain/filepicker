@@ -30,8 +30,8 @@
   },
   "enable_live_config": true,
   "enable_github_push": true,
-  "enable_ocr": true,
   "auto_start": true,
+  "enable_ocr": true,
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
@@ -249,7 +249,8 @@
       "Lodha Woods Club House"
     ],
     "Alder Residency Pvt Ltd": [
-      "Kalpataru Vivant Tower F Wing"
+      "Kalpataru Vivant Tower F Wing",
+      "Kalpataru Vivant Tower"
     ],
     "Arimas Real Estate Private Limited": [
       "Kalpataru Elitus",
