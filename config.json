@@ -85,7 +85,9 @@
     "JOYNEST PREMISES PVT LTD": [],
     "JUHU REAL ESTATE DEVELOPERS PVT LTD": [],
     "KALPATARU": [
-      "Kalpaturu Advay"
+      "Kalpaturu Advay",
+      "Kalpataru Elitus",
+      "Kalpataru Vivant Tower"
     ],
     "KEYSTONE REALTORS PVT LTD": [],
     "KOLTE PATIL DEVELOPERS LTD": [],
@@ -244,12 +246,8 @@
       "Lodha Regalia",
       "Lodha Woods Club House"
     ],
-    "Alder Residency Pvt Ltd": [
-      "Kalpataru Vivant Tower"
-    ],
-    "Arimas Real Estate Private Limited": [
-      "Kalpataru Elitus"
-    ]
+    "Alder Residency Pvt Ltd": [],
+    "Arimas Real Estate Private Limited": []
   },
   "auto_start": true,
   "enable_live_config": true,
