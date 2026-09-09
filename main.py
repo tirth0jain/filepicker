@@ -263,6 +263,8 @@ class FilePickerController:
                 self._check_update_now()
             elif cmd == "force_sync":
                 self._force_sync_now()
+            elif cmd == "push_config":
+                self._push_config_now()
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -434,6 +436,15 @@ class FilePickerController:
             # program, so retry for a short while before giving up.
             if not self._delete_original(source):
                 return
+            # The file was saved — only now may config changes made while
+            # filling the popup (new sites/clients/materials/...) be pushed
+            # to GitHub ("no config push unless a file is saved").
+            try:
+                pushed = self.config.flush_pending_push()
+                if pushed:
+                    print("[filepicker] pushing config additions to GitHub (file saved)")
+            except Exception as exc:
+                print(f"[filepicker] pending config push error: {exc}")
             n = len(result.destinations)
             self._set_status(f"Saved to {n} folder(s): {', '.join(str(d) for d in result.destinations)}")
         else:
@@ -654,6 +665,7 @@ class FilePickerController:
                 on_check_update=self._tray_check_update,
                 on_quit=self._tray_quit,
                 on_force_sync=self._tray_force_sync,
+                on_force_push=self._tray_force_push,
             )
             self._tray.start()
         except Exception as exc:
@@ -673,6 +685,10 @@ class FilePickerController:
     def _tray_force_sync(self) -> None:
         # Called from the pystray thread; marshal onto the Tk main thread.
         self._ui_commands.put("force_sync")
+
+    def _tray_force_push(self) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put("push_config")
 
     def _tray_quit(self) -> None:
         self._ui_commands.put("quit")
@@ -712,6 +728,32 @@ class FilePickerController:
                 print(f"[filepicker] force sync error: {exc}")
 
         threading.Thread(target=work, name="filepicker-force-sync", daemon=True).start()
+
+    def _push_config_now(self) -> None:
+        """Manual "Push local config to GitHub" from the tray.
+
+        The opposite of Force sync: deletes what is on GitHub and replaces it
+        with THIS machine's local config (current sites, clients, companies,
+        materials, doc types — deletions included) on a background thread.
+        """
+        def work() -> None:
+            try:
+                ok = self.config.force_push_to_github(
+                    reason="FilePicker: tray push — replace remote with local"
+                )
+                if ok:
+                    self._set_status(
+                        "Pushed local config to GitHub (remote replaced)."
+                    )
+                else:
+                    self._set_status(
+                        "Push FAILED — check FILEPICKER_GITHUB_TOKEN / "
+                        "github_token.txt and enable_github_push, then retry."
+                    )
+            except Exception as exc:
+                print(f"[filepicker] tray push error: {exc}")
+
+        threading.Thread(target=work, name="filepicker-tray-push", daemon=True).start()
 
     def _check_update_now(self) -> None:
         """Manual 'Check for updates' from the tray (runs on the main thread)."""
@@ -887,22 +929,9 @@ def main() -> None:
         except Exception as exc:
             print(f"[filepicker] auto-start setup failed: {exc}")
 
-    # If this machine has local catalog changes not yet on GitHub (e.g. a site
-    # added via "Add Site" before push was enabled, like the "tirth" entry),
-    # push them now so every other machine sees them within 30s.
-    try:
-        if config._github_push_enabled():
-            def _startup_push() -> None:
-                time.sleep(4)
-                try:
-                    if config.push_to_github(reason="FilePicker: startup sync"):
-                        print("[filepicker] startup sync pushed local catalog to GitHub")
-                except Exception as exc:
-                    print(f"[filepicker] startup push failed: {exc}")
-
-            threading.Thread(target=_startup_push, name="filepicker-startup-push", daemon=True).start()
-    except Exception as exc:
-        print(f"[filepicker] startup sync check failed: {exc}")
+    # Config changes made from a popup (new sites/clients/...) are pushed to
+    # GitHub ONLY after a file is actually saved (see _organize) or via the
+    # tray's manual "Push local config to GitHub" — never at startup.
 
     controller = FilePickerController(config)
     try:

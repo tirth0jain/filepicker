@@ -78,6 +78,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # machine's own API key (see _read_opencode_token) and one machine
     # enabling it must not force it on every install.
     "enable_ocr": True,
+    # Open the file preview automatically with every popup. Set to false to
+    # start with the metadata form only (Ctrl+P / the Preview button still
+    # toggles it).
+    "preview_open_by_default": True,
+    # While a popup is open and Alt is held, Alt+<key> combinations are
+    # swallowed system-wide so NO other program reacts to them (AutoDesk
+    # apps fire on Alt+letters); the popup itself still receives every chord.
+    # Set to false to let other programs see Alt normally.
+    "block_alt_for_other_apps": True,
     # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
     # OpenAI-compatible API). Overridable per machine in config.json.
     "ocr_model": OCR_MODEL,
@@ -275,39 +284,89 @@ def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
     return True
 
 
+# Unit-designator words: a trailing "word + number" pair whose word is one
+# of these is the same place as the name without the pair ("Kalpataru Elitus
+# Tower 2" == "Kalpataru Elitus", "Lodha Regalia Phase 2" == "Lodha Regalia").
+# Only ONE such pair is ever stripped, and only when real words remain —
+# arbitrary words are never dropped ("Sital Baug 2" keeps "Baug").
+_UNIT_WORDS = {
+    "tower", "phase", "unit", "block", "level", "wing", "podium", "floor",
+    "house", "building", "annex", "annexe", "plot", "flat", "shop", "sector",
+    "zone", "stage", "pod", "yard", "office", "centre", "center",
+    "winga", "wingb", "wingc", "wingd",
+}
+
+
+def _strip_trailing_designator(tokens: List[str]) -> List[str]:
+    """Drop ONE trailing unit designator: a standalone number, or an
+    'unit word + number' pair ('Tower 2', 'Phase 3').
+
+    "Kalpataru Elitus Tower 2" is the same place as "Kalpataru Elitus" — the
+    trailing designator is something vendors and OCR write inconsistently,
+    so it never decides a match. Single-letter designators are never dropped
+    ('Site A', 'Kalpataru Vivant (T-A)') and the strip never reduces a name
+    to nothing.
+    """
+    if len(tokens) < 2 or not tokens[-1].isdigit():
+        return tokens
+    out = tokens[:-1]  # a trailing number itself never decides a match
+    # Drop a preceding *unit* word too, but only when the pair is followed
+    # by at least two real words ("Sital Baug 2" keeps "Baug"; "Tower 2"
+    # alone stays intact).
+    if len(out) >= 2 and out[-1].isalpha() and out[-1] in _UNIT_WORDS:
+        out = out[:-1]
+    return out or tokens
+
+
+def _match_forms(name: str) -> tuple:
+    """The (normalized, designator-stripped) comparable forms of a name."""
+    norm = normalize_site_name(name)
+    stripped = " ".join(_strip_trailing_designator(norm.split()))
+    return norm, stripped
+
+
 def find_near_name(existing_names, candidate) -> Optional[str]:
     """The existing catalog name that is the *same place* as ``candidate``.
 
     Applies to site and client names alike. Matching ignores case,
     punctuation, spacing, articles (a/an/the) and numbers — "T1"/"T2"/"Tower
     1"/"Tower 2" are the same site, so the exact numeral never blocks a
-    match. Tolerates one-letter spelling variants per word ("shital bag" vs
-    "Sital Baug", "Larsen and Toubro" vs "Larsen & Toubro") and at most one
-    extra word (brand prefixes like "Lodha"). Names that differ only in
-    spacing/punctuation ("T-A" vs "TA" vs "T A") are equivalent. Deliberately
-    strict: names that merely share words are NOT matched ("Sai Baug" is
-    never "Sital Baug"), and single-letter tokens are exact-only ("Site A" is
-    never "Site B"). Returns the canonical existing spelling.
+    match. A trailing unit designator is ignored too: "Kalpataru Elitus
+    Tower 2" matches "Kalpataru Elitus" (and "Lodha Shital Baug Tower 2"
+    matches "Sital Baug" — the brand prefix AND the designator are both
+    tolerated). Tolerates one-letter spelling variants per word ("shital
+    bag" vs "Sital Baug", "Larsen and Toubro" vs "Larsen & Toubro") and at
+    most one extra word (brand prefixes like "Lodha"). Names that differ only
+    in spacing/punctuation ("T-A" vs "TA" vs "T A") are equivalent.
+    Deliberately strict: names that merely share words are NOT matched
+    ("Sai Baug" is never "Sital Baug"), and single-letter tokens are
+    exact-only ("Site A" is never "Site B"). Returns the canonical existing
+    spelling.
     """
-    cand = normalize_site_name(candidate)
-    if not cand:
+    cand_norm, cand_strip = _match_forms(candidate)
+    if not cand_norm:
         return None
-    cand_tokens = cand.split()
-    cand_squeezed = cand.replace(" ", "")
+    cand_squeezed = cand_norm.replace(" ", "")
+    cand_forms = [(cand_norm, cand_squeezed)]
+    if cand_strip != cand_norm:
+        cand_forms.append((cand_strip, cand_strip.replace(" ", "")))
+
     for name in existing_names:
-        norm = normalize_site_name(name)
+        norm, strip = _match_forms(name)
         if not norm:
             continue
-        if norm == cand:
-            return str(name)
-        # Same words with only spacing/punctuation differences:
-        # "T-A" vs "TA" vs "T A", "Sital Baug" vs "sitalbaug".
-        if norm.replace(" ", "") == cand_squeezed:
-            return str(name)
-        # Same words in order, every word within one letter, at most one
-        # extra/missing word (brand prefixes like "Lodha").
-        if _token_subsequence_matches(norm.split(), cand_tokens):
-            return str(name)
+        name_forms = [(norm, norm.replace(" ", ""))]
+        if strip != norm:
+            name_forms.append((strip, strip.replace(" ", "")))
+        # Either form pair may match (original, or both stripped of a
+        # trailing unit designator) — same words with only
+        # spacing/punctuation differences, or near-identical word lists.
+        for (a, a_sq) in cand_forms:
+            for (b, b_sq) in name_forms:
+                if a == b or a_sq == b_sq:
+                    return str(name)
+                if _token_subsequence_matches(a.split(), b.split()):
+                    return str(name)
     return None
 
 
@@ -328,6 +387,11 @@ class ConfigManager:
         self._lock = threading.RLock()
         self._data: Dict[str, Any] = deepcopy(DEFAULT_CONFIG)
         self._loaded = False
+        # Config changes made from a popup (new sites/clients/materials/...)
+        # that have NOT been pushed to GitHub yet. They are pushed only when
+        # a file is actually saved (flush_pending_push) or when the user
+        # force-pushes from the tray — never while a popup is still open.
+        self._pending_push_reasons: List[str] = []
 
     # ------------------------------------------------------------------
     # Loading
@@ -510,10 +574,11 @@ class ConfigManager:
     ) -> bool:
         """Push the local catalog back to GitHub.
 
-        Called automatically after Add Site/Company/Material. Merges the local
-        catalog (companies, clients, etc.) into the current GitHub file so
-        concurrent edits from two machines are unioned, not lost. Returns True
-        on success.
+        Runs after a file was successfully saved (flush_pending_push), via
+        the tray's manual force push (force_push_to_github), or the
+        ``--push-config`` CLI. Merges the local catalog (companies, clients,
+        etc.) into the current GitHub file so concurrent edits from two
+        machines are unioned, not lost. Returns True on success.
 
         The token is read from `FILEPICKER_GITHUB_TOKEN` / `GITHUB_TOKEN` /
         `github_token.txt` — it is NEVER stored in config.json.
@@ -653,6 +718,136 @@ class ConfigManager:
                 print(f"[config] async push error: {exc}")
 
         threading.Thread(target=_work, name="filepicker-github-push", daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Deferred pushes — "no config push unless a file is saved"
+    # ------------------------------------------------------------------
+    def _mark_push_pending(self, reason: str) -> None:
+        """Record a catalog change to be pushed to GitHub only after a save.
+
+        Add Site/Client/Company/Material/Doc Type always write to the local
+        config.json immediately (so the current file and folder path are
+        right), but the GitHub push is deferred: it happens only when a file
+        is actually SAVED (see :meth:`flush_pending_push`) or when the user
+        force-pushes from the tray. A half-filled popup that is skipped (or
+        never saved) never touches the repo.
+        """
+        with self._lock:
+            if reason not in self._pending_push_reasons \
+                    and len(self._pending_push_reasons) < 8:
+                self._pending_push_reasons.append(reason)
+
+    def flush_pending_push(self, force_reason: Optional[str] = None) -> bool:
+        """Push every pending catalog change (called after a successful save).
+
+        Returns True when a push was started, False when there was nothing
+        pending. The push itself runs on a daemon thread and never blocks.
+        """
+        with self._lock:
+            if not self._pending_push_reasons:
+                return False
+            reasons = list(self._pending_push_reasons)
+            self._pending_push_reasons = []
+        combined = "; ".join(reasons)
+        self._push_async(reason=force_reason or f"FilePicker: {combined}")
+        return True
+
+    def force_push_to_github(
+        self,
+        reason: str = "FilePicker: force push local config",
+        timeout: float = 10.0,
+    ) -> bool:
+        """Replace the GitHub config.json with THIS machine's local file.
+
+        The normal :meth:`push_to_github` union-merges (nothing is ever
+        lost); this one instead DELETES what is on GitHub and writes the
+        local config in its place — deletions included — which is exactly
+        what the tray's "Push local config to GitHub" action should do when
+        the local catalog is the one to publish. Any pending deferred pushes
+        are superseded (the whole local file goes up anyway).
+        """
+        if not self._github_push_enabled():
+            return False
+        token = _read_github_token()
+        if not token:
+            return False
+        with self._lock:
+            local_data = deepcopy(self._data)
+            self._pending_push_reasons = []
+        try:
+            import urllib.request
+            import urllib.error
+
+            api_url = GITHUB_API_URL
+
+            # 1. GET current file to obtain sha (404 = not yet created).
+            sha: Optional[str] = None
+            try:
+                req = urllib.request.Request(
+                    f"{api_url}?ref={GITHUB_BRANCH}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "FilePicker",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    info = json.loads(resp.read().decode("utf-8"))
+                    sha = info.get("sha")
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    print(f"[config] GitHub GET failed ({e.code}): {e.reason}")
+                    return False
+            except Exception as exc:
+                print(f"[config] GitHub GET failed: {exc}")
+                return False
+
+            # 2. PUT the ENTIRE local file as-is (no merge, no union).
+            new_json = json.dumps(local_data, indent=2, ensure_ascii=False) + "\n"
+            b64_content = base64.b64encode(new_json.encode("utf-8")).decode("ascii")
+            payload: Dict[str, Any] = {
+                "message": reason,
+                "content": b64_content,
+                "branch": GITHUB_BRANCH,
+            }
+            if sha:
+                payload["sha"] = sha
+
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                api_url,
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "FilePicker",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status in (200, 201):
+                    print(f"[config] FORCE-pushed local config to GitHub ({reason})")
+                    return True
+                print(f"[config] GitHub PUT unexpected status {resp.status}")
+                return False
+        except urllib.error.HTTPError as e:
+            # 409 = sha mismatch (concurrent edit) — fetch + retry once
+            if e.code == 409:
+                print("[config] GitHub force push conflict (409) — retrying…")
+                try:
+                    return self.force_push_to_github(reason=reason, timeout=timeout)
+                except RecursionError:
+                    pass
+            try:
+                detail = e.read().decode("utf-8", errors="ignore")[:500]
+            except Exception:
+                detail = str(e)
+            print(f"[config] GitHub force push failed ({e.code}): {detail}")
+            return False
+        except Exception as exc:
+            print(f"[config] GitHub force push failed: {exc}")
+            return False
 
     @staticmethod
     def _merge_for_push(remote: Dict[str, Any], local: Dict[str, Any]) -> Dict[str, Any]:
@@ -852,6 +1047,18 @@ class ConfigManager:
         """The OpenCode Go API key (env / opencode_token.txt / opencode auth store)."""
         return _read_opencode_token()
 
+    @property
+    def preview_open_by_default(self) -> bool:
+        """Whether every popup opens with the file preview already shown."""
+        return bool(self.load().get("preview_open_by_default", True))
+
+    @property
+    def block_alt_for_other_apps(self) -> bool:
+        """Whether Alt+<key> is withheld from every other program while a
+        popup is open (so AutoDesk-style apps never react to the popup's
+        Alt material hotkeys)."""
+        return bool(self.load().get("block_alt_for_other_apps", True))
+
     # ------------------------------------------------------------------
     # Mutators (each persists to disk)
     # ------------------------------------------------------------------
@@ -866,15 +1073,15 @@ class ConfigManager:
             self.save()
 
     def add_company(self, company: str) -> None:
-        pushed = False
+        changed = False
         with self._lock:
             companies = self.load().setdefault("companies", [])
             if not self._ci_matches(companies, company):
                 companies.append(company)
                 self.save()
-                pushed = True
-        if pushed:
-            self._push_async(reason=f"FilePicker: add company '{company}'")
+                changed = True
+        if changed:
+            self._mark_push_pending(reason=f"add company '{company}'")
 
     def add_client(self, client: str, sites: Optional[List[str]] = None) -> str:
         """Add a new client (optionally with its sites).
@@ -888,7 +1095,7 @@ class ConfigManager:
         client = client.strip()
         if not client:
             return ""
-        pushed = False
+        changed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
             canonical = find_near_name(list(clients.keys()), client)
@@ -898,9 +1105,9 @@ class ConfigManager:
                 return canonical
             clients[client] = list(sites or [])
             self.save()
-            pushed = True
-        if pushed:
-            self._push_async(reason=f"FilePicker: add client '{client}'")
+            changed = True
+        if changed:
+            self._mark_push_pending(reason=f"add client '{client}'")
         return client
 
     def add_site(self, client: str, site: str) -> str:
@@ -918,7 +1125,7 @@ class ConfigManager:
         site = site.strip()
         if not site:
             return ""
-        pushed = False
+        changed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
             key = self._canonical_key(clients, client)
@@ -936,9 +1143,9 @@ class ConfigManager:
                 return canonical
             sites.append(site)
             self.save()
-            pushed = True
-        if pushed:
-            self._push_async(reason=f"FilePicker: add site '{site}' to '{key}'")
+            changed = True
+        if changed:
+            self._mark_push_pending(reason=f"add site '{site}' to '{key}'")
         return site
 
     @staticmethod
@@ -963,15 +1170,15 @@ class ConfigManager:
                 self.save()
                 changed = True
         if changed:
-            self._push_async(reason=f"FilePicker: add material '{name}'")
+            self._mark_push_pending(reason=f"add material '{name}'")
 
     def add_doc_type(self, doc_type: str) -> None:
-        pushed = False
+        changed = False
         with self._lock:
             doc_types = self.load().setdefault("doc_types", [])
             if not self._ci_matches(doc_types, doc_type):
                 doc_types.append(doc_type)
                 self.save()
-                pushed = True
-        if pushed:
-            self._push_async(reason=f"FilePicker: add doc type '{doc_type}'")
+                changed = True
+        if changed:
+            self._mark_push_pending(reason=f"add doc type '{doc_type}'")

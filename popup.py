@@ -116,7 +116,8 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
         dialog,
         text=f"\"{filename}\" already exists at:\n{existing_path.parent}\n\n"
              "The new download would be saved with the same name.\n"
-             "What should FilePicker do?",
+             "What should FilePicker do?\n\n"
+             "Ctrl+S = Replace  •  Ctrl+Delete = Skip",
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
         wraplength=460,
     ).pack(anchor="w", padx=18, pady=(0, 12))
@@ -138,6 +139,12 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
 
     # Safe default: closing the dialog (or pressing Enter) keeps the old file.
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose("skip"))
+    # Ctrl shortcuts keep working while this dialog is open (they were dead
+    # from an older build because the dialog owned all keyboard input):
+    # Ctrl+S = "save", i.e. Replace Old with New; Ctrl+Delete = Skip.
+    dialog.bind("<Control-s>", lambda _e: choose("replace"))
+    dialog.bind("<Control-Delete>", lambda _e: choose("skip"))
+    dialog.bind("<Escape>", lambda _e: choose("skip"))
     try:
         skip_btn.focus_set()
     except tk.TclError:
@@ -537,6 +544,9 @@ class FilePickerPopup:
         # Company name placed by OCR that is NOT in the catalog — kept across
         # live-config refreshes until the user picks a menu value.
         self._ocr_company_override: Optional[str] = None
+        # Raw Company/Client/Site values the OCR returned (before any
+        # canonicalization) — shown highlighted in yellow in the preview.
+        self._ocr_highlight_terms: List[str] = []
 
         # Material name -> shortcode mapping loaded once.
         self._materials_map: Dict[str, str] = {}
@@ -549,6 +559,13 @@ class FilePickerPopup:
         self._reload_config_state()
         self._set_banner()
 
+        # Preview open by default: "preview_open_by_default": true (default)
+        # opens the preview with the popup; false starts with the form only
+        # (Ctrl+P / the Preview button still toggles it).
+        if self.config.preview_open_by_default \
+                and self.file_path.suffix.lower() in _SUPPORTED_PREVIEW_EXTS:
+            self._toggle_preview()
+
         # Live-update the preview when the serial or checkbox changes.
         self._serial_var.trace_add("write", lambda *_: self._refresh_preview())
         self._received_var.trace_add("write", lambda *_: self._refresh_preview())
@@ -557,6 +574,20 @@ class FilePickerPopup:
         self.window.attributes("-topmost", True)
         self.window.lift()
         self.window.focus_force()
+
+        # Global Alt suppression (Windows): while this popup is open, Alt+key
+        # is swallowed for every other program (AutoDesk etc.) and re-posted
+        # only to this window, so the material hotkeys keep working and no
+        # other app ever reacts. Config: "block_alt_for_other_apps": true
+        # (default). No-op off Windows.
+        self._alt_block_active = False
+        if self.config.block_alt_for_other_apps:
+            try:
+                import altblock
+                self._alt_block_active = altblock.install(self.window.winfo_id())
+            except Exception as exc:
+                print(f"[filepicker] alt-block hook error: {exc}")
+                self._alt_block_active = False
 
         # Live config: refresh while open if someone pushes a new clients/sites list.
         self._config_poll_after = None
@@ -625,6 +656,13 @@ class FilePickerPopup:
             self._center_window(560)
             print(f"[filepicker] preview error: {exc}")
             return
+        # Yellow-highlight the values OCR found in the PDF page.
+        try:
+            self._preview.set_highlight_terms(
+                getattr(self, "_ocr_highlight_terms", [])
+            )
+        except Exception:
+            pass
         self._center_window(1180)
         self.preview_btn.configure(text="✕ Close Preview")
 
@@ -673,10 +711,16 @@ class FilePickerPopup:
         # edge) and horizontally centered, so it never needs to be dragged up.
         # The height is clamped to the screen so the bottom controls (Save /
         # Skip) are never cut off on shorter displays (e.g. 1366x768 laptops).
+        # When "preview_open_by_default" is true (default) the window starts
+        # at the wide, preview-open size so it never visibly jumps.
         _screen_w = self.window.winfo_screenwidth()
         _screen_h = self.window.winfo_screenheight()
         self._win_h = max(min(820, _screen_h - 20), 700)
-        self.window.geometry(f"560x{self._win_h}+{max((_screen_w - 560) // 2, 0)}+0")
+        _width = 560
+        if self.config.preview_open_by_default \
+                and self.file_path.suffix.lower() in _SUPPORTED_PREVIEW_EXTS:
+            _width = 1180
+        self.window.geometry(f"{_width}x{self._win_h}+{max((_screen_w - _width) // 2, 0)}+0")
         self.window.configure(fg_color=_BG)
         self.window.resizable(True, True)  # height adjustable
         self.window.minsize(560, 700)
@@ -1615,6 +1659,10 @@ class FilePickerPopup:
         if not (company or client or site):
             return changed
 
+        # Remember the raw OCR values so the preview can highlight exactly
+        # what the model read off the document (in yellow).
+        self._ocr_highlight_terms = [v for v in (company, client, site) if v]
+
         # Company (CTkOptionMenu): canonical catalog spelling when a
         # case-insensitive match exists, else keep the OCR text as-is (and
         # remember it so live-config refreshes don't revert it).
@@ -1646,6 +1694,13 @@ class FilePickerPopup:
             self.site_dropdown.set(site)
 
         self._refresh_preview()
+        # Yellow-highlight the OCR-found values in the open preview (the
+        # viewer re-renders the current page with cheap text-search boxes).
+        if self._preview is not None:
+            try:
+                self._preview.set_highlight_terms(self._ocr_highlight_terms)
+            except Exception:
+                pass
         return True
 
     def _apply_serial_from_filename(self) -> bool:
@@ -1836,6 +1891,15 @@ class FilePickerPopup:
             self.site_dropdown._close()
         except Exception:
             pass
+        # Release the global Alt-block hook (keys return to normal for every
+        # other program once no popup is on screen).
+        if getattr(self, "_alt_block_active", False):
+            try:
+                import altblock
+                altblock.remove()
+            except Exception:
+                pass
+            self._alt_block_active = False
         self.window.destroy()
 
     def show(self) -> None:

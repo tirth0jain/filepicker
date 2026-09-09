@@ -30,10 +30,12 @@ def _build_icon_image() -> "Image.Image":
 class TrayIcon:
     """Owns the pystray icon and forwards menu actions to callbacks."""
 
-    def __init__(self, on_check_update, on_quit, on_force_sync=None) -> None:
+    def __init__(self, on_check_update, on_quit, on_force_sync=None,
+                 on_force_push=None) -> None:
         self._on_check_update = on_check_update
         self._on_quit = on_quit
         self._on_force_sync = on_force_sync
+        self._on_force_push = on_force_push
         self._icon = None
 
     def start(self) -> None:
@@ -49,7 +51,8 @@ class TrayIcon:
             title="FilePicker",
             menu=Menu(
                 MenuItem("Check for updates", self._check_update),
-                MenuItem("Force sync with repo", self._force_sync),
+                MenuItem("Force sync from repo (overwrite local)", self._force_sync),
+                MenuItem("Push local config to GitHub (replace remote)", self._force_push),
                 MenuItem("Quit", self._quit),
             ),
         )
@@ -70,6 +73,10 @@ class TrayIcon:
     def _force_sync(self, _icon, _item) -> None:
         if self._on_force_sync is not None:
             self._on_force_sync()
+
+    def _force_push(self, _icon, _item) -> None:
+        if self._on_force_push is not None:
+            self._on_force_push()
 
     def _quit(self, _icon, _item) -> None:
         self._on_quit()

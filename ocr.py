@@ -129,7 +129,13 @@ letters, spacing, punctuation, or with/without articles ("a"/"an"/"the"), or an
 extra word like a brand name ("Lodha Shital Baug" vs "sital baug"). When the
 value is the same place as one of the Known Sites, output the Known Site name
 EXACTLY as listed above instead of the document's spelling. Only output a name
-NOT on the list when it clearly matches no Known Site (e.g. a brand-new site)."""
+NOT on the list when it clearly matches no Known Site (e.g. a brand-new site).
+
+A trailing unit designator — one word followed by a number ("Tower 2",
+"Phase 3", "Unit 4") — is the same place as the site without it: "Kalpataru
+Elitus Tower 2" is "Kalpataru Elitus". When the value differs from a Known
+Site only by such a designator, output the Known Site name WITHOUT the
+designator (e.g. output "Kalpataru Elitus", not "Kalpataru Elitus Tower 2")."""
 
 # Known-Clients section (same idea as Known Sites: the model resolves a client
 # written slightly differently to the existing catalog name so one place never

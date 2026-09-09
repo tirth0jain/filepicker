@@ -13,6 +13,7 @@ download before organising it.
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
@@ -159,6 +160,9 @@ class PreviewWindow:
         self.file_path = Path(file_path)
         self.parent = parent
         self._destroyed = False  # set by destroy(); guards async/after callbacks
+        # Values OCR found on the document — drawn as translucent yellow
+        # boxes on the rendered PDF pages (see set_highlight_terms).
+        self._highlight_terms: List[str] = []
 
         if container is not None:
             # Embedded mode: build into the supplied frame. All preview
@@ -424,9 +428,61 @@ class PreviewWindow:
             page = self._doc.load_page(idx)
             dpi = int(_BASE_DPI * zoom)
             pix = page.get_pixmap(dpi=dpi)
-            # PNG is lossless and compresses text pages extremely well, so
-            # pages load fast and stay light in memory even for 50+ page docs.
-            return Image.open(io.BytesIO(pix.tobytes("png")))
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            if self._highlight_terms:
+                self._draw_highlights(img, page, pix.width)
+            return img
+
+    def set_highlight_terms(self, terms) -> None:
+        """Highlight the given OCR-found values in yellow on the PDF pages.
+
+        Cheap by design: PyMuPDF's native text search (search_for) runs only
+        on the page being rendered — no re-OCR, no extra processing. Any
+        values the search cannot find (e.g. the phrase breaks across lines)
+        are retried word by word; nothing is highlighted when a page has no
+        text. Re-renders the current page so the marks appear.
+        """
+        self._highlight_terms = [
+            str(t).strip() for t in (terms or []) if str(t).strip()
+        ]
+        if getattr(self, "_destroyed", False):
+            return
+        if hasattr(self, "_doc"):
+            self._invalidate_cache()
+            self._render_current()
+
+    def _draw_highlights(self, img, page, pix_width: int) -> None:
+        """Overlay translucent yellow boxes over the OCR-found values."""
+        try:
+            scale = pix_width / max(float(page.rect.width), 1e-9)
+            rects = []
+            for term in self._highlight_terms:
+                rects.extend(page.search_for(term))
+            if not rects:
+                # Multi-word phrases often wrap across lines inside the PDF —
+                # fall back to searching each significant word on its own.
+                for term in self._highlight_terms:
+                    for word in re.split(r"[\s\-/()&,]+", term):
+                        if len(word) >= 3:
+                            rects.extend(page.search_for(word))
+            if not rects:
+                return
+            from PIL import Image as _Image, ImageDraw
+
+            overlay = _Image.new("RGBA", img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            for rect in rects:
+                draw.rectangle(
+                    [rect.x0 * scale, rect.y0 * scale,
+                     rect.x1 * scale, rect.y1 * scale],
+                    fill=(255, 224, 0, 90),
+                )
+            img.paste(
+                _Image.alpha_composite(img.convert("RGBA"), overlay)
+                .convert("RGB")
+            )
+        except Exception as exc:
+            print(f"[filepicker] preview highlight error: {exc}")
 
     def _display_photo(self, photo) -> None:
         self._canvas.delete("all")
