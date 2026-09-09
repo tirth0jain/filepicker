@@ -37,9 +37,6 @@ ADD_NEW_MATERIAL_OPTION = "[+ Add Material...]"
 # shows the first few closest matches instead of dumping the entire menu.
 _MAX_DROPDOWN_RESULTS = 5
 
-# How often the open popup polls GitHub for live config (ms).
-_CONFIG_POLL_MS = 30_000
-
 # Material chips panel: at most this many rows of chips are visible at once;
 # any extra rows scroll inside the panel (a large catalog must never push the
 # Serial number / Save buttons out of the fixed-height popup window).
@@ -1031,9 +1028,8 @@ class FilePickerPopup:
     def refresh_from_config(self) -> bool:
         """Reload dropdowns from (possibly fresh) config without losing typed text.
 
-        Called every :data:`_CONFIG_POLL_MS` and also when the controller detects
-        a live GitHub change while the popup is open. Returns True if the UI
-        changed.
+        Called after the popup's single live-config pull when something
+        changed. Returns True if the UI changed.
         """
         try:
             data = self.config.load()
@@ -1148,12 +1144,14 @@ class FilePickerPopup:
         return changed
 
     def _start_config_poll(self) -> None:
-        """Begin polling GitHub for live config while the popup is open."""
+        """Schedule the ONE live-config pull for when this popup opens."""
         self._config_poll_after = None
         if not self.config.enable_live_config:
             return
-        # Immediate fetch shortly after open so the popup never shows stale data
-        # for 30s — then every _CONFIG_POLL_MS thereafter.
+        # A single fetch shortly after open so the popup never shows stale
+        # data — deliberately NOT re-armed: the config must not be pulled
+        # while the user is editing config.json or force-pushing from the
+        # tray (a background pull kept reverting hand-made deletions).
         try:
             self._config_poll_after = self.window.after(500, self._poll_config)
         except Exception:
@@ -1169,7 +1167,7 @@ class FilePickerPopup:
             self._config_poll_after = None
 
     def _poll_config(self) -> None:
-        """Background fetch → apply → refresh (never blocks the UI)."""
+        """One background fetch → apply → refresh (never blocks the UI)."""
         if not self.config.enable_live_config:
             return
 
@@ -1183,12 +1181,6 @@ class FilePickerPopup:
                         pass
             except Exception as exc:
                 print(f"[filepicker] popup config poll error: {exc}")
-            finally:
-                try:
-                    if self.window.winfo_exists():
-                        self._config_poll_after = self.window.after(_CONFIG_POLL_MS, self._poll_config)
-                except tk.TclError:
-                    pass
 
         threading.Thread(target=work, name="filepicker-popup-config", daemon=True).start()
 

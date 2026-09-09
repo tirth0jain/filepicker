@@ -22,6 +22,10 @@ from ocr import OCR_API_BASE, OCR_MODEL
 
 # Remote live config — single source of truth for clients/sites.
 # Every popup fetches this so all users see the same data instantly.
+# NOTE: fetches go through the GitHub Contents API (see fetch_github_config)
+# because raw.githubusercontent.com is CDN-cached for up to 5 minutes — a
+# pull right after a push would read the stale pre-push file. The raw URL is
+# kept only as a fallback when the API is unreachable.
 GITHUB_CONFIG_URL = "https://raw.githubusercontent.com/tirth0jain/filepicker/main/config.json"
 
 # GitHub API details for pushing local additions (Add Site/Company) back to
@@ -59,10 +63,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Register a Startup-folder shortcut on first run so the app launches
     # automatically at Windows login. Set to false to disable.
     "auto_start": True,
-    # Live GitHub config sync — when true the app polls
-    # raw.githubusercontent.com every 30s (and on every popup open) so a
-    # push to config.json on GitHub appears for all users without rebuilding
-    # the exe. Set to false to use only the local config.json.
+    # Live GitHub config sync — when true the app fetches config.json from
+    # GitHub (Contents API, never cached) ONCE when a popup opens, so a push
+    # to config.json on GitHub appears for all users without rebuilding the
+    # exe. There is deliberately NO background polling: a periodic pull would
+    # fight hand edits and the tray force-push. Set to false to use only the
+    # local config.json.
     "enable_live_config": True,
     # When true, any "Add Site / Add Company / Add Material" action also
     # pushes the updated config.json back to GitHub (requires a token — see
@@ -493,26 +499,51 @@ class ConfigManager:
     # Live GitHub config (single source of truth for all users)
     # ------------------------------------------------------------------
     def fetch_github_config(self, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
-        """Fetch the live config from GitHub. Returns None on failure."""
-        try:
-            import urllib.request
-            import time as _time
+        """Fetch the live config from GitHub. Returns None on failure.
 
+        Uses the GitHub Contents API — the same endpoint the GitHub web UI
+        reads — which is NEVER cached, so a fetch moments after a push
+        always sees the current file (raw.githubusercontent.com is CDN-cached
+        for up to ~5 minutes and can serve a stale pre-push config, which
+        made force-pull "revert" to an older config). Authenticates with the
+        push token when available (avoids API rate limits). Falls back to the
+        cache-busted raw URL only when the API is unreachable. Every
+        successful fetch logs the sha of the version read.
+        """
+        def _get_json(url: str, t: float) -> Any:
+            import urllib.request
+            headers = {
+                "User-Agent": "FilePicker",
+                "Accept": "application/vnd.github+json",
+            }
+            token = _read_github_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=t) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            # 1) GitHub Contents API — always the current file.
+            try:
+                info = _get_json(f"{GITHUB_API_URL}?ref={GITHUB_BRANCH}", timeout)
+                content_b64 = info.get("content") or ""
+                if info.get("encoding") == "base64" and content_b64:
+                    data = json.loads(base64.b64decode(content_b64).decode("utf-8"))
+                    if isinstance(data, dict) and "clients" in data:
+                        print(f"[config] live config fetched via GitHub API "
+                              f"(sha={str(info.get('sha'))[:7]})")
+                        return data
+            except Exception as exc:
+                print(f"[config] GitHub API fetch failed "
+                      f"({getattr(exc, 'code', None) or type(exc).__name__}); "
+                      "falling back to raw URL")
+            # 2) Raw fallback, cache-busted (best effort).
+            import time as _time
             url = GITHUB_CONFIG_URL
-            # Bust raw.githubusercontent CDN cache (5 min) so a push shows up
-            # within one poll interval instead of waiting for CDN expiry.
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}_t={int(_time.time())}"
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "FilePicker",
-                    "Cache-Control": "no-cache",
-                    "Pragma": "no-cache",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = _get_json(url, timeout)
             if isinstance(data, dict) and "clients" in data:
                 return data
         except Exception as exc:
