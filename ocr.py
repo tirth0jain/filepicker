@@ -51,9 +51,11 @@ OCR_MODEL = "deepseek-v4-flash-vision-exp"
 # The model burns ~1500 tokens reasoning on a simple delivery note, and
 # harder documents (long tables, faint scans, the full known-sites/clients
 # lists in the prompt) have consumed the whole old 4096-token budget on
-# reasoning alone, leaving nothing for the answer table. 8192 gives it
-# room while staying under any gateway cap.
-OCR_MAX_TOKENS = 8192
+# reasoning alone, leaving nothing for the answer table. 8192 gave it room,
+# but on dense documents the reasoning still consumed the ENTIRE budget and
+# the model returned no fields at all ("reasoning consumed all 8192
+# tokens") — doubled to 16384 so the answer table always has room.
+OCR_MAX_TOKENS = 16384
 
 # Total wall-clock budget for one OCR call (seconds). Vision + reasoning on a
 # busy gateway can take a while; 120s keeps the popup snappy while allowing
@@ -144,9 +146,14 @@ NOT on the list when it clearly matches no Known Site (e.g. a brand-new site).
 
 A trailing unit designator — one word followed by a number ("Tower 2",
 "Phase 3", "Unit 4") — is the same place as the site without it: "Kalpataru
-Elitus Tower 2" is "Kalpataru Elitus". When the value differs from a Known
-Site only by such a designator, output the Known Site name WITHOUT the
-designator (e.g. output "Kalpataru Elitus", not "Kalpataru Elitus Tower 2")."""
+Elitus Tower 2" is "Kalpataru Elitus". A trailing STANDALONE dashed pair
+("T-B" = Tower B, "T-2" = Tower 2, "A-2") is the same too: "Raymond Premium
+T-B" is "Raymond Premium". When the value differs from a Known Site only by
+such a designator, output the Known Site name WITHOUT the designator (e.g.
+output "Kalpataru Elitus", not "Kalpataru Elitus Tower 2"; output "Raymond
+Premium", never "Raymond Premium T-B"). Do NOT strip the designator from a
+site name that does not otherwise match a Known Site (a brand-new site keeps
+its full name)."""
 
 # Known-Clients section (same idea as Known Sites: the model resolves a client
 # written slightly differently to the existing catalog name so one place never

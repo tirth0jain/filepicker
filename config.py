@@ -333,11 +333,50 @@ def _strip_trailing_designator(tokens: List[str]) -> List[str]:
     return out or tokens
 
 
+# A trailing STANDALONE dashed designator: "Raymond Premium T-B" is the
+# same place as "Raymond Premium" — "T-B" is Tower B, written like "Tower 2"
+# which is already ignored. Only a single letter (or digit), a dash, then a
+# single letter/digit at the very END matches ("T-B", "T-2", "A-2"): the
+# dash is what marks it as a designator token. Bare trailing letters
+# ("Site A") still never decide a match, multi-letter prefixes ("Parc-V",
+# "Phase-A") look like real names, and bracketed forms ("Kalpataru Vivant
+# (T-A)") stay part of the name.
+_DASH_DESIGNATOR_RE = re.compile(r"(?i)\b[a-z]-[a-z0-9]$")
+
+
+def _strip_trailing_dash_designator(name) -> str:
+    """Drop ONE trailing dashed designator pair ("Raymond Premium T-B"
+    -> "Raymond Premium"). Returns the input when nothing matches; never
+    returns an empty string."""
+    raw = str(name).strip()
+    if not raw:
+        return raw
+    m = _DASH_DESIGNATOR_RE.search(raw)
+    if not m:
+        return raw
+    out = raw[:m.start()].rstrip(" \t(")
+    return out if out else raw
+
+
 def _match_forms(name: str) -> tuple:
-    """The (normalized, designator-stripped) comparable forms of a name."""
-    norm = normalize_site_name(name)
+    """The comparable forms of a name (normal, designator-stripped).
+
+    A name may compare equal through any of its forms: the plain normalized
+    form, the numeric/unit-designator-stripped form ("Kalpataru Elitus
+    Tower 2" -> "kalpataru elitus"), and the dashed-designator-stripped
+    form ("Raymond Premium T-B" -> "raymond premium"). Returns a tuple of
+    the distinct forms, never empty.
+    """
+    raw = str(name).strip()
+    norm = normalize_site_name(raw)
+    forms = [norm]
     stripped = " ".join(_strip_trailing_designator(norm.split()))
-    return norm, stripped
+    if stripped != norm:
+        forms.append(stripped)
+    dashless = normalize_site_name(_strip_trailing_dash_designator(raw))
+    if dashless and dashless != norm and dashless not in forms:
+        forms.append(dashless)
+    return tuple(forms)
 
 
 def find_near_name(existing_names, candidate) -> Optional[str]:
@@ -349,7 +388,8 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     match. A trailing unit designator is ignored too: "Kalpataru Elitus
     Tower 2" matches "Kalpataru Elitus" (and "Lodha Shital Baug Tower 2"
     matches "Sital Baug" — the brand prefix AND the designator are both
-    tolerated). Tolerates one-letter spelling variants per word ("shital
+    tolerated; "Raymond Premium T-B" — T-B = Tower B — matches "Raymond
+    Premium"). Tolerates one-letter spelling variants per word ("shital
     bag" vs "Sital Baug", "Larsen and Toubro" vs "Larsen & Toubro") and at
     most one extra word (brand prefixes like "Lodha"). Names that differ only
     in spacing/punctuation ("T-A" vs "TA" vs "T A") are equivalent.
@@ -358,27 +398,20 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     exact-only ("Site A" is never "Site B"). Returns the canonical existing
     spelling.
     """
-    cand_norm, cand_strip = _match_forms(candidate)
-    if not cand_norm:
+    cand_forms = _match_forms(candidate)
+    if not cand_forms or not cand_forms[0]:
         return None
-    cand_squeezed = cand_norm.replace(" ", "")
-    cand_forms = [(cand_norm, cand_squeezed)]
-    if cand_strip != cand_norm:
-        cand_forms.append((cand_strip, cand_strip.replace(" ", "")))
 
     for name in existing_names:
-        norm, strip = _match_forms(name)
-        if not norm:
+        name_forms = _match_forms(name)
+        if not name_forms or not name_forms[0]:
             continue
-        name_forms = [(norm, norm.replace(" ", ""))]
-        if strip != norm:
-            name_forms.append((strip, strip.replace(" ", "")))
-        # Either form pair may match (original, or both stripped of a
-        # trailing unit designator) — same words with only
-        # spacing/punctuation differences, or near-identical word lists.
-        for (a, a_sq) in cand_forms:
-            for (b, b_sq) in name_forms:
-                if a == b or a_sq == b_sq:
+        # Either form pair may match (original, or one of the stripped
+        # forms) — same words with only spacing/punctuation differences,
+        # or near-identical word lists.
+        for a in cand_forms:
+            for b in name_forms:
+                if a == b or a.replace(" ", "") == b.replace(" ", ""):
                     return str(name)
                 if _token_subsequence_matches(a.split(), b.split()):
                     return str(name)
@@ -1303,12 +1336,23 @@ class ConfigManager:
                 if canonical != site:
                     print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
                 return canonical
-            sites.append(site)
+            # A trailing dashed unit designator ("Raymond Premium T-B" = Tower
+            # B) never becomes part of a NEW site name — the designator is
+            # not the place, so the stored site is "Raymond Premium" ("T-B
+            # is for Tower B so it shouldn't be putting T-B in Site").
+            effective = _strip_trailing_dash_designator(site)
+            if effective != site:
+                canonical = find_near_name(list(sites), effective)
+                if canonical is not None:
+                    if canonical != site:
+                        print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
+                    return canonical
+            sites.append(effective)
             self.save()
             changed = True
         if changed:
-            self._mark_push_pending(reason=f"add site '{site}' to '{key}'")
-        return site
+            self._mark_push_pending(reason=f"add site '{effective}' to '{key}'")
+        return effective
 
     @staticmethod
     def _canonical_key(d: dict, name: str) -> str:

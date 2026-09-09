@@ -17,7 +17,14 @@ from __future__ import annotations
 
 import sys
 
-_POPUP_HWND = 0     # HWND of the popup that is currently open (0 = none)
+# HWNDs of every FilePicker window currently open that asked for Alt
+# blocking (popup + its dialogs). The hook stays installed while this list
+# is non-empty — closing ONE popup (e.g. the "file already exists" dialog
+# shown after a popup released itself) must never disable blocking while
+# another FilePicker window is still on screen, or third-party programs
+# would react to Alt chords again. The NEWEST window is the re-post target.
+_HWNDS: list = []
+_POPUP_HWND = 0     # HWND of the topmost open FilePicker window (0 = none)
 _HOOK = None        # HHOOK while installed
 _CALLBACK = None    # keeps the ctypes callback object alive
 
@@ -73,30 +80,50 @@ def should_swallow(vk: int, alt_down: bool, win_down: bool) -> bool:
 
 
 def install(popup_hwnd) -> bool:
-    """Start intercepting Alt combos while a popup (``popup_hwnd``) is open.
+    """Start intercepting Alt combos while a FilePicker window is open.
 
-    Re-entrant: installing again with a new hwnd just retargets the already
-    active hook (popups are shown one at a time). Returns True when the hook
-    is active, False off Windows or when installation failed.
+    Ref-counted: each open window (popup, duplicate dialog, ...) installs
+    itself with its own hwnd, and :func:`remove` only unhooks once every
+    window has closed. Installing again with a new hwnd while the hook is
+    already active just counts the window and retargets the re-post to the
+    newest one. Returns True when the hook is active, False off Windows or
+    when installation failed.
     """
     global _POPUP_HWND, _HOOK, _CALLBACK
     if sys.platform != "win32":
         return False
+    # winfo_id() may come back as an int or a hex/decimal string.
+    try:
+        hwnd = int(str(popup_hwnd), 0) if popup_hwnd else 0
+    except (TypeError, ValueError):
+        hwnd = 0
+    if not hwnd:
+        return False
+    if hwnd in _HWNDS:
+        # Same window installing twice: just retarget — no double count.
+        _POPUP_HWND = hwnd
+        return _HOOK is not None
+    if _HOOK is not None:
+        # Hook already active for another window: count + retarget.
+        _HWNDS.append(hwnd)
+        _POPUP_HWND = hwnd
+        return True
+    if not _setup_hook():
+        return False
+    _HWNDS.append(hwnd)
+    _POPUP_HWND = hwnd
+    return True
+
+
+def _setup_hook() -> bool:
+    """Install the WH_KEYBOARD_LL hook (Windows only, called with no hook
+    currently active). Returns True when the hook is up."""
+    global _HOOK, _CALLBACK
     try:
         import ctypes
         from ctypes import wintypes
     except Exception:
         return False
-
-    # winfo_id() may come back as an int or a hex/decimal string.
-    try:
-        _POPUP_HWND = int(str(popup_hwnd), 0) if popup_hwnd else 0
-    except (TypeError, ValueError):
-        _POPUP_HWND = 0
-    if not _POPUP_HWND:
-        return False
-    if _HOOK is not None:
-        return True  # already hooked; now retargeted
 
     class KBDLLHOOKSTRUCT(ctypes.Structure):
         _fields_ = [
@@ -148,7 +175,7 @@ def install(popup_hwnd) -> bool:
             or user32.GetAsyncKeyState(_VK_RWIN) & 0x8000
         )
         if should_swallow(vk, alt_down, win_down):
-            # Swallow for every other program; forward only to our popup so
+            # Swallow for every other program; forward only to our window so
             # FilePicker's own Alt chords keep working (even unfocused).
             user32.PostMessageW(_POPUP_HWND, wParam, vk, lParam)
             return 1  # handled — no other app ever sees this key
@@ -167,9 +194,27 @@ def install(popup_hwnd) -> bool:
     return True
 
 
-def remove() -> None:
-    """Stop intercepting Alt combos (popup closed / app exiting)."""
+def remove(hwnd=None) -> None:
+    """Stop intercepting Alt combos for *hwnd* (or the newest window).
+
+    Ref-counted: the hook stays active while ANY FilePicker window is still
+    open, retargeted to the newest remaining one; it is unhooked only when
+    the last window closes. ``hwnd`` may be omitted for backward
+    compatibility (removes the newest window).
+    """
     global _POPUP_HWND, _HOOK, _CALLBACK
+    if hwnd is not None:
+        try:
+            hwnd = int(str(hwnd), 0) if hwnd else 0
+        except (TypeError, ValueError):
+            hwnd = 0
+        if hwnd in _HWNDS:
+            _HWNDS.remove(hwnd)
+    elif _HWNDS:
+        _HWNDS.pop()
+    if _HWNDS:
+        _POPUP_HWND = _HWNDS[-1]
+        return
     _POPUP_HWND = 0
     if _HOOK is not None and sys.platform == "win32":
         try:

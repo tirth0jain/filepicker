@@ -145,6 +145,58 @@ def read_excel(path) -> Tuple[List[str], Callable[[str], List[list]], Any]:
         return wb.sheetnames, load, wb
 
 
+def _norm_highlight_word(word: str) -> str:
+    """The comparable form of one page word / highlight term word.
+
+    Lowercased, stripped of every non-alphanumeric character, so "RUBY",
+    "Ruby," and "ruby-" all compare equal.
+    """
+    return re.sub(r"[^0-9a-z]+", "", str(word).lower())
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Edit distance between two short strings (small, O(n*m) is fine)."""
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(a) + 1))
+    for j, ch_b in enumerate(b, 1):
+        cur = [j]
+        for i, ch_a in enumerate(a, 1):
+            cur.append(min(prev[i] + 1, cur[-1] + 1, prev[i - 1] + (ch_a != ch_b)))
+        prev = cur
+    return prev[-1]
+
+
+def _highlight_word_rects(terms, page_words) -> list:
+    """Rectangles of the page words that (fuzzily) match a term's words.
+
+    ``page_words`` is PyMuPDF's ``page.get_text("words")`` — tuples of
+    ``(x0, y0, x1, y1, word, block, line, word_no)``. Each significant word
+    of every term is matched against the page words: exact match for any
+    length (so the numeric serial "6" lights up only whole words — never
+    the "6" inside "26"/"196"), and a 1-letter tolerance for words of 3+
+    letters, so the mark appears even when the document spells the name
+    slightly differently from the value shown in the fields ("Sheetal Baug"
+    read vs "Sital Baug" shown). Returns a list of (x0, y0, x1, y1) tuples.
+    """
+    rects = []
+    for term in terms:
+        for word in re.split(r"[\s\-/()&,]+", term):
+            canon = _norm_highlight_word(word)
+            if not canon:
+                continue
+            for w in page_words:
+                wc = _norm_highlight_word(w[4])
+                if not wc:
+                    continue
+                if wc == canon:
+                    rects.append(w[:4])
+                elif (len(canon) >= 3 and len(wc) >= 3
+                      and _levenshtein(wc, canon) <= 1):
+                    rects.append(w[:4])
+    return rects
+
+
 # ----------------------------------------------------------------------
 # GUI preview (window or embedded pane)
 # ----------------------------------------------------------------------
@@ -437,10 +489,12 @@ class PreviewWindow:
         """Highlight the given OCR-found values in yellow on the PDF pages.
 
         Cheap by design: PyMuPDF's native text search (search_for) runs only
-        on the page being rendered — no re-OCR, no extra processing. Any
-        values the search cannot find (e.g. the phrase breaks across lines)
-        are retried word by word; nothing is highlighted when a page has no
-        text. Re-renders the current page so the marks appear.
+        on the page being rendered — no re-OCR, no extra processing. Values
+        the phrase search cannot find (e.g. the phrase breaks across lines,
+        or the document spells the name slightly differently than the value
+        shown in the fields) are matched word by word with a 1-letter
+        tolerance; digits (the serial) match whole words only. Re-renders
+        the current page so the marks appear.
         """
         self._highlight_terms = [
             str(t).strip() for t in (terms or []) if str(t).strip()
@@ -458,23 +512,50 @@ class PreviewWindow:
             rects = []
             for term in self._highlight_terms:
                 rects.extend(page.search_for(term))
+            # Word-level pass: marks each significant word of every term
+            # (exact, or within one letter for 3+ char words) and matches
+            # digits as whole words, so "Sheetal Baug" in the PDF is marked
+            # even when the popup shows the near-matched "Sital Baug", and a
+            # serial of "6" never lights up inside "26" or "196".
+            try:
+                page_words = page.get_text("words")
+                if page_words:
+                    rects.extend(
+                        _highlight_word_rects(self._highlight_terms, page_words)
+                    )
+            except Exception:
+                pass
             if not rects:
-                # Multi-word phrases often wrap across lines inside the PDF —
-                # fall back to searching each significant word on its own.
-                for term in self._highlight_terms:
-                    for word in re.split(r"[\s\-/()&,]+", term):
-                        if len(word) >= 3:
-                            rects.extend(page.search_for(word))
-            if not rects:
+                return
+            # Normalise every found rect (fitz.Rect from search_for, plain
+            # 4-tuples from the word pass) and drop duplicate boxes (the
+            # phrase pass and the word pass often find the same span twice).
+            def _xy(r) -> tuple:
+                if hasattr(r, "x0"):
+                    return (float(r.x0), float(r.y0),
+                            float(r.x1), float(r.y1))
+                return (float(r[0]), float(r[1]),
+                        float(r[2]), float(r[3]))
+
+            deduped = []
+            seen = set()
+            for r in rects:
+                xy = _xy(r)
+                key = (round(xy[0], 2), round(xy[1], 2),
+                       round(xy[2], 2), round(xy[3], 2))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(xy)
+            if not deduped:
                 return
             from PIL import Image as _Image, ImageDraw
 
             overlay = _Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            for rect in rects:
+            for (x0, y0, x1, y1) in deduped:
                 draw.rectangle(
-                    [rect.x0 * scale, rect.y0 * scale,
-                     rect.x1 * scale, rect.y1 * scale],
+                    [x0 * scale, y0 * scale, x1 * scale, y1 * scale],
                     fill=(255, 224, 0, 90),
                 )
             img.paste(

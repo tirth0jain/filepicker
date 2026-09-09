@@ -98,7 +98,29 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
 
     callback = {"value": None}
 
+    # Alt-block the dialog too: the popup released itself (and its hook)
+    # before the duplicate question appears, so without this the gap would
+    # let every other program react to Alt+<key> again while this dialog is
+    # open. Ref-counted with the popup's hook (see altblock.remove(hwnd)).
+    _alt_active = False
+    try:
+        import altblock as _altblock
+        _alt_active = _altblock.install(dialog.winfo_id())
+    except Exception:
+        _alt_active = False
+
+    def cleanup() -> None:
+        nonlocal _alt_active
+        if _alt_active:
+            try:
+                import altblock as _altblock
+                _altblock.remove(dialog.winfo_id())
+            except Exception:
+                pass
+            _alt_active = False
+
     def choose(choice: str) -> None:
+        cleanup()
         callback["value"] = choice
         try:
             dialog.destroy()
@@ -153,9 +175,9 @@ def ask_duplicate_action(root, filename: str, existing_path: Path) -> str:
     """Ask what to do when the output filename already exists in sorted.
 
     Blocks (modal) until the user answers. Returns ``"skip"`` — keep the old
-    file and leave the new download in the watch folder — or ``"replace"`` —
-    overwrite the old file with the new one. Closing the dialog counts as
-    ``"skip"`` (the safe default).
+    file (the caller deletes the new download from the watch folder) — or
+    ``"replace"`` — overwrite the old file with the new one. Closing the
+    dialog counts as ``"skip"`` (the safe default).
     """
     dialog, callback = _duplicate_dialog_ui(root, filename, existing_path)
     dialog.wait_window()
@@ -481,8 +503,12 @@ class SearchableDropdown(ctk.CTkFrame):
         return "break"
 
     def _on_key(self, _e=None) -> None:
-        # Don't reopen immediately after Enter (Return) — _on_return already closed.
-        if _e is not None and getattr(_e, "keysym", None) == "Return":
+        # Don't reopen immediately after Enter (Return) — _on_return already
+        # closed — and never re-filter/reset after Up/Down: the arrow keys
+        # are handled by _move() and re-running _update_listbox() here would
+        # snap the highlight BACK to the top item ("arrow keys always reset
+        # back to the first match").
+        if _e is not None and getattr(_e, "keysym", "") in ("Return", "Up", "Down"):
             return
         self._update_listbox()
         if self._listbox.size() > 0 and self._listbox.get(0) != "(no matches)":
@@ -2003,12 +2029,21 @@ class FilePickerPopup:
         company = (result.get("company") or "").strip()
         client = (result.get("client") or "").strip()
         site = (result.get("site") or "").strip()
-        if not (company or client or site):
-            return changed
 
-        # Remember the raw OCR values so the preview can highlight exactly
-        # what the model read off the document (in yellow).
-        self._ocr_highlight_terms = [v for v in (company, client, site) if v]
+        # Remember the RAW OCR values (incl. the serial) so the preview can
+        # highlight exactly what the model read off the document — even when
+        # the field ends up showing the mapped or near-matched name instead.
+        self._ocr_highlight_terms = [
+            v for v in (company, client, site, serial) if v
+        ]
+        if not (company or client or site):
+            # Serial-only result: still highlight the serial if possible.
+            if serial and self._preview is not None:
+                try:
+                    self._preview.set_highlight_terms(self._ocr_highlight_terms)
+                except Exception:
+                    pass
+            return changed
 
         # Name MAPPING (the 🗺 Map buttons): a name the user mapped to
         # another one is switched HERE, before any canonicalization, so OCR's
@@ -2051,6 +2086,15 @@ class FilePickerPopup:
             if effective_client:
                 site = self._ensure_site_in_config(effective_client, site)
             self.site_dropdown.set(site)
+
+        # Also mark the values FINALLY shown in the fields (post-mapping and
+        # post-near-match) — the preview searches BOTH spellings, so the
+        # mark appears whatever the document wrote ("Kalpataru Elitus Tower
+        # 2" read, catalog "Kalpataru Elitus" shown; "Raymond Premium T-B"
+        # read, "Raymond Premium" shown).
+        for v in (client_value if client else "", site):
+            if v and v not in self._ocr_highlight_terms:
+                self._ocr_highlight_terms.append(v)
 
         self._refresh_preview()
         # Yellow-highlight the OCR-found values in the open preview (the
@@ -2266,11 +2310,13 @@ class FilePickerPopup:
         except Exception:
             pass
         # Release the global Alt-block hook (keys return to normal for every
-        # other program once no popup is on screen).
+        # other program once no FilePicker window is on screen). Ref-counted:
+        # removing THIS window's hwnd never disables blocking while another
+        # FilePicker window (e.g. the duplicate dialog) is still open.
         if getattr(self, "_alt_block_active", False):
             try:
                 import altblock
-                altblock.remove()
+                altblock.remove(self.window.winfo_id())
             except Exception:
                 pass
             self._alt_block_active = False

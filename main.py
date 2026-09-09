@@ -354,10 +354,20 @@ class FilePickerController:
         if existing:
             choice = ask_duplicate_action(self._root, request.source.name, existing[0])
             if choice != "replace":
-                self._set_status(
-                    f"Skipped — '{existing[0].name}' already exists in sorted "
-                    "folders; new file left in watch folder."
-                )
+                # Skip New File: the old sorted copy wins, and the new
+                # download is removed from the watch folder (the popup
+                # already released the file, so nothing holds it open).
+                if self._delete_original(request.source):
+                    self._set_status(
+                        f"Skipped — '{existing[0].name}' already exists in "
+                        "sorted folders; new download deleted from watch folder."
+                    )
+                else:
+                    self._set_status(
+                        f"Skipped — '{existing[0].name}' already exists in "
+                        "sorted folders; could not delete the new download "
+                        "(still locked) — remove it manually."
+                    )
                 return
             request.replace = True
 
