@@ -29,6 +29,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -76,6 +77,16 @@ MAX_CONCURRENT_OCR = 10
 # "Python-urllib" user agent (HTTP 403, error code 1010), so every request
 # carries a browser-like application UA.
 _UA = f"FilePicker/{VERSION} (Windows; DeliveryNote OCR)"
+
+# HTTP statuses that deserve an automatic retry: gateway-side errors and
+# rate limits (the user saw "OpenCode Go API error (500) ... Internal server
+# error" — a transient gateway failure that usually succeeds on retry).
+# Everything else (400/401/403/404/...) is permanent: fail immediately.
+OCR_RETRY_STATUS = {429, 500, 502, 503, 504}
+# Extra attempts after the first call: 1 initial + 2 retries = 3 maximum.
+OCR_RETRY_ATTEMPTS = 2
+# Seconds to wait before each retry (short backoff: 2s, then 5s).
+OCR_RETRY_BACKOFF = (2.0, 5.0)
 
 # OpenCode Go (see https://opencode.ai/docs/go/) now requires every request
 # to carry a stable conversation/session ID in `x-opencode-session` —
@@ -393,14 +404,20 @@ def extract_delivery_note(
     timeout: float = OCR_TIMEOUT,
     known_sites: Optional[List[str]] = None,
     known_clients: Optional[List[str]] = None,
+    on_error: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site} (None on failure).
 
     When ``known_sites`` / ``known_clients`` are given (names already in the
     config), the prompt is rebuilt with them so the model resolves near-same
-    site/client spellings to the existing names. Never raises:
+    site/client spellings to the existing names. Transient gateway failures
+    (HTTP 429/500/502/503/504) are retried automatically with a short
+    backoff (:data:`OCR_RETRY_ATTEMPTS` x :data:`OCR_RETRY_BACKOFF`); other
+    errors fail immediately. When the call ultimately fails and *on_error*
+    is given, it is called with a one-line message (the same text that is
+    logged) — callers use it to tell the user WHY OCR failed. Never raises:
     network/render/model errors are logged and return None so the popup can
-    simply skip auto-fill.
+    simply skip auto-fill (or offer a retry).
     """
     if known_sites is not None or known_clients is not None:
         prompt = build_ocr_prompt(known_sites, known_clients)
@@ -433,20 +450,44 @@ def extract_delivery_note(
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = ""
+    def _report(msg: str) -> None:
+        if on_error is not None:
+            try:
+                on_error(msg)
+            except Exception:
+                pass
+
+    attempt = 0
+    while True:
         try:
-            detail = e.read().decode("utf-8", errors="ignore")[:300]
-        except Exception:
-            pass
-        print(f"[ocr] OpenCode Go API error ({e.code}): {detail}")
-        return None
-    except Exception as exc:
-        print(f"[ocr] OpenCode Go API call failed: {exc}")
-        return None
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="ignore")[:300]
+            except Exception:
+                pass
+            msg = f"OpenCode Go API error ({e.code})"
+            if detail:
+                msg += f": {detail}"
+            # Gateway hiccup / rate limit: wait briefly and try again.
+            if e.code in OCR_RETRY_STATUS and attempt < OCR_RETRY_ATTEMPTS:
+                attempt += 1
+                delay = OCR_RETRY_BACKOFF[attempt - 1]
+                print(f"[ocr] {msg} — retry {attempt}/{OCR_RETRY_ATTEMPTS} "
+                      f"in {delay:.0f}s")
+                time.sleep(delay)
+                continue
+            print(f"[ocr] {msg}")
+            _report(msg)
+            return None
+        except Exception as exc:
+            msg = f"OpenCode Go API call failed: {exc}"
+            print(f"[ocr] {msg}")
+            _report(msg)
+            return None
 
     try:
         content = data["choices"][0]["message"].get("content") or ""
@@ -505,6 +546,10 @@ class OcrPool:
         self._queue: "queue.Queue" = queue.Queue()
         self._lock = threading.Lock()
         self._results: Dict[str, Optional[Dict[str, Optional[str]]]] = {}
+        # Per-file failure message (only when the last run FAILED — set by
+        # the worker from extract_delivery_note's on_error callback). Used
+        # by the popup to say WHY OCR failed and offer a retry.
+        self._errors: Dict[str, str] = {}
         self._active: set = set()          # paths queued or running
         self._waiters: Dict[str, List[Callable]] = {}
         self._workers = [
@@ -527,6 +572,47 @@ class OcrPool:
         """The cached OCR result for *file_path* (None if not finished yet)."""
         with self._lock:
             return self._results.get(self._key(file_path))
+
+    def get_error(self, file_path) -> Optional[str]:
+        """The failure message for *file_path*'s LAST run, if it failed.
+
+        Returns None when the last run succeeded (or is still in flight).
+        The popup shows this to the user ("OCR failed (API error 500) …")
+        and offers the retry button.
+        """
+        with self._lock:
+            return self._errors.get(self._key(file_path))
+
+    def retry(self, file_path, on_done: Optional[Callable] = None) -> bool:
+        """Forget any cached result/error for *file_path* and re-run OCR.
+
+        Used by the popup's "↻ Retry OCR" button: the stale cache entry (a
+        failure, or an earlier read the user wants replaced) is dropped so a
+        fresh vision call actually happens, and the new result (or error)
+        replaces it when done. Queueing semantics are identical to
+        :meth:`submit`: an already-running file just gets another waiter.
+        Returns True when a new call was queued.
+        """
+        if not self.available:
+            if on_done is not None:
+                try:
+                    on_done(None)
+                except Exception:
+                    pass
+            return False
+        key = self._key(file_path)
+        with self._lock:
+            self._results.pop(key, None)
+            self._errors.pop(key, None)
+            if key in self._active:
+                if on_done is not None:
+                    self._waiters.setdefault(key, []).append(on_done)
+                return False
+            self._active.add(key)
+            if on_done is not None:
+                self._waiters.setdefault(key, []).append(on_done)
+            self._queue.put((Path(file_path), key))
+            return True
 
     def submit(self, file_path, on_done: Optional[Callable] = None) -> bool:
         """Queue OCR for *file_path* (no-op when already queued or finished).
@@ -597,10 +683,11 @@ class OcrPool:
                 known_clients = None
         try:
             print(f"[ocr] reading {file_path.name} …")
+            errors: List[str] = []
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
                 api_base=self._api_base, known_sites=known_sites,
-                known_clients=known_clients,
+                known_clients=known_clients, on_error=errors.append,
             )
         except Exception as exc:  # belt & braces: extract never raises
             print(f"[ocr] OCR error for {file_path}: {exc}")
@@ -613,6 +700,10 @@ class OcrPool:
             print(f"[ocr] {file_path.name}: no fields extracted")
         with self._lock:
             self._results[key] = result
+            if errors:
+                self._errors[key] = errors[-1]
+            else:
+                self._errors.pop(key, None)
             self._active.discard(key)
             waiters = list(self._waiters.pop(key, []))
         for cb in waiters:

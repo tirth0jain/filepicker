@@ -93,6 +93,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # apps fire on Alt+letters); the popup itself still receives every chord.
     # Set to false to let other programs see Alt normally.
     "block_alt_for_other_apps": True,
+    # Name MAPPING (the 🗺 Map buttons next to Client/Site): when a name is
+    # mapped — {source: target} — any popup that reads the SOURCE name
+    # (from OCR, or typed/saved manually) switches it to the TARGET name
+    # instead. This is how a recurring OCR spelling is pinned to the
+    # catalog name it belongs to without renaming anything. client_aliases
+    # maps clients to clients; site_aliases maps sites to sites. Both are
+    # shared config (synced/pushed like clients & materials).
+    "client_aliases": {},
+    "site_aliases": {},
     # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
     # OpenAI-compatible API). Overridable per machine in config.json.
     "ocr_model": OCR_MODEL,
@@ -587,7 +596,8 @@ class ConfigManager:
             return None
         with self._lock:
             changed = False
-            for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
+            for key in ("companies", "company_initials", "clients", "materials",
+                        "doc_types", "client_aliases", "site_aliases"):
                 if key in remote and remote[key] != self._data.get(key):
                     self._data[key] = deepcopy(remote[key])
                     changed = True
@@ -630,7 +640,8 @@ class ConfigManager:
             # disappear when you moved to the next field).
             merged = self._merge_for_push(remote, self._data)
             changed = False
-            for key in ("companies", "company_initials", "clients", "materials", "doc_types"):
+            for key in ("companies", "company_initials", "clients", "materials",
+                        "doc_types", "client_aliases", "site_aliases"):
                 if key in merged and merged[key] != self._data.get(key):
                     self._data[key] = merged[key]
                     changed = True
@@ -740,7 +751,8 @@ class ConfigManager:
             merged = self._merge_for_push(remote_data, local_data)
             # If nothing to push (remote already has our catalog), skip
             # Compare only the catalog keys for cheap equality
-            catalog_keys = ("companies", "company_initials", "clients", "materials", "doc_types")
+            catalog_keys = ("companies", "company_initials", "clients", "materials",
+                            "doc_types", "client_aliases", "site_aliases")
             if all(merged.get(k) == remote_data.get(k) for k in catalog_keys):
                 # For a brand-new file (remote_data empty) this is never true
                 if remote_data:
@@ -1037,6 +1049,16 @@ class ConfigManager:
         merged_mat.update({str(k): str(v) for k, v in loc_mat.items()})
         merged["materials"] = merged_mat
 
+        # client_aliases / site_aliases — dict union, local wins (same rule
+        # as materials: a mapping added locally but not yet pushed is never
+        # lost when the remote is still stale).
+        for alias_key in ("client_aliases", "site_aliases"):
+            rem_al = dict(remote.get(alias_key, {}))
+            loc_al = dict(local.get(alias_key, {}))
+            merged_al = dict(rem_al)
+            merged_al.update({str(k): str(v) for k, v in loc_al.items()})
+            merged[alias_key] = merged_al
+
         # doc_types — union list
         rem_docs = list(remote.get("doc_types", []))
         loc_docs = list(local.get("doc_types", []))
@@ -1181,6 +1203,24 @@ class ConfigManager:
         Alt material hotkeys)."""
         return bool(self.load().get("block_alt_for_other_apps", True))
 
+    @property
+    def client_aliases(self) -> Dict[str, str]:
+        """Return a copy of the {source client -> mapped client} map.
+
+        Set with :meth:`set_client_alias`; OCR/save resolution is
+        :meth:`resolve_client`.
+        """
+        aliases = self.load().get("client_aliases", {})
+        return {str(k): str(v) for k, v in aliases.items()
+                if isinstance(v, str)}
+
+    @property
+    def site_aliases(self) -> Dict[str, str]:
+        """Return a copy of the {source site -> mapped site} map."""
+        aliases = self.load().get("site_aliases", {})
+        return {str(k): str(v) for k, v in aliases.items()
+                if isinstance(v, str)}
+
     # ------------------------------------------------------------------
     # Mutators (each persists to disk)
     # ------------------------------------------------------------------
@@ -1304,3 +1344,107 @@ class ConfigManager:
                 changed = True
         if changed:
             self._mark_push_pending(reason=f"add doc type '{doc_type}'")
+
+    # ------------------------------------------------------------------
+    # Name MAPPING (the 🗺 Map buttons): source name -> target name
+    # ------------------------------------------------------------------
+    def _set_alias(self, key: str, source: str, target: str, label: str) -> bool:
+        """Shared implementation of set_client_alias/set_site_alias.
+
+        Maps *source* -> *target* in the ``key`` alias dict and persists.
+        Keys are unique case-insensitively: setting an alias whose source
+        already exists (any casing) updates that entry instead of adding a
+        duplicate. Push is deferred (a file must be saved first).
+        """
+        source = (source or "").strip()
+        target = (target or "").strip()
+        if not source or not target:
+            return False
+        changed = False
+        with self._lock:
+            data = self.load()
+            aliases = data.get(key)
+            if not isinstance(aliases, dict):
+                aliases = {}
+                data[key] = aliases
+            canon = source
+            for k in list(aliases):
+                if str(k).lower() == source.lower():
+                    canon = str(k)
+                    break
+            if aliases.get(canon) != target:
+                aliases[canon] = target
+                self.save()
+                changed = True
+        if changed:
+            self._mark_push_pending(reason=f"map {label} '{source}' -> '{target}'")
+        return changed
+
+    def set_client_alias(self, source: str, target: str) -> bool:
+        """Map the *source* client name to the *target* client name.
+
+        Whenever OCR (or a saved popup) produces the source name, it is
+        switched to the target. Returns True when the mapping changed.
+        """
+        return self._set_alias("client_aliases", source, target, "client")
+
+    def set_site_alias(self, source: str, target: str) -> bool:
+        """Map the *source* site name to the *target* site name (see
+        :meth:`set_client_alias`; sites are mapped globally, not per-client)."""
+        return self._set_alias("site_aliases", source, target, "site")
+
+    def _remove_alias(self, key: str, source: str, label: str) -> bool:
+        source = (source or "").strip()
+        if not source:
+            return False
+        changed = False
+        with self._lock:
+            aliases = self.load().get(key)
+            if isinstance(aliases, dict):
+                for k in list(aliases):
+                    if str(k).lower() == source.lower():
+                        del aliases[k]
+                        self.save()
+                        changed = True
+                        break
+        if changed:
+            self._mark_push_pending(reason=f"unmap {label} '{source}'")
+        return changed
+
+    def remove_client_alias(self, source: str) -> bool:
+        """Delete the client mapping whose source is *source* (any casing)."""
+        return self._remove_alias("client_aliases", source, "client")
+
+    def remove_site_alias(self, source: str) -> bool:
+        """Delete the site mapping whose source is *source* (any casing)."""
+        return self._remove_alias("site_aliases", source, "site")
+
+    def _resolve_alias(self, key: str, name: str) -> Optional[str]:
+        """The mapped target for *name* in the ``key`` alias dict, else None.
+
+        Exact case-insensitive source match first, then the near-match rule
+        against the alias sources — so OCR's slightly different re-spelling
+        ("kalpataru elit" for a "Kalpataru Elitus" alias key) still hits
+        the mapping. See :func:`find_near_name` for the near-match contract.
+        """
+        name = (name or "").strip()
+        if not name:
+            return None
+        aliases = self.load().get(key)
+        if not isinstance(aliases, dict) or not aliases:
+            return None
+        for k, v in aliases.items():
+            if str(k).strip().lower() == name.lower():
+                return str(v)
+        near = find_near_name([str(k) for k in aliases], name)
+        if near is not None:
+            return str(aliases.get(near))
+        return None
+
+    def resolve_client(self, name: str) -> Optional[str]:
+        """The client that *name* is mapped to (an alias target), else None."""
+        return self._resolve_alias("client_aliases", name)
+
+    def resolve_site(self, name: str) -> Optional[str]:
+        """The site that *name* is mapped to (an alias target), else None."""
+        return self._resolve_alias("site_aliases", name)

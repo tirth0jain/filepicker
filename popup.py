@@ -508,6 +508,199 @@ class SearchableDropdown(ctk.CTkFrame):
         self._on_key()
 
 
+class MappingDialog:
+    """Modal "Map Client / Map Site" editor (opened by the 🗺 Map buttons).
+
+    Maps the name the current document shows (the alias SOURCE) to the
+    catalog name to use instead (the TARGET): from then on, whenever OCR
+    reads the source name — or a popup is saved with it — the target is
+    used instead. Shows the existing mappings in a searchable list and lets
+    the user add / update / remove entries, using the same search-as-you-
+    type dropdowns the Client/Site fields use.
+    """
+
+    def __init__(self, parent, kind: str, config, names: List[str],
+                 current: str = "",
+                 on_changed: Optional[Callable[[], None]] = None) -> None:
+        self.kind = kind  # "client" | "site"
+        self.config = config
+        self._on_changed = on_changed
+        self._rows: List[tuple] = []  # [(source, target), ...] in the list
+
+        self.win = ctk.CTkToplevel(parent)
+        self.win.title("Map Client" if kind == "client" else "Map Site")
+        self.win.configure(fg_color=_BG)
+        self.win.resizable(False, False)
+        self.win.attributes("-topmost", True)
+        try:
+            self.win.transient(parent)
+        except Exception:
+            pass
+        try:
+            sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+            w, h = 560, 640
+            self.win.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 3, 0)}")
+        except tk.TclError:
+            pass
+        self.win.lift()
+
+        body = ctk.CTkFrame(self.win, fg_color=_BG)
+        body.pack(fill="both", expand=True, padx=16, pady=12)
+
+        what = "client" if kind == "client" else "site"
+        ctk.CTkLabel(
+            body,
+            text=f"When OCR (or this popup) reads the name on the left, "
+                 f"FilePicker switches it to the name on the right. Future "
+                 f"downloads of the same {what} are filed under the mapped "
+                 f"name automatically.",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 10))
+
+        ctk.CTkLabel(body, text="Document shows / OCR reads:",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+        self.source_dd = SearchableDropdown(body, values=list(names),
+                                            on_change=None)
+        self.source_dd.entry.configure(
+            placeholder_text="Search or type the name the document has…",
+        )
+        self.source_dd.set(current)
+
+        ctk.CTkLabel(body, text="Map to:",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(6, 2))
+        self.target_dd = SearchableDropdown(body, values=list(names),
+                                            on_change=None)
+        self.target_dd.entry.configure(
+            placeholder_text="Search or type the name to use instead…",
+        )
+
+        self._error_label = ctk.CTkLabel(body, text="",
+                                         font=ctk.CTkFont(size=11),
+                                         text_color=_DANGER, anchor="w")
+        self._error_label.pack(fill="x", pady=(2, 0))
+
+        ctk.CTkButton(
+            body, text="＋ Add / Update Mapping", command=self._apply_map,
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=34,
+            font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff",
+        ).pack(fill="x", pady=(4, 10))
+
+        ctk.CTkLabel(body, text="Existing mappings:",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+        self._filter_entry = ctk.CTkEntry(
+            body, fg_color=_BG_FIELD, border_color=_BG_FIELD, text_color=_TEXT,
+            placeholder_text="Search mappings…",
+        )
+        self._filter_entry.pack(fill="x", pady=(0, 4))
+        self._filter_entry.bind("<KeyRelease>", lambda _e: self._refresh_list())
+
+        self._listbox = tk.Listbox(
+            body, bg=_BG_FIELD, fg=_TEXT, selectbackground=_ACCENT,
+            selectforeground="#ffffff", activestyle="none", highlightthickness=0,
+            bd=0, font=tkfont.Font(family="Segoe UI", size=11),
+            exportselection=False, height=8,
+        )
+        self._listbox.pack(fill="both", expand=True)
+
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(
+            btn_row, text="🗑 Remove Selected", command=self._remove_selected,
+            fg_color="#3a2b2b", hover_color="#4a3535", height=32,
+            font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        ctk.CTkButton(
+            btn_row, text="Close", command=self._close,
+            fg_color=_BG_FIELD, hover_color="#33334a", height=32,
+            font=ctk.CTkFont(size=12), text_color=_TEXT,
+        ).pack(side="left", expand=True, fill="x")
+
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self._refresh_list()
+        try:
+            self.source_dd.entry.focus_set()
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    def _alias_map(self) -> Dict[str, str]:
+        if self.kind == "client":
+            return self.config.client_aliases
+        return self.config.site_aliases
+
+    def _set_alias(self, source: str, target: str) -> bool:
+        if self.kind == "client":
+            return self.config.set_client_alias(source, target)
+        return self.config.set_site_alias(source, target)
+
+    def _remove_alias(self, source: str) -> bool:
+        if self.kind == "client":
+            return self.config.remove_client_alias(source)
+        return self.config.remove_site_alias(source)
+
+    def _apply_map(self) -> None:
+        source = self.source_dd.get().strip()
+        target = self.target_dd.get().strip()
+        if not source or not target:
+            self._error_label.configure(text="⚠ Both fields are required.")
+            return
+        if source.lower() == target.lower():
+            self._error_label.configure(
+                text="⚠ Source and target are the same name.")
+            return
+        changed = self._set_alias(source, target)
+        self._error_label.configure(
+            text="✓ Mapping saved — applied from the next OCR read."
+                 if changed else "✓ Mapping already set.")
+        self._refresh_list()
+        if self._on_changed is not None:
+            try:
+                self._on_changed()
+            except Exception:
+                pass
+
+    def _refresh_list(self) -> None:
+        rows = [(str(k), str(v)) for k, v in self._alias_map().items()]
+        text = self._filter_entry.get().strip().lower()
+        if text:
+            rows = [r for r in rows if text in f"{r[0]} {r[1]}".lower()]
+        rows.sort(key=lambda r: r[0].lower())
+        self._rows = rows
+        self._listbox.delete(0, "end")
+        if not rows:
+            self._listbox.insert("end", "(no mappings)")
+            try:
+                self._listbox.itemconfig(0, fg=_TEXT_MUTED)
+            except tk.TclError:
+                pass
+            return
+        for src, tgt in rows:
+            self._listbox.insert("end", f"{src}  →  {tgt}")
+
+    def _remove_selected(self) -> None:
+        sel = self._listbox.curselection()
+        if not sel or not self._rows:
+            return
+        source = self._rows[sel[0]][0]
+        self._remove_alias(source)
+        self._refresh_list()
+        if self._on_changed is not None:
+            try:
+                self._on_changed()
+            except Exception:
+                pass
+
+    def _close(self) -> None:
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 class FilePickerPopup:
     """Modal dialog that gathers metadata and hands it to a callback."""
 
@@ -815,11 +1008,23 @@ class FilePickerPopup:
         self._banner_size.pack(anchor="w", padx=12, pady=(0, 6))
 
         # OCR status line — shows OCR progress, or the exact reason OCR is off
-        # (disabled in config / no API key), never silently nothing.
+        # (disabled in config / no API key), never silently nothing. The
+        # "↻ Retry OCR" button on the right appears once OCR finished (filled
+        # or failed) and re-runs the vision call for this file.
+        self._ocr_row = ctk.CTkFrame(f, fg_color="transparent")
+        self._ocr_row.pack(fill="x", pady=(0, 2))
         self._ocr_label = ctk.CTkLabel(
-            f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED, anchor="w",
+            self._ocr_row, text="", font=ctk.CTkFont(size=11),
+            text_color=_TEXT_MUTED, anchor="w",
         )
-        self._ocr_label.pack(fill="x", pady=(0, 2))
+        self._ocr_label.pack(side="left", fill="x", expand=True)
+        self.retry_ocr_btn = ctk.CTkButton(
+            self._ocr_row, text="↻ Retry OCR", width=92, height=22,
+            fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
+            font=ctk.CTkFont(size=11), command=self._retry_ocr,
+        )
+        self.retry_ocr_btn.pack(side="right")
+        self.retry_ocr_btn.pack_forget()  # shown only after OCR finished/failed
 
         # -- Company ----------------------------------------------------
         ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
@@ -832,8 +1037,20 @@ class FilePickerPopup:
         self.company_combo.pack(fill="x", pady=(0, 6))
 
         # -- Client -----------------------------------------------------
-        ctk.CTkLabel(f, text="Client", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
+        client_header = ctk.CTkFrame(f, fg_color="transparent")
+        client_header.pack(fill="x", pady=(0, 1))
+        ctk.CTkLabel(client_header, text="Client",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(side="left")
+        # 🗺 Map: alias a client name the document shows/OCR reads to another
+        # client — future popups auto-switch the mapped name to its target.
+        self.client_map_btn = ctk.CTkButton(
+            client_header, text="🗺 Map", width=72, height=22,
+            fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._open_mapping_dialog("client"),
+        )
+        self.client_map_btn.pack(side="right")
         self.client_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_client_change,
         )
@@ -842,8 +1059,18 @@ class FilePickerPopup:
         )
 
         # -- Site -------------------------------------------------------
-        ctk.CTkLabel(f, text="Site", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
+        site_header = ctk.CTkFrame(f, fg_color="transparent")
+        site_header.pack(fill="x", pady=(0, 1))
+        ctk.CTkLabel(site_header, text="Site",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=_TEXT_MUTED).pack(side="left")
+        self.site_map_btn = ctk.CTkButton(
+            site_header, text="🗺 Map", width=72, height=22,
+            fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._open_mapping_dialog("site"),
+        )
+        self.site_map_btn.pack(side="right")
         self.site_dropdown = SearchableDropdown(
             f, values=[], on_change=self._on_site_change,
         )
@@ -1497,6 +1724,58 @@ class FilePickerPopup:
         self._refresh_preview()
 
     # ------------------------------------------------------------------
+    # Name MAPPING (the 🗺 Map buttons next to Client/Site)
+    # ------------------------------------------------------------------
+    def _open_mapping_dialog(self, kind: str) -> None:
+        """Open the Map <Client|Site> editor for *kind*.
+
+        The dialog lists the existing mappings (searchable) and lets the
+        user map the name the current document shows (pre-filled from the
+        field) to the name to use instead. Future OCR reads of the mapped
+        source switch to the target automatically.
+        """
+        if kind == "client":
+            names = list(self.config.clients.keys())
+            current = self.client_dropdown.get().strip()
+        else:
+            names = self.config.all_sites()
+            current = self._current_site().strip()
+        MappingDialog(
+            self.window, kind=kind, config=self.config,
+            names=names, current=current,
+            on_changed=lambda k=kind: self._apply_mapping_to_current(k),
+        )
+
+    def _apply_mapping_to_current(self, kind: str) -> None:
+        """After a mapping is added/removed, switch the popup's field if it
+        shows the (now mapped) source name.
+
+        The mapping is "the name this document has → the name to use", so a
+        just-mapped source visible in the current popup switches to the
+        target right away — the same rule OCR will follow for future popups.
+        """
+        try:
+            if kind == "client":
+                cur = self.client_dropdown.get().strip()
+                mapped = self.config.resolve_client(cur)
+                if mapped and mapped != cur:
+                    self.client_dropdown.set(mapped)
+                    self._client_var.set(mapped)
+                    self._populate_sites(mapped)
+                    self._refresh_preview()
+            else:
+                cur = self._current_site().strip()
+                mapped = self.config.resolve_site(cur)
+                if mapped and mapped != cur:
+                    client = self._client_var.get().strip()
+                    site = self._ensure_site_in_config(client, mapped) \
+                        if client else mapped
+                    self.site_dropdown.set(site)
+                    self._refresh_preview()
+        except Exception as exc:
+            print(f"[filepicker] mapping apply error: {exc}")
+
+    # ------------------------------------------------------------------
     # Generic small inline prompt
     # ------------------------------------------------------------------
     def _ask_text(self, title: str, label: str, default: str, placeholder: str,
@@ -1550,6 +1829,70 @@ class FilePickerPopup:
         except Exception:
             pass
 
+    def _set_ocr_retry_visible(self, visible: bool) -> None:
+        """Show/hide the "↻ Retry OCR" button (visible once OCR finished)."""
+        btn = getattr(self, "retry_ocr_btn", None)
+        if btn is None:
+            return
+        try:
+            if visible:
+                btn.pack(side="right")
+            else:
+                btn.pack_forget()
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _short_ocr_error(err: str) -> str:
+        """A one-line popup status for an OCR failure message.
+
+        "OpenCode Go API error (500): {...}" becomes
+        "OCR failed (API error 500) — click ↻ Retry OCR". Anything else is
+        generic. The full message stays in the log.
+        """
+        if err.startswith("OpenCode Go API error ("):
+            rest = err[len("OpenCode Go API error ("):]
+            code = rest.split(")", 1)[0] if ")" in rest else ""
+            if code.isdigit():
+                return f"OCR failed (API error {code}) — click ↻ Retry OCR"
+        return "OCR failed — click ↻ Retry OCR"
+
+    def _retry_ocr(self) -> None:
+        """Re-run OCR for this file (the "↻ Retry OCR" button).
+
+        The pool forgets the failed (or stale) cached result and makes a
+        fresh vision call; the outcome is applied exactly like the first
+        read (fields the user already filled are never clobbered).
+        """
+        pool = getattr(self, "ocr_pool", None)
+        if pool is None or not pool.available:
+            return
+        try:
+            self.retry_ocr_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._set_ocr_status("OCR: retrying…", _ACCENT)
+
+        def on_done(result) -> None:
+            def apply() -> None:
+                try:
+                    if not self.window.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                try:
+                    self.retry_ocr_btn.configure(state="normal")
+                except Exception:
+                    pass
+                self._apply_ocr_outcome(result)
+
+            try:
+                self.window.after(0, apply)
+            except tk.TclError:
+                pass
+
+        pool.retry(self.file_path, on_done)
+
     def _start_ocr(self) -> None:
         """Consume the background OCR result for this file (if any).
 
@@ -1599,15 +1942,26 @@ class FilePickerPopup:
 
     def _apply_ocr_outcome(self, result) -> None:
         """Update the status line + fields once an OCR result is available."""
+        err = None
+        if getattr(self, "ocr_pool", None) is not None:
+            try:
+                err = self.ocr_pool.get_error(self.file_path)
+            except Exception:
+                err = None
         if not result or not any(result.values()):
             # OCR could not read the document — most downloads still carry the
             # Delivery Note number in the file name, so back-fill the serial.
-            if self._apply_serial_from_filename():
+            # When the pool knows WHY it failed (e.g. a 500 gateway error),
+            # say so and offer the retry button instead of a bare message.
+            if err:
+                self._set_ocr_status(self._short_ocr_error(err), _DANGER)
+            elif self._apply_serial_from_filename():
                 self._set_ocr_status(
                     "OCR: could not read document — serial from filename", _SUCCESS
                 )
             else:
                 self._set_ocr_status("OCR: could not read document")
+            self._set_ocr_retry_visible(True)
             return
         changed = self._apply_ocr_result(result)
         # OCR missed the "Delivery Note No." field but the file name usually
@@ -1619,6 +1973,7 @@ class FilePickerPopup:
             else "OCR: done (fields already filled)",
             _SUCCESS,
         )
+        self._set_ocr_retry_visible(True)
 
     def _apply_ocr_result(self, result: Dict[str, str]) -> bool:
         """Pre-fill Company/Client/Site/Serial from the OCR table.
@@ -1654,6 +2009,18 @@ class FilePickerPopup:
         # Remember the raw OCR values so the preview can highlight exactly
         # what the model read off the document (in yellow).
         self._ocr_highlight_terms = [v for v in (company, client, site) if v]
+
+        # Name MAPPING (the 🗺 Map buttons): a name the user mapped to
+        # another one is switched HERE, before any canonicalization, so OCR's
+        # source name never reaches the fields — the mapped target is used.
+        # ("...after getting ocr, the program auto maps and switches it to
+        # the mapped one".)
+        mapped_client = self.config.resolve_client(client)
+        if mapped_client:
+            client = mapped_client
+        mapped_site = self.config.resolve_site(site)
+        if mapped_site:
+            site = mapped_site
 
         # Company (CTkOptionMenu): canonical catalog spelling when a
         # case-insensitive match exists, else keep the OCR text as-is (and
@@ -1798,6 +2165,21 @@ class FilePickerPopup:
             except Exception:
                 pass
             return
+        # Name MAPPING also applies at save time: a mapped name typed or selected
+        # manually lands in the target's folder, exactly like OCR would.
+        try:
+            mapped_client = self.config.resolve_client(client)
+            if mapped_client and mapped_client != client:
+                client = mapped_client
+                self.client_dropdown.set(client)
+        except Exception:
+            pass
+        try:
+            mapped_site = self.config.resolve_site(site)
+            if mapped_site and mapped_site != site:
+                site = mapped_site
+        except Exception:
+            pass
         # Every saved site lands in the config: near-same spellings resolve to
         # the existing catalog name, and genuinely new sites (typed or from
         # OCR) are added + pushed to GitHub so the next popup offers them.
