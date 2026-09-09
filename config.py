@@ -387,6 +387,10 @@ class ConfigManager:
         self._lock = threading.RLock()
         self._data: Dict[str, Any] = deepcopy(DEFAULT_CONFIG)
         self._loaded = False
+        # mtime of config.json when the app last wrote it (or first read it).
+        # When the file changes on disk AFTER that (a hand edit — deleting
+        # sites/companies/...), the auto-sync must not clobber the edit.
+        self._last_write_mtime: Optional[float] = None
         # Config changes made from a popup (new sites/clients/materials/...)
         # that have NOT been pushed to GitHub yet. They are pushed only when
         # a file is actually saved (flush_pending_push) or when the user
@@ -421,10 +425,63 @@ class ConfigManager:
             # keys are handled at the accessor level (each uses .get with a
             # safe fallback) without being written back.
             self._data = loaded
+            # Baseline: the mtime of the app's last write (persisted), so a
+            # hand edit made while the app was closed is still detected and
+            # never clobbered by the auto-sync. Falls back to the current
+            # file mtime when no marker exists yet.
+            self._last_write_mtime = self._read_mtime_marker()
+            if self._last_write_mtime is None:
+                self._last_write_mtime = self._file_mtime(self.path)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             # Fall back to defaults but never crash the watcher.
             self._data = deepcopy(DEFAULT_CONFIG)
             print(f"[config] Could not read {self.path}: {exc}")
+
+    @staticmethod
+    def _file_mtime(path: Path) -> Optional[float]:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _mtime_marker_path(self) -> Path:
+        """Sidecar holding the mtime of the last app write to config.json.
+
+        Persisted so a hand edit survives app restarts (the updater relaunches
+        the app often): without it, the startup/periodic sync would resurrect
+        deleted entries as soon as the app restarted.
+        """
+        return self.path.with_name(self.path.name + ".mtime")
+
+    def _read_mtime_marker(self) -> Optional[float]:
+        try:
+            return float(self._mtime_marker_path().read_text(encoding="utf-8").strip())
+        except Exception:
+            return None
+
+    def _write_mtime_marker(self, value: Optional[float]) -> None:
+        if value is None:
+            return
+        try:
+            self._mtime_marker_path().write_text(f"{value}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _file_edited_externally(self) -> bool:
+        """True when config.json changed on disk after the app last wrote it.
+
+        A hand edit (deleting sites/companies/doc types/materials from the
+        file, changing paths...) must never be silently overwritten by the
+        periodic GitHub union-sync — otherwise the deleted entries come back
+        before they can be pushed. The tray force-push publishes the hand
+        edited file; the next app write (e.g. Add Site) resumes normal
+        syncing. The 1s epsilon absorbs filesystem timestamp coarseness.
+        """
+        last = getattr(self, "_last_write_mtime", None)
+        if last is None:
+            return False
+        now = self._file_mtime(self.path)
+        return now is not None and now > last + 1.0
 
     def reload(self) -> Dict[str, Any]:
         """Force a reload from disk (e.g. after external edits)."""
@@ -522,9 +579,21 @@ class ConfigManager:
         (watch_directory, root_directory) are never clobbered. The live-sync
         flags (`enable_live_config`, `enable_github_push`) are also synced
         from remote so a repo change propagates to all installs.
+
+        When config.json was edited by hand since the app last wrote it, the
+        merge is SKIPPED (returns False): applying the union would resurrect
+        entries the user just deleted. The tray "Push local config to
+        GitHub" publishes the hand-edited file instead.
+
         Returns True if anything changed and was saved.
         """
         with self._lock:
+            if self._file_edited_externally():
+                print("[config] config.json was edited outside the app — "
+                      "skipping this auto-sync round so the edit is not "
+                      "overwritten (tray → \"Push local config to GitHub\" "
+                      "publishes the edited file)")
+                return False
             # Union-merge catalog so concurrent local adds are not lost
             # when the remote is still stale (the bug that made Add Site
             # disappear when you moved to the next field).
@@ -765,6 +834,13 @@ class ConfigManager:
         what the tray's "Push local config to GitHub" action should do when
         the local catalog is the one to publish. Any pending deferred pushes
         are superseded (the whole local file goes up anyway).
+
+        The file is RELOADED from disk first, so hand edits — deleting
+        sites/companies/doc types/materials from config.json — are what gets
+        published, never a stale in-memory copy. A config without a usable
+        catalog ("clients" missing or not an object) is REFUSED rather than
+        pushed: an empty/broken file on GitHub would show "empty" everywhere
+        and silently break every machine's live sync.
         """
         if not self._github_push_enabled():
             return False
@@ -772,8 +848,21 @@ class ConfigManager:
         if not token:
             return False
         with self._lock:
+            # Reload config.json from disk: the user may have deleted
+            # sites/companies/etc. by hand — that file is the truth.
+            self.reload()
             local_data = deepcopy(self._data)
             self._pending_push_reasons = []
+            # Accept this file state as the app's own, so the next
+            # auto-sync resumes normally (remote == local after the push).
+            self._last_write_mtime = self._file_mtime(self.path)
+            self._write_mtime_marker(self._last_write_mtime)
+            if not isinstance(local_data.get("clients"), dict):
+                print("[config] FORCE PUSH REFUSED: local config.json has "
+                      f"no \"clients\" catalog ({local_data.get('clients')!r}). "
+                      "The file looks empty/broken — fix config.json and "
+                      "retry, so GitHub is never replaced with an empty file.")
+                return False
         try:
             import urllib.request
             import urllib.error
@@ -936,6 +1025,8 @@ class ConfigManager:
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump(self._data, fh, indent=2, ensure_ascii=False)
                 os.replace(tmp, self.path)
+                self._last_write_mtime = self._file_mtime(self.path)
+                self._write_mtime_marker(self._last_write_mtime)
             except OSError as exc:
                 print(f"[config] Could not write {self.path}: {exc}")
 

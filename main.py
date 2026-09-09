@@ -735,6 +735,8 @@ class FilePickerController:
         The opposite of Force sync: deletes what is on GitHub and replaces it
         with THIS machine's local config (current sites, clients, companies,
         materials, doc types — deletions included) on a background thread.
+        Failures are surfaced in a dialog so a refused push is never a
+        silent "nothing happened".
         """
         def work() -> None:
             try:
@@ -747,9 +749,30 @@ class FilePickerController:
                     )
                 else:
                     self._set_status(
-                        "Push FAILED — check FILEPICKER_GITHUB_TOKEN / "
-                        "github_token.txt and enable_github_push, then retry."
+                        "Push FAILED — see the log for the reason "
+                        "(token / enable_github_push / empty config)."
                     )
+
+                    def show_error() -> None:
+                        try:
+                            import tkinter.messagebox as mb
+                            mb.showerror(
+                                "FilePicker — Config Push Failed",
+                                "The local config could NOT be pushed to "
+                                "GitHub.\n\n"
+                                "Check FilePicker.log for the exact reason "
+                                "(missing FILEPICKER_GITHUB_TOKEN / "
+                                "github_token.txt, enable_github_push set to "
+                                "false, or an empty/broken local config.json).",
+                                parent=self._root,
+                            )
+                        except Exception:
+                            pass
+
+                    try:
+                        self._root.after(0, show_error)
+                    except Exception:
+                        pass
             except Exception as exc:
                 print(f"[filepicker] tray push error: {exc}")
 

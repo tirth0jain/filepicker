@@ -2,10 +2,7 @@
   "watch_directory": "Z:/Unsorted",
   "root_directory": "Z:/Sorted",
   "doc_types": [
-    "DC",
-    "Tax Invoice",
-    "Purchase Order",
-    "MTC"
+    "DC"
   ],
   "materials": {
     "Aluminium": "AL",
@@ -26,9 +23,7 @@
   },
   "companies": [
     "Ruby Steel",
-    "Ruby Steel Railings & Facades",
-    "Company A",
-    "Company B"
+    "Ruby Steel Railings & Facades"
   ],
   "company_initials": {
     "Ruby Steel": "RS"
@@ -252,13 +247,6 @@
       "LODHA - BRADBURY-bellevue",
       "Lodha Regalia",
       "Lodha Woods Club House"
-    ],
-    "Alpha Infra": [
-      "Site 1 - Mumbai",
-      "Site 2 - Pune"
-    ],
-    "Beta Projects": [
-      "Plant Central"
     ],
     "Alder Residency Pvt Ltd": [
       "Kalpataru Vivant Tower F Wing"
