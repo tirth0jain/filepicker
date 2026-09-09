@@ -249,7 +249,9 @@
     "Alder Residency Pvt Ltd": [
       "Kalpataru Vivant Tower"
     ],
-    "Arimas Real Estate Private Limited": []
+    "Arimas Real Estate Private Limited": [
+      "Kalpataru Elitus"
+    ]
   },
   "auto_start": true,
   "enable_live_config": true,
@@ -260,7 +262,8 @@
   "ocr_model": "deepseek-v4-flash-vision-exp",
   "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "client_aliases": {
-    "Alder Residency Pvt Ltd": "KALPATARU"
+    "Alder Residency Pvt Ltd": "KALPATARU",
+    "Arimas Real Estate Private Limited": "KALPATARU"
   },
   "site_aliases": {}
 }
