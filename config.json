@@ -21,7 +21,8 @@
     "ad": "AD",
     "GI SHEET": "GS",
     "Carbon": "CA",
-    "Galvanized Iron": "GI"
+    "Galvanized Iron": "GI",
+    "Abs": "AB"
   },
   "companies": [
     "Ruby Steel",
