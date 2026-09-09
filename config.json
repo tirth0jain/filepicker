@@ -246,7 +246,9 @@
       "Lodha Regalia",
       "Lodha Woods Club House"
     ],
-    "Alder Residency Pvt Ltd": [],
+    "Alder Residency Pvt Ltd": [
+      "Kalpataru Vivant Tower"
+    ],
     "Arimas Real Estate Private Limited": []
   },
   "auto_start": true,
@@ -256,5 +258,9 @@
   "preview_open_by_default": true,
   "block_alt_for_other_apps": true,
   "ocr_model": "deepseek-v4-flash-vision-exp",
-  "ocr_api_base": "https://opencode.ai/zen/go/v1"
+  "ocr_api_base": "https://opencode.ai/zen/go/v1",
+  "client_aliases": {
+    "Alder Residency Pvt Ltd": "KALPATARU"
+  },
+  "site_aliases": {}
 }
