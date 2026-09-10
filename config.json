@@ -19,7 +19,8 @@
     "GI SHEET": "GS",
     "Carbon": "CA",
     "Galvanized Iron": "GI",
-    "Abs": "AB"
+    "Abs": "AB",
+    "Railing": "RA"
   },
   "companies": [
     "Ruby Steel",
@@ -163,7 +164,9 @@
     "R.K.W. CONST. FACILITY MANAGEMENT PVT LTD": [],
     "RAGHAVA PROJECTS": [],
     "Raheja Reflection": [],
-    "RAHEJA UNIVERSAL LTD": [],
+    "RAHEJA UNIVERSAL LTD": [
+      "Raheja Verona &Sienna"
+    ],
     "RAJESH SALUJA": [],
     "RAK ITALIANO OVERSEAS LLP": [],
     "Raymond Limited": [
