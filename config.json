@@ -20,7 +20,8 @@
     "Carbon": "CA",
     "Galvanized Iron": "GI",
     "Abs": "AB",
-    "Railing": "RA"
+    "Railing": "RA",
+    "Screw": "SC"
   },
   "companies": [
     "Ruby Steel",
@@ -277,7 +278,8 @@
       "Lodha Olp",
       "Lodha Bradberry Tower-3",
       "Lodh Akharadi -T1,2,3,4",
-      "Lodh Akharadi"
+      "Lodh Akharadi",
+      "Lodha Baner"
     ],
     "Alder Residency Pvt Ltd": [
       "Kalpataru Vivant Tower"
