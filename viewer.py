@@ -167,23 +167,70 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
+def _word_code_context(word_text, number: str) -> bool:
+    """True when *word_text* ends with ``/<number>`` or ``-<number>``.
+
+    That is the serial inside a delivery-note code ("RS/DC/26-27/6" ends
+    with "/6"), which is where the number actually means something — a bare
+    "6" elsewhere on the page (a quantity, a date) does not.
+    """
+    raw = str(word_text).strip().rstrip(".,;:)]}\"'")
+    return bool(raw) and (raw.endswith("/" + number) or raw.endswith("-" + number))
+
+
+def _numeric_term_rects(number: str, page_words) -> list:
+    """Rects for a purely numeric highlight term (the OCR serial).
+
+    Prefers the code context — words ending in ``/<n>`` or ``-<n>`` such as
+    "RS/DC/26-27/6" — and only falls back to plain whole-word matches when
+    there are FEW of them: a serial of "1" must never light up every "1" in
+    the document. A single-digit serial is only marked when it occurs exactly
+    once as a standalone word (unambiguous); 2-4 digit serials tolerate up to
+    three. Returns [] when the number is too generic to mark meaningfully.
+    """
+    code_hits = [w[:4] for w in page_words if _word_code_context(w[4], number)]
+    if code_hits:
+        return code_hits
+    exact = [w[:4] for w in page_words
+             if _norm_highlight_word(w[4]) == number]
+    limit = 1 if len(number) < 2 else 3
+    if 0 < len(exact) <= limit:
+        return exact
+    return []
+
+
 def _highlight_word_rects(terms, page_words) -> list:
     """Rectangles of the page words that (fuzzily) match a term's words.
 
     ``page_words`` is PyMuPDF's ``page.get_text("words")`` — tuples of
     ``(x0, y0, x1, y1, word, block, line, word_no)``. Each significant word
-    of every term is matched against the page words: exact match for any
-    length (so the numeric serial "6" lights up only whole words — never
-    the "6" inside "26"/"196"), and a 1-letter tolerance for words of 3+
-    letters, so the mark appears even when the document spells the name
-    slightly differently from the value shown in the fields ("Sheetal Baug"
-    read vs "Sital Baug" shown). Returns a list of (x0, y0, x1, y1) tuples.
+    of every term is matched against the page words: exact match for words
+    of 2+ characters, and a 1-letter tolerance for words of 3+ letters, so
+    the mark appears even when the document spells the name slightly
+    differently from the value shown in the fields ("Sheetal Baug" read vs
+    "Sital Baug" shown). Numbers are deliberately conservative — a serial of
+    "1" never lights up every "1" (see :func:`_numeric_term_rects`), and a
+    digit inside a longer name ("... Tower 2") is only marked in code
+    context. Single characters are skipped entirely ("T-B" must not light up
+    every "T" and "B"). Returns a list of (x0, y0, x1, y1) tuples.
     """
     rects = []
     for term in terms:
-        for word in re.split(r"[\s\-/()&,]+", term):
+        term_s = str(term).strip()
+        if not term_s:
+            continue
+        if term_s.isdigit():
+            rects.extend(_numeric_term_rects(term_s, page_words))
+            continue
+        for word in re.split(r"[\s\-/()&,]+", term_s):
             canon = _norm_highlight_word(word)
-            if not canon:
+            if len(canon) < 2:
+                continue  # a single character is too generic to mark
+            if canon.isdigit():
+                # A digit inside a longer name: only the code context.
+                for w in page_words:
+                    if _word_code_context(w[4], canon):
+                        rects.append(w[:4])
                 continue
             for w in page_words:
                 wc = _norm_highlight_word(w[4])
@@ -511,6 +558,11 @@ class PreviewWindow:
             scale = pix_width / max(float(page.rect.width), 1e-9)
             rects = []
             for term in self._highlight_terms:
+                # A purely numeric term (the serial) is handled by the word
+                # pass only: search_for("1") matches every "1" SUBSTRING on
+                # the page ("10", "21", "196", ...).
+                if str(term).strip().isdigit():
+                    continue
                 rects.extend(page.search_for(term))
             # Word-level pass: marks each significant word of every term
             # (exact, or within one letter for 3+ char words) and matches

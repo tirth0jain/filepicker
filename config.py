@@ -335,27 +335,61 @@ def _strip_trailing_designator(tokens: List[str]) -> List[str]:
 
 # A trailing STANDALONE dashed designator: "Raymond Premium T-B" is the
 # same place as "Raymond Premium" — "T-B" is Tower B, written like "Tower 2"
-# which is already ignored. Only a single letter (or digit), a dash, then a
-# single letter/digit at the very END matches ("T-B", "T-2", "A-2"): the
-# dash is what marks it as a designator token. Bare trailing letters
-# ("Site A") still never decide a match, multi-letter prefixes ("Parc-V",
-# "Phase-A") look like real names, and bracketed forms ("Kalpataru Vivant
-# (T-A)") stay part of the name.
-_DASH_DESIGNATOR_RE = re.compile(r"(?i)\b[a-z]-[a-z0-9]$")
+# which is already ignored. Same for ranges: "T-9/10" and "T-9-10" are
+# towers 9 & 10. The shape is one letter/digit, a dash or slash, then the
+# number(s) — possibly chained ("T-9/10") — at the very END. A separator is
+# what marks it as a designator token: bare trailing letters ("Site A")
+# still never decide a match, multi-letter prefixes ("Parc-V", "Phase-A")
+# look like real names, and bracketed forms ("Kalpataru Vivant (T-A)")
+# stay part of the name.
+_DASH_DESIGNATOR_RE = re.compile(
+    # The lookbehind keeps the match a COMPLETE token: in "Wing-2/3" the
+    # "2/3" tail must not match on its own (the unit-word rule below handles
+    # the whole "Wing-2/3" token instead). Whitespace around the separator
+    # is allowed ("Tower -C" is written like "Tower-C").
+    r"(?i)(?<![-/])\b[a-z0-9]\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*$"
+)
+
+# The same shape but spelled with a unit WORD: "Phase-2A", "Tower-B",
+# "Tower -C", "Wing-2/3" — the word is a designator (see _UNIT_WORDS), so
+# the whole trailing token is dropped just like "Tower 2".
+_UNIT_DASH_DESIGNATOR_RE = re.compile(
+    r"(?i)\b(?:" + "|".join(sorted(_UNIT_WORDS))
+    + r")\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*$"
+)
 
 
 def _strip_trailing_dash_designator(name) -> str:
-    """Drop ONE trailing dashed designator pair ("Raymond Premium T-B"
-    -> "Raymond Premium"). Returns the input when nothing matches; never
-    returns an empty string."""
+    """Drop ONE trailing dashed designator ("Raymond Premium T-B",
+    "Raymond Premium T-9/10", "Raymond Premium Phase-2A" -> "Raymond
+    Premium"). Returns the input when nothing matches; never returns an
+    empty string."""
     raw = str(name).strip()
     if not raw:
         return raw
-    m = _DASH_DESIGNATOR_RE.search(raw)
-    if not m:
-        return raw
-    out = raw[:m.start()].rstrip(" \t(")
-    return out if out else raw
+    for rx in (_DASH_DESIGNATOR_RE, _UNIT_DASH_DESIGNATOR_RE):
+        m = rx.search(raw)
+        if m:
+            out = raw[:m.start()].rstrip(" \t(")
+            return out if out else raw
+    return raw
+
+
+def is_designator_only(name) -> bool:
+    """True when *name* is NOTHING but a unit designator.
+
+    "Tower-A", "Tower -C", "T-9/10", "Phase-2" carry no place name at all —
+    there is no site to save, so OCR values like these must not become a new
+    site (the user picks the real one instead).
+    """
+    raw = str(name).strip()
+    if not raw:
+        return False
+    for rx in (_DASH_DESIGNATOR_RE, _UNIT_DASH_DESIGNATOR_RE):
+        m = rx.search(raw)
+        if m and not raw[:m.start()].strip(" \t("):
+            return True
+    return False
 
 
 def _match_forms(name: str) -> tuple:
@@ -1164,6 +1198,25 @@ class ConfigManager:
         variants and one extra word tolerated, single letters exact-only.
         """
         return find_near_site(existing_sites, candidate)
+
+    def site_display_name(self, site: str) -> str:
+        """*site* with a trailing dashed unit designator removed.
+
+        "Raymond Premium T-B" -> "Raymond Premium", "X T-9/10" -> "X". Used
+        wherever a site is shown or stored (the popup's read-only resolution
+        AND add_site) so a tower/phase designator never lands in the field or
+        in config.json. See :func:`_strip_trailing_dash_designator`.
+        """
+        return _strip_trailing_dash_designator(site)
+
+    def site_is_designator_only(self, site: str) -> bool:
+        """True when *site* is nothing but a unit designator ("Tower-A").
+
+        Such a value carries no place name, so OCR must not put it in the
+        site field (and it must never become a new site) — the user picks
+        the real site instead. See :func:`is_designator_only`.
+        """
+        return is_designator_only(site)
 
     def find_near(self, existing_names, candidate) -> Optional[str]:
         """The catalog name that is the same place as ``candidate``.

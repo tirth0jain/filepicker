@@ -931,7 +931,12 @@ class FilePickerPopup:
         # at the wide, preview-open size so it never visibly jumps.
         _screen_w = self.window.winfo_screenwidth()
         _screen_h = self.window.winfo_screenheight()
-        self._win_h = max(min(820, _screen_h - 20), 700)
+        # Height: prefer 820, never taller than the screen. On short screens
+        # the window shrinks below the old 700px floor — the layout adapts
+        # (the bottom bar is pinned and the material chip panel gives up
+        # rows), so the filename preview and the Save/Skip buttons are never
+        # pushed off the bottom.
+        self._win_h = max(min(820, _screen_h - 20), 560)
         _width = 560
         if self.config.preview_open_by_default \
                 and self.file_path.suffix.lower() in _SUPPORTED_PREVIEW_EXTS:
@@ -939,7 +944,7 @@ class FilePickerPopup:
         self.window.geometry(f"{_width}x{self._win_h}+{max((_screen_w - _width) // 2, 0)}+0")
         self.window.configure(fg_color=_BG)
         self.window.resizable(True, True)  # height adjustable
-        self.window.minsize(560, 700)
+        self.window.minsize(560, 560)
         self.window.protocol("WM_DELETE_WINDOW", self._skip)
 
         # Deliberately NOT transient() (a childless transient window has no
@@ -1000,6 +1005,48 @@ class FilePickerPopup:
         self._preview = None
 
         f = self.form_frame
+
+        # -- Bottom bar (PINNED) ----------------------------------------
+        # Save/Skip and the live filename preview are packed FIRST with
+        # side="bottom" so Tk always reserves their space at the bottom of
+        # the popup. On short screens the middle of the form (the material
+        # chip panel) shrinks/scrolls instead of pushing the filename
+        # preview and the buttons out of the window.
+        btn_row = ctk.CTkFrame(f, fg_color=_BG)
+        btn_row.pack(side="bottom", fill="x", pady=(2, 0))
+
+        self.save_btn = ctk.CTkButton(
+            btn_row, text="Save & Organize", command=self._submit,
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=40,
+            font=ctk.CTkFont(size=14, weight="bold"), text_color="#ffffff",
+        )
+        self.save_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
+
+        self.skip_btn = ctk.CTkButton(
+            btn_row, text="Skip / Keep Original", command=self._skip,
+            fg_color=_BG_FIELD, hover_color="#33334a", height=40,
+            font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
+        )
+        self.skip_btn.pack(side="left", expand=True, fill="x")
+
+        # "Skip All & Delete" — skips every queued popup AND removes those
+        # files from the watch folder. Only shown when the controller wires
+        # on_skip_all (the popup releases itself before deleting so Windows
+        # can remove the files — an open popup/preview keeps them locked).
+        if self.on_skip_all is not None:
+            self.skip_all_btn = ctk.CTkButton(
+                btn_row, text="Skip All & Delete", command=self._skip_all,
+                fg_color="#3a2b2b", hover_color="#4a3535", width=140, height=40,
+                font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+            )
+            self.skip_all_btn.pack(side="left", fill="y", padx=(8, 0))
+
+        # -- Live preview (PINNED, above the buttons) --------------------
+        self.preview_label = ctk.CTkLabel(
+            f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
+            wraplength=500, justify="left",
+        )
+        self.preview_label.pack(side="bottom", fill="x", pady=(4, 0))
 
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
@@ -1164,7 +1211,12 @@ class FilePickerPopup:
 
         self._material_canvas.bind_all("<MouseWheel>", _material_wheel, add=True)
         self._material_chips: Dict[str, ctk.CTkButton] = {}
+        # How many chip rows currently fit in the form: normally
+        # _MATERIAL_ROWS_VISIBLE, fewer on short screens (recomputed on every
+        # form resize — see _update_material_rows).
+        self._material_rows_visible = _MATERIAL_ROWS_VISIBLE
         self._render_material_chips()
+        self.form_frame.bind("<Configure>", self._update_material_rows)
 
         # -- Serial number ----------------------------------------------
         ctk.CTkLabel(f, text="Serial Number",
@@ -1184,42 +1236,10 @@ class FilePickerPopup:
         )
         self.received_check.pack(anchor="w", pady=(0, 6))
 
-        # -- Buttons ----------------------------------------------------
-        btn_row = ctk.CTkFrame(f, fg_color=_BG)
-        btn_row.pack(fill="x", pady=(2, 0))
-
-        self.save_btn = ctk.CTkButton(
-            btn_row, text="Save & Organize", command=self._submit,
-            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=40,
-            font=ctk.CTkFont(size=14, weight="bold"), text_color="#ffffff",
-        )
-        self.save_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
-
-        self.skip_btn = ctk.CTkButton(
-            btn_row, text="Skip / Keep Original", command=self._skip,
-            fg_color=_BG_FIELD, hover_color="#33334a", height=40,
-            font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
-        )
-        self.skip_btn.pack(side="left", expand=True, fill="x")
-
-        # "Skip All & Delete" — skips every queued popup AND removes those
-        # files from the watch folder. Only shown when the controller wires
-        # on_skip_all (the popup releases itself before deleting so Windows
-        # can remove the files — an open popup/preview keeps them locked).
-        if self.on_skip_all is not None:
-            self.skip_all_btn = ctk.CTkButton(
-                btn_row, text="Skip All & Delete", command=self._skip_all,
-                fg_color="#3a2b2b", hover_color="#4a3535", width=140, height=40,
-                font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
-            )
-            self.skip_all_btn.pack(side="left", fill="y", padx=(8, 0))
-
-        # -- Live preview ----------------------------------------------
-        self.preview_label = ctk.CTkLabel(
-            f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
-            wraplength=500, justify="left",
-        )
-        self.preview_label.pack(fill="x", pady=(4, 0))
+        # (The Save/Skip buttons and the filename preview are packed at the
+        # TOP of this method with side="bottom" so they are pinned to the
+        # bottom edge and always visible — see the "Bottom bar (PINNED)"
+        # block. Only the live preview text needs refreshing here.)
         self._refresh_preview()
 
     # ------------------------------------------------------------------
@@ -1496,13 +1516,59 @@ class FilePickerPopup:
             self._prompt_add_material,
         )
 
-        # Cap the visible chip area at _MATERIAL_ROWS_VISIBLE rows; extra rows
-        # scroll (mouse wheel over the panel). Shrinks to fit small catalogs.
-        # Height = pitch * rows: a 34px pitch (28px chip + 6px gap) means the
-        # full last row is visible without extra top padding.
+        # Cap the visible chip area at the rows that fit (normally
+        # _MATERIAL_ROWS_VISIBLE, fewer on short screens); extra rows scroll
+        # (mouse wheel over the panel). Shrinks to fit small catalogs.
+        # Height = pitch * rows: a 36px pitch (28px chip + 6px gap + slack)
+        # means the full last row is visible without extra top padding.
         self._material_canvas.configure(
-            height=_MATERIAL_ROW_PITCH * min(rows, _MATERIAL_ROWS_VISIBLE)
+            height=_MATERIAL_ROW_PITCH
+            * min(rows, getattr(self, "_material_rows_visible",
+                                _MATERIAL_ROWS_VISIBLE))
         )
+
+    def _update_material_rows(self, _event=None) -> None:
+        """Show as many material chip rows as the form has room for.
+
+        The bottom bar (filename preview + Save/Skip) is PINNED to the bottom
+        of the popup, so on short screens the chip panel must give up rows:
+        it shrinks and its scrollbar (or the mouse wheel) reaches the hidden
+        chips, instead of the middle of the form pushing the filename preview
+        and buttons off the bottom of the window. Recomputed on every form
+        resize; capped at _MATERIAL_ROWS_VISIBLE so big screens are unchanged.
+        """
+        try:
+            avail = self.form_frame.winfo_height()
+        except tk.TclError:
+            return
+        if avail <= 1:
+            return
+        # Height used by everything except the chip panel. The pinned bottom
+        # bar is excluded: Tk already reserved its space at the bottom.
+        others = 0
+        for child in self.form_frame.winfo_children():
+            if child is self.material_frame:
+                continue
+            try:
+                if not child.winfo_ismapped():
+                    continue
+                info = child.pack_info()
+            except Exception:
+                continue
+            if info.get("side") == "bottom":
+                continue
+            others += child.winfo_reqheight()
+            pady = info.get("pady", 0)
+            if isinstance(pady, (tuple, list)):
+                others += sum(int(p) for p in pady)
+            else:
+                others += 2 * int(pady or 0)
+        # 12px slack so an estimate error never clips the last row.
+        rows = int((avail - others - 12) // _MATERIAL_ROW_PITCH)
+        rows = max(1, min(_MATERIAL_ROWS_VISIBLE, rows))
+        if rows != self._material_rows_visible:
+            self._material_rows_visible = rows
+            self._render_material_chips()
 
     def _toggle_material(self, name: str) -> None:
         if name in self._selected_materials:
@@ -1794,7 +1860,10 @@ class FilePickerPopup:
                 mapped = self.config.resolve_site(cur)
                 if mapped and mapped != cur:
                     client = self._client_var.get().strip()
-                    site = self._ensure_site_in_config(client, mapped) \
+                    # Read-only resolution: a mapped target that isn't in
+                    # this client's sites yet is only ADDED on Save, never
+                    # when the mapping dialog is used.
+                    site = self._resolve_site_readonly(client, mapped) \
                         if client else mapped
                     self.site_dropdown.set(site)
                     self._refresh_preview()
@@ -2079,12 +2148,13 @@ class FilePickerPopup:
             self._populate_sites(client_value)
         if site:
             # Site: resolve near-same spellings to the catalog name (the AI
-            # may still return "sital baug" when the config has "Sital Baug"),
-            # and when the site is genuinely new, add it to the config + push
-            # to GitHub right away so the next popup offers it.
+            # may still return "sital baug" when the config has "Sital Baug").
+            # NOTHING is written to config.json here: a brand-new site is
+            # added only when the file is actually SAVED (_submit), so wrong
+            # OCR on a popup that gets skipped never pollutes the config.
             effective_client = self._client_var.get().strip()
             if effective_client:
-                site = self._ensure_site_in_config(effective_client, site)
+                site = self._resolve_site_readonly(effective_client, site)
             self.site_dropdown.set(site)
 
         # Also mark the values FINALLY shown in the fields (post-mapping and
@@ -2134,10 +2204,51 @@ class FilePickerPopup:
                 return str(value)
         return None
 
+    def _resolve_site_readonly(self, client: str, site: str) -> str:
+        """Canonicalize *site* WITHOUT touching the config.
+
+        A trailing dashed unit designator is dropped first ("Wrong Site
+        T-9/10" -> "Wrong Site"), then near-same spellings resolve to the
+        existing catalog name so the field shows the canonical site; a
+        genuinely unknown site is returned as typed. NOTHING is written to
+        config.json here — the site is only added when the file is actually
+        SAVED (``_submit``), because OCR can be wrong and a half-filled popup
+        that is skipped must never leave a bogus site behind in the config.
+        """
+        site = (site or "").strip()
+        client = (client or "").strip()
+        if not site:
+            return site
+        try:
+            if self.config.site_is_designator_only(site):
+                # "Tower-A" / "T-9/10" / "Tower -C" — no place name at all.
+                # Leave the field EMPTY (the save validation then asks the
+                # user to pick the real site) instead of inventing a site
+                # called "Tower-A" in the config.
+                print(f"[filepicker] OCR site '{site}' is only a unit "
+                      "designator — leaving Site empty for you to choose")
+                return ""
+        except Exception:
+            pass
+        try:
+            site = self.config.site_display_name(site)
+        except Exception:
+            pass
+        if not client:
+            return site
+        try:
+            canonical = self.config.find_near_site(self.config.sites_for(client), site)
+            if canonical is not None:
+                return str(canonical)
+        except Exception as exc:
+            print(f"[filepicker] site lookup error: {exc}")
+        return site
+
     def _ensure_site_in_config(self, client: str, site: str) -> str:
         """Canonicalize *site* against the catalog; add + push brand-new sites.
 
-        Returns the site name to use:
+        Called only from the SAVE path (``_submit``). Returns the site name
+        to use:
 
         - the existing catalog spelling when *site* is the same place as one
           of the client's sites (near-match: case/spacing/articles/1-letter

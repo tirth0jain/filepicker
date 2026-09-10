@@ -146,14 +146,15 @@ NOT on the list when it clearly matches no Known Site (e.g. a brand-new site).
 
 A trailing unit designator — one word followed by a number ("Tower 2",
 "Phase 3", "Unit 4") — is the same place as the site without it: "Kalpataru
-Elitus Tower 2" is "Kalpataru Elitus". A trailing STANDALONE dashed pair
-("T-B" = Tower B, "T-2" = Tower 2, "A-2") is the same too: "Raymond Premium
-T-B" is "Raymond Premium". When the value differs from a Known Site only by
-such a designator, output the Known Site name WITHOUT the designator (e.g.
-output "Kalpataru Elitus", not "Kalpataru Elitus Tower 2"; output "Raymond
-Premium", never "Raymond Premium T-B"). Do NOT strip the designator from a
-site name that does not otherwise match a Known Site (a brand-new site keeps
-its full name)."""
+Elitus Tower 2" is "Kalpataru Elitus". A trailing STANDALONE dashed pair is
+the same too: "T-B" = Tower B, "T-2" = Tower 2, "T-9/10" = Towers 9 & 10
+("Raymond Premium T-B" and "Raymond Premium T-9/10" are both "Raymond
+Premium"). When the value differs from a Known Site only by such a
+designator, output the Known Site name WITHOUT the designator (e.g. output
+"Kalpataru Elitus", not "Kalpataru Elitus Tower 2"; output "Raymond
+Premium", never "Raymond Premium T-B" or "Raymond Premium T-9/10"). Do NOT
+strip the designator from a site name that does not otherwise match a Known
+Site (a brand-new site keeps its full name)."""
 
 # Known-Clients section (same idea as Known Sites: the model resolves a client
 # written slightly differently to the existing catalog name so one place never
