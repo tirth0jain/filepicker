@@ -43,6 +43,14 @@ _MAX_DROPDOWN_RESULTS = 5
 _MATERIAL_ROWS_VISIBLE = 5
 # Nominal row pitch for the panel height (28px chip + 6px gap + slack).
 _MATERIAL_ROW_PITCH = 36
+# Compact layout (short screens / scaled-up displays): tighter chip pitch,
+# widget heights and paddings so the Serial number, the Received Copy
+# checkbox, the filename preview and the Save/Skip buttons ALL fit.
+_MATERIAL_ROW_PITCH_COMPACT = 30
+# Rough height (unscaled px) the form needs before widgets start getting
+# squeezed. Below it — or on a display scaled up by DPI settings — the popup
+# switches to the compact spacing.
+_FORM_H_COMFORT = 790
 
 
 def material_display_order(materials_map, selected) -> List:
@@ -918,6 +926,26 @@ class FilePickerPopup:
         return f"{num:.1f} PB"
 
     # ------------------------------------------------------------------
+    # Compact-layout helpers (short screens / scaled-up displays)
+    # ------------------------------------------------------------------
+    def _sp(self, value: int, minimum: int = 1) -> int:
+        """A vertical spacing value, halved in the compact layout.
+
+        Zero stays zero (a pack with no padding must not invent one), and the
+        result never drops below *minimum* so a gap is still a gap.
+        """
+        value = int(value or 0)
+        if value <= 0:
+            return 0
+        if not self._compact:
+            return value
+        return max(int(minimum), int(round(value / 2)))
+
+    def _h(self, normal: int, compact: int) -> int:
+        """A widget height: *compact* on short screens, *normal* otherwise."""
+        return compact if self._compact else normal
+
+    # ------------------------------------------------------------------
     # Window construction
     # ------------------------------------------------------------------
     def _build_window(self) -> None:
@@ -937,6 +965,23 @@ class FilePickerPopup:
         # rows), so the filename preview and the Save/Skip buttons are never
         # pushed off the bottom.
         self._win_h = max(min(820, _screen_h - 20), 560)
+        # Compact spacing: on short screens (and on displays where the DPI
+        # scaling makes every widget bigger) the default spacing does not fit,
+        # and Tk squeezes the LAST packed widgets — which used to be the
+        # Received Copy checkbox (a 2px sliver at 1366x768) and, on even
+        # shorter screens, the Serial number field. Scale the paddings/heights
+        # down so the whole form stays visible.
+        try:
+            _scale = float(ctk.ScalingTracker.get_widget_scaling(self.window))
+        except Exception:
+            _scale = 1.0
+        if not _scale or _scale <= 0:
+            _scale = 1.0
+        self._compact = self._win_h < _FORM_H_COMFORT * _scale
+        # Row pitch of the material chip panel (see _MATERIAL_ROW_PITCH*).
+        self._row_pitch = (
+            _MATERIAL_ROW_PITCH_COMPACT if self._compact else _MATERIAL_ROW_PITCH
+        )
         _width = 560
         if self.config.preview_open_by_default \
                 and self.file_path.suffix.lower() in _SUPPORTED_PREVIEW_EXTS:
@@ -1013,18 +1058,20 @@ class FilePickerPopup:
         # chip panel) shrinks/scrolls instead of pushing the filename
         # preview and the buttons out of the window.
         btn_row = ctk.CTkFrame(f, fg_color=_BG)
-        btn_row.pack(side="bottom", fill="x", pady=(2, 0))
+        btn_row.pack(side="bottom", fill="x", pady=(self._sp(2, 1), 0))
 
         self.save_btn = ctk.CTkButton(
             btn_row, text="Save & Organize", command=self._submit,
-            fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=40,
-            font=ctk.CTkFont(size=14, weight="bold"), text_color="#ffffff",
+            fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+            height=self._h(40, 34),
+            font=ctk.CTkFont(size=self._h(14, 13), weight="bold"),
+            text_color="#ffffff",
         )
         self.save_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
 
         self.skip_btn = ctk.CTkButton(
             btn_row, text="Skip / Keep Original", command=self._skip,
-            fg_color=_BG_FIELD, hover_color="#33334a", height=40,
+            fg_color=_BG_FIELD, hover_color="#33334a", height=self._h(40, 34),
             font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
         )
         self.skip_btn.pack(side="left", expand=True, fill="x")
@@ -1036,7 +1083,8 @@ class FilePickerPopup:
         if self.on_skip_all is not None:
             self.skip_all_btn = ctk.CTkButton(
                 btn_row, text="Skip All & Delete", command=self._skip_all,
-                fg_color="#3a2b2b", hover_color="#4a3535", width=140, height=40,
+                fg_color="#3a2b2b", hover_color="#4a3535", width=140,
+                height=self._h(40, 34),
                 font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
             )
             self.skip_all_btn.pack(side="left", fill="y", padx=(8, 0))
@@ -1044,55 +1092,89 @@ class FilePickerPopup:
         # -- Live preview (PINNED, above the buttons) --------------------
         self.preview_label = ctk.CTkLabel(
             f, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
-            wraplength=500, justify="left",
+            wraplength=500, justify="left", height=self._h(28, 18),
         )
-        self.preview_label.pack(side="bottom", fill="x", pady=(4, 0))
+        self.preview_label.pack(side="bottom", fill="x", pady=(self._sp(4, 1), 0))
+
+        # -- Serial number + Received copy (PINNED on short screens) -----
+        # These two are created here — before the rest of the form — so that on
+        # a short screen they can be pinned with side="bottom" ABOVE the
+        # filename preview. Tk's packer squeezes whatever is packed LAST, and
+        # the Received Copy checkbox used to be the casualty (a 2px sliver at
+        # 1366x768, gone entirely below ~700). Pinned, the chip panel gives up
+        # rows instead. On tall screens they stay in the normal top-down flow.
+        serial_label = ctk.CTkLabel(f, text="Serial Number",
+                                    font=ctk.CTkFont(size=13, weight="bold"),
+                                    text_color=_TEXT_MUTED,
+                                    height=self._h(28, 20))
+        self.serial_entry = ctk.CTkEntry(
+            f, textvariable=self._serial_var, fg_color=_BG_FIELD,
+            border_color=_BG_FIELD, text_color=_TEXT, height=self._h(28, 24),
+        )
+        self.received_check = ctk.CTkCheckBox(
+            f, text="Received Copy (unchecked = Submitted)",
+            variable=self._received_var, fg_color=_ACCENT,
+            hover_color=_ACCENT, text_color=_TEXT,
+            checkbox_height=self._h(22, 20), checkbox_width=self._h(22, 20),
+            font=ctk.CTkFont(size=self._h(13, 12)),
+        )
+        if self._compact:
+            # side="bottom" stacks bottom-up: pack the checkbox first so it
+            # ends up ABOVE the preview, then the entry, then its label.
+            self.received_check.pack(side="bottom", anchor="w",
+                                     pady=(0, self._sp(6)))
+            self.serial_entry.pack(side="bottom", fill="x",
+                                   pady=(0, self._sp(6)))
+            serial_label.pack(side="bottom", anchor="w",
+                              pady=(0, self._sp(1, 1)))
 
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
-        self._banner.pack(fill="x", pady=(0, 6))
+        self._banner.pack(fill="x", pady=(0, self._sp(6)))
 
         banner_header = ctk.CTkFrame(self._banner, fg_color="transparent")
-        banner_header.pack(fill="x", padx=12, pady=(6, 0))
+        banner_header.pack(fill="x", padx=12, pady=(self._sp(6), 0))
         self._banner_name = ctk.CTkLabel(
             banner_header, text="", font=ctk.CTkFont(size=15, weight="bold"),
             text_color=_TEXT, wraplength=380, justify="left",
+            height=self._h(28, 22),
         )
         self._banner_name.pack(side="left", anchor="w")
         # Minimize: the popup (and its modal grab) must not block the user
         # from going elsewhere — the window minimizes to the taskbar and is
         # restored from there. Title-bar minimize works too.
         self.minimize_btn = ctk.CTkButton(
-            banner_header, text="—", width=40, height=28,
+            banner_header, text="—", width=40, height=self._h(28, 24),
             fg_color=_BG_FIELD, hover_color="#33334a",
             text_color=_TEXT_MUTED, command=self._minimize_popup,
         )
         self.minimize_btn.pack(side="right", anchor="e", padx=(0, 6))
         self.preview_btn = ctk.CTkButton(
-            banner_header, text="👁 Preview", width=96, height=28,
+            banner_header, text="👁 Preview", width=96, height=self._h(28, 24),
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
             font=ctk.CTkFont(size=12, weight="bold"), command=self._toggle_preview,
         )
         self.preview_btn.pack(side="right", anchor="e")
 
         self._banner_size = ctk.CTkLabel(
-            self._banner, text="", font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+            self._banner, text="", font=ctk.CTkFont(size=12),
+            text_color=_TEXT_MUTED, height=self._h(28, 18),
         )
-        self._banner_size.pack(anchor="w", padx=12, pady=(0, 6))
+        self._banner_size.pack(anchor="w", padx=12, pady=(0, self._sp(6)))
 
         # OCR status line — shows OCR progress, or the exact reason OCR is off
         # (disabled in config / no API key), never silently nothing. The
         # "↻ Retry OCR" button on the right appears once OCR finished (filled
         # or failed) and re-runs the vision call for this file.
         self._ocr_row = ctk.CTkFrame(f, fg_color="transparent")
-        self._ocr_row.pack(fill="x", pady=(0, 2))
+        self._ocr_row.pack(fill="x", pady=(0, self._sp(2, 1)))
         self._ocr_label = ctk.CTkLabel(
             self._ocr_row, text="", font=ctk.CTkFont(size=11),
-            text_color=_TEXT_MUTED, anchor="w",
+            text_color=_TEXT_MUTED, anchor="w", height=self._h(28, 18),
         )
         self._ocr_label.pack(side="left", fill="x", expand=True)
         self.retry_ocr_btn = ctk.CTkButton(
-            self._ocr_row, text="↻ Retry OCR", width=92, height=22,
+            self._ocr_row, text="↻ Retry OCR", width=92, height=self._h(22, 20),
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
             font=ctk.CTkFont(size=11), command=self._retry_ocr,
         )
@@ -1101,24 +1183,28 @@ class FilePickerPopup:
 
         # -- Company ----------------------------------------------------
         ctk.CTkLabel(f, text="Company", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
+                     text_color=_TEXT_MUTED,
+                     height=self._h(28, 20)).pack(anchor="w",
+                                                  pady=(0, self._sp(1, 1)))
         self.company_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._company_var,
             command=self._on_company_change, fg_color=_BG_FIELD,
             button_color=_ACCENT, button_hover_color=_ACCENT,
+            height=self._h(28, 24),
         )
-        self.company_combo.pack(fill="x", pady=(0, 6))
+        self.company_combo.pack(fill="x", pady=(0, self._sp(6)))
 
         # -- Client -----------------------------------------------------
         client_header = ctk.CTkFrame(f, fg_color="transparent")
-        client_header.pack(fill="x", pady=(0, 1))
+        client_header.pack(fill="x", pady=(0, self._sp(1, 1)))
         ctk.CTkLabel(client_header, text="Client",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(side="left")
+                     text_color=_TEXT_MUTED,
+                     height=self._h(28, 20)).pack(side="left")
         # 🗺 Map: alias a client name the document shows/OCR reads to another
         # client — future popups auto-switch the mapped name to its target.
         self.client_map_btn = ctk.CTkButton(
-            client_header, text="🗺 Map", width=72, height=22,
+            client_header, text="🗺 Map", width=72, height=self._h(22, 20),
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
             font=ctk.CTkFont(size=11),
             command=lambda: self._open_mapping_dialog("client"),
@@ -1128,17 +1214,19 @@ class FilePickerPopup:
             f, values=[], on_change=self._on_client_change,
         )
         self.client_dropdown.entry.configure(
-            placeholder_text="Search client…",
+            placeholder_text="Search client…", height=self._h(28, 24),
         )
+        self.client_dropdown.pack_configure(pady=(0, self._sp(6)))
 
         # -- Site -------------------------------------------------------
         site_header = ctk.CTkFrame(f, fg_color="transparent")
-        site_header.pack(fill="x", pady=(0, 1))
+        site_header.pack(fill="x", pady=(0, self._sp(1, 1)))
         ctk.CTkLabel(site_header, text="Site",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(side="left")
+                     text_color=_TEXT_MUTED,
+                     height=self._h(28, 20)).pack(side="left")
         self.site_map_btn = ctk.CTkButton(
-            site_header, text="🗺 Map", width=72, height=22,
+            site_header, text="🗺 Map", width=72, height=self._h(22, 20),
             fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
             font=ctk.CTkFont(size=11),
             command=lambda: self._open_mapping_dialog("site"),
@@ -1148,38 +1236,53 @@ class FilePickerPopup:
             f, values=[], on_change=self._on_site_change,
         )
         self.site_dropdown.entry.configure(
-            placeholder_text="Search site…",
+            placeholder_text="Search site…", height=self._h(28, 24),
         )
+        self.site_dropdown.pack_configure(pady=(0, self._sp(6)))
 
         # -- Document type ----------------------------------------------
         ctk.CTkLabel(f, text="Document Type", font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
+                     text_color=_TEXT_MUTED,
+                     height=self._h(28, 20)).pack(anchor="w",
+                                                  pady=(0, self._sp(1, 1)))
         self.doc_type_combo = ctk.CTkOptionMenu(
             f, values=[], variable=self._doc_type_var,
             command=lambda _d: self._refresh_preview(),
             fg_color=_BG_FIELD, button_color=_ACCENT, button_hover_color=_ACCENT,
+            height=self._h(28, 24),
         )
-        self.doc_type_combo.pack(fill="x", pady=(0, 6))
+        self.doc_type_combo.pack(fill="x", pady=(0, self._sp(6)))
 
         # -- Materials (multi-select) -----------------------------------
         ctk.CTkLabel(f, text="Material (multi-select)",
                      font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
+                     text_color=_TEXT_MUTED,
+                     height=self._h(28, 20)).pack(anchor="w",
+                                                  pady=(0, self._sp(1, 1)))
         self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
-        self.material_frame.pack(fill="x", pady=(0, 6))
+        if self._compact:
+            # The panel is the only part of the form that can flex: with the
+            # Serial/Received row pinned to the bottom, it absorbs whatever
+            # space is left over instead of leaving a hole in the middle.
+            self.material_frame.pack(fill="both", expand=True,
+                                     pady=(0, self._sp(6)))
+        else:
+            self.material_frame.pack(fill="x", pady=(0, self._sp(6)))
         # Scrollable chip area (plain Canvas + scrollbar — the same pattern as
         # viewer.py): the chip rows pack into _material_inner and scroll when
         # they exceed the visible height (capped at _MATERIAL_ROWS_VISIBLE).
         self._material_canvas = tk.Canvas(
             self.material_frame, bg=_BG_SECONDARY, highlightthickness=0, bd=0,
-            height=_MATERIAL_ROW_PITCH * _MATERIAL_ROWS_VISIBLE,
+            height=self._row_pitch * _MATERIAL_ROWS_VISIBLE,
         )
         self._material_vsb = ttk.Scrollbar(
             self.material_frame, orient="vertical", command=self._material_canvas.yview,
         )
         self._material_canvas.configure(yscrollcommand=self._material_vsb.set)
-        self._material_canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
-        self._material_vsb.pack(side="right", fill="y", padx=(0, 6), pady=6)
+        self._material_canvas.pack(side="left", fill="both", expand=True,
+                                   padx=(8, 0), pady=self._sp(6))
+        self._material_vsb.pack(side="right", fill="y", padx=(0, 6),
+                                pady=self._sp(6))
         self._material_inner = tk.Frame(self._material_canvas, bg=_BG_SECONDARY)
         self._mat_win = self._material_canvas.create_window(
             (0, 0), window=self._material_inner, anchor="nw",
@@ -1218,29 +1321,25 @@ class FilePickerPopup:
         self._render_material_chips()
         self.form_frame.bind("<Configure>", self._update_material_rows)
 
-        # -- Serial number ----------------------------------------------
-        ctk.CTkLabel(f, text="Serial Number",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 1))
-        self.serial_entry = ctk.CTkEntry(
-            f, textvariable=self._serial_var, fg_color=_BG_FIELD,
-            border_color=_BG_FIELD, text_color=_TEXT,
-        )
-        self.serial_entry.pack(fill="x", pady=(0, 6))
-
-        # -- Received copy checkbox -------------------------------------
-        self.received_check = ctk.CTkCheckBox(
-            f, text="Received Copy (unchecked = Submitted)",
-            variable=self._received_var, fg_color=_ACCENT,
-            hover_color=_ACCENT, text_color=_TEXT,
-        )
-        self.received_check.pack(anchor="w", pady=(0, 6))
+        # -- Serial number + Received copy -------------------------------
+        # (The widgets themselves are created with the pinned bottom bar at the
+        # top of this method; on short screens they are already packed there
+        # with side="bottom". On tall screens they flow normally, here, below
+        # the material panel.)
+        if not self._compact:
+            serial_label.pack(anchor="w", pady=(0, 1))
+            self.serial_entry.pack(fill="x", pady=(0, 6))
+            self.received_check.pack(anchor="w", pady=(0, 6))
 
         # (The Save/Skip buttons and the filename preview are packed at the
         # TOP of this method with side="bottom" so they are pinned to the
         # bottom edge and always visible — see the "Bottom bar (PINNED)"
         # block. Only the live preview text needs refreshing here.)
         self._refresh_preview()
+        # The <Configure> events that fired while the form was still being
+        # built saw an incomplete widget list; recompute the chip rows once
+        # the whole form exists and the geometry manager has settled.
+        self.window.after_idle(self._update_material_rows)
 
     # ------------------------------------------------------------------
     # Config-driven state
@@ -1488,7 +1587,7 @@ class FilePickerPopup:
                 row_width = 0
                 rows += 1
             chip = ctk.CTkButton(
-                row_frame, text=text, width=0, height=28,
+                row_frame, text=text, width=0, height=self._h(28, 24),
                 fg_color=fg, hover_color=hover, text_color=txt,
                 corner_radius=14, command=command,
             )
@@ -1519,10 +1618,11 @@ class FilePickerPopup:
         # Cap the visible chip area at the rows that fit (normally
         # _MATERIAL_ROWS_VISIBLE, fewer on short screens); extra rows scroll
         # (mouse wheel over the panel). Shrinks to fit small catalogs.
-        # Height = pitch * rows: a 36px pitch (28px chip + 6px gap + slack)
-        # means the full last row is visible without extra top padding.
+        # Height = pitch * rows: the pitch (28px chip + 6px gap + slack, or 24
+        # + 6 in the compact layout) means the full last row is visible
+        # without extra top padding.
         self._material_canvas.configure(
-            height=_MATERIAL_ROW_PITCH
+            height=self._row_pitch
             * min(rows, getattr(self, "_material_rows_visible",
                                 _MATERIAL_ROWS_VISIBLE))
         )
@@ -1543,28 +1643,33 @@ class FilePickerPopup:
             return
         if avail <= 1:
             return
-        # Height used by everything except the chip panel. The pinned bottom
-        # bar is excluded: Tk already reserved its space at the bottom.
+        # Height used by everything except the chip panel: the widgets packed
+        # top-down (banner, form fields, section labels) AND the ones pinned
+        # with side="bottom" (chip panel aside: the filename preview, the
+        # Serial field and the Received Copy checkbox, plus the buttons on a
+        # short screen). Both are reserved by Tk out of the form's height, so
+        # the chip panel only gets what is genuinely left over.
+        bottom = 0
         others = 0
-        for child in self.form_frame.winfo_children():
+        for child in self.form_frame.pack_slaves():
             if child is self.material_frame:
                 continue
             try:
-                if not child.winfo_ismapped():
-                    continue
                 info = child.pack_info()
             except Exception:
                 continue
-            if info.get("side") == "bottom":
-                continue
-            others += child.winfo_reqheight()
+            used = child.winfo_reqheight()
             pady = info.get("pady", 0)
             if isinstance(pady, (tuple, list)):
-                others += sum(int(p) for p in pady)
+                used += sum(int(p) for p in pady)
             else:
-                others += 2 * int(pady or 0)
+                used += 2 * int(pady or 0)
+            if info.get("side") == "bottom":
+                bottom += used
+            else:
+                others += used
         # 12px slack so an estimate error never clips the last row.
-        rows = int((avail - others - 12) // _MATERIAL_ROW_PITCH)
+        rows = int((avail - bottom - others - 12) // self._row_pitch)
         rows = max(1, min(_MATERIAL_ROWS_VISIBLE, rows))
         if rows != self._material_rows_visible:
             self._material_rows_visible = rows
@@ -2267,6 +2372,19 @@ class FilePickerPopup:
             canonical = self.config.find_near_site(self.config.sites_for(client), site)
             if canonical is not None:
                 return str(canonical)
+        except Exception:
+            pass
+        try:
+            if self.config.site_is_designator_only(site):
+                # "Tower B" / "Wing C" / "T-9/10" — no place name. Never write
+                # it to the config; keep the typed value so the field still
+                # shows what the user entered (they can pick the real site).
+                print(f"[filepicker] site '{site}' is only a unit designator "
+                      "— not adding it to the config")
+                return site
+        except Exception:
+            pass
+        try:
             effective = self.config.add_site(client, site)
         except Exception as exc:
             print(f"[filepicker] could not add site '{site}': {exc}")
@@ -2320,6 +2438,28 @@ class FilePickerPopup:
             except Exception:
                 pass
             return
+        # A bare unit designator ("Tower B", "Wing C", "T-9/10") is never a
+        # site — unless the catalog genuinely has one, saving is stopped so
+        # neither the config nor the folder path gets "Tower B" (the user
+        # picks the real site instead).
+        try:
+            known_site = self.config.find_near_site(
+                self.config.sites_for(client), site)
+        except Exception:
+            known_site = None
+        if not known_site:
+            try:
+                if self.config.site_is_designator_only(site):
+                    self.preview_label.configure(
+                        text="⚠ That is only a tower/block/wing — please select the real Site",
+                        text_color=_DANGER)
+                    try:
+                        self.site_dropdown.entry.focus_set()
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
         # Name MAPPING also applies at save time: a mapped name typed or selected
         # manually lands in the target's folder, exactly like OCR would.
         try:

@@ -146,15 +146,20 @@ NOT on the list when it clearly matches no Known Site (e.g. a brand-new site).
 
 A trailing unit designator — one word followed by a number ("Tower 2",
 "Phase 3", "Unit 4") — is the same place as the site without it: "Kalpataru
-Elitus Tower 2" is "Kalpataru Elitus". A trailing STANDALONE dashed pair is
-the same too: "T-B" = Tower B, "T-2" = Tower 2, "T-9/10" = Towers 9 & 10
-("Raymond Premium T-B" and "Raymond Premium T-9/10" are both "Raymond
-Premium"). When the value differs from a Known Site only by such a
+Elitus Tower 2" is "Kalpataru Elitus". The same goes for EVERY spelling of
+that designator: a standalone dashed pair ("T-B" = Tower B, "T-2" = Tower 2,
+"T-9/10" = Towers 9 & 10), a unit word with a letter ("Tower B", "Wing C",
+"Block A", "Phase 2A") and a unit word with a range ("Tower 9/10"):
+"Raymond Premium T-B", "Raymond Premium Tower B" and "Raymond Premium
+Tower 9/10" are all "Raymond Premium"; "Kalpataru Elitus Wing C" is
+"Kalpataru Elitus". When the value differs from a Known Site only by such a
 designator, output the Known Site name WITHOUT the designator (e.g. output
-"Kalpataru Elitus", not "Kalpataru Elitus Tower 2"; output "Raymond
-Premium", never "Raymond Premium T-B" or "Raymond Premium T-9/10"). Do NOT
-strip the designator from a site name that does not otherwise match a Known
-Site (a brand-new site keeps its full name)."""
+"Kalpataru Elitus", not "Kalpataru Elitus Tower B" or "Kalpataru Elitus
+Tower 9/10"; output "Raymond Premium", never "Raymond Premium T-B"). If the
+"Other References" value alone is nothing but a designator ("Tower B",
+"Wing C", "T-9/10"), leave the Site cell EMPTY. Do NOT strip the designator
+from a site name that does not otherwise match a Known Site (a brand-new
+site keeps its full name)."""
 
 # Known-Clients section (same idea as Known Sites: the model resolves a client
 # written slightly differently to the existing catalog name so one place never

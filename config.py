@@ -350,42 +350,79 @@ _DASH_DESIGNATOR_RE = re.compile(
     r"(?i)(?<![-/])\b[a-z0-9]\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*$"
 )
 
-# The same shape but spelled with a unit WORD: "Phase-2A", "Tower-B",
-# "Tower -C", "Wing-2/3" — the word is a designator (see _UNIT_WORDS), so
-# the whole trailing token is dropped just like "Tower 2".
-_UNIT_DASH_DESIGNATOR_RE = re.compile(
+# The same shape but spelled with a unit WORD — with or without a separator,
+# and with or without a suffix. The word is a designator (see _UNIT_WORDS),
+# so "Phase-2A", "Tower-B", "Tower -C", "Wing-2/3" are dropped just like
+# "Tower 2" — AND the plain, un-dashed forms: a bare trailing word ("Lodha
+# Amara Tower" == "Lodha Amara"), a word + single letter ("Tower B" — T-B
+# spelled out, "Wing C", "Block A"), a word + number/range ("Tower 2",
+# "Tower 9/10", "Phase 2A"). The suffixes are deliberately constrained: a
+# whitespace-joined suffix must be a number (optionally with a trailing
+# letter: "2A") or a SINGLE letter — anything longer ("Tower View",
+# "Lodha Garden") is a real name, not a designator.
+_UNIT_WORD_DESIGNATOR_RE = re.compile(
     r"(?i)\b(?:" + "|".join(sorted(_UNIT_WORDS))
-    + r")\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*$"
+    + r")\b"
+    # 1) separator + value(s), chained: "Tower-C", "Wing-2/3", "Phase -2A"
+    r"(?:\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*"
+    # 2) whitespace + number, optionally with a trailing letter and ranges:
+    #    "Tower 2", "Phase 2A", "Tower 9/10"
+    r"|\s+[0-9]+[a-z]?(?:\s*[/-]\s*[0-9a-z]+)*"
+    # 3) whitespace + a single letter: "Tower B", "Wing C", "Block A"
+    r"|\s+[a-z])?$"
 )
 
 
+def _is_bare_unit_word(match_text: str) -> bool:
+    """True when the unit-word match is just the word itself ("Tower"),
+    i.e. no number/letter/range suffix follows it."""
+    return match_text.strip().lower() in _UNIT_WORDS
+
+
 def _strip_trailing_dash_designator(name) -> str:
-    """Drop ONE trailing dashed designator ("Raymond Premium T-B",
+    """Drop ONE trailing designator ("Raymond Premium T-B",
     "Raymond Premium T-9/10", "Raymond Premium Phase-2A" -> "Raymond
-    Premium"). Returns the input when nothing matches; never returns an
-    empty string."""
+    Premium"; "Kalpataru Elitus Tower", "Kalpataru Elitus Tower B",
+    "Kalpataru Elitus Tower 9/10", "Kalpataru Elitus Wing C" -> "Kalpataru
+    Elitus"). Returns the input when nothing is stripped; never returns an
+    empty string. A BARE trailing unit word is only treated as a designator
+    when a multi-word place name precedes it ("Lodha Woods Club House" keeps
+    "House" — it may BE the name; "Lodha Amara Tower" strips it) and a
+    standalone designator ("Tower B") stays as-is here (callers use
+    :func:`is_designator_only` to detect those)."""
     raw = str(name).strip()
     if not raw:
         return raw
-    for rx in (_DASH_DESIGNATOR_RE, _UNIT_DASH_DESIGNATOR_RE):
+    for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
-        if m:
-            out = raw[:m.start()].rstrip(" \t(")
-            return out if out else raw
+        if not m:
+            continue
+        out = raw[:m.start()].rstrip(" \t(")
+        if not out:
+            continue  # nothing but a designator — no place name to keep
+        if _is_bare_unit_word(m.group(0)) and len(out.split()) < 2:
+            # "Lodha Tower" / "Lodha Woods Club House": the bare unit word may
+            # BE part of the name; only strip when a real name precedes it.
+            continue
+        return out
     return raw
 
 
 def is_designator_only(name) -> bool:
     """True when *name* is NOTHING but a unit designator.
 
-    "Tower-A", "Tower -C", "T-9/10", "Phase-2" carry no place name at all —
-    there is no site to save, so OCR values like these must not become a new
-    site (the user picks the real one instead).
+    "Tower-A", "Tower -C", "T-9/10", "Phase-2", "Tower", "Tower B",
+    "Wing C", "Tower 9/10" carry no place name at all — there is no site to
+    save, so OCR values like these must not become a new site (the user
+    picks the real one instead).
     """
     raw = str(name).strip()
     if not raw:
         return False
-    for rx in (_DASH_DESIGNATOR_RE, _UNIT_DASH_DESIGNATOR_RE):
+    if normalize_site_name(raw) in _UNIT_WORDS:
+        # A lone unit word ("Tower", "Wing", "Block") is designator-only.
+        return True
+    for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
         if m and not raw[:m.start()].strip(" \t("):
             return True
@@ -397,9 +434,10 @@ def _match_forms(name: str) -> tuple:
 
     A name may compare equal through any of its forms: the plain normalized
     form, the numeric/unit-designator-stripped form ("Kalpataru Elitus
-    Tower 2" -> "kalpataru elitus"), and the dashed-designator-stripped
-    form ("Raymond Premium T-B" -> "raymond premium"). Returns a tuple of
-    the distinct forms, never empty.
+    Tower 2" -> "kalpataru elitus"), and the designator-stripped form —
+    dashed ("Raymond Premium T-B" -> "raymond premium") or spelled out with a
+    unit word ("Kalpataru Elitus Tower B" / "Kalpataru Elitus Wing C" ->
+    "kalpataru elitus"). Returns a tuple of the distinct forms, never empty.
     """
     raw = str(name).strip()
     norm = normalize_site_name(raw)
@@ -419,18 +457,22 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     Applies to site and client names alike. Matching ignores case,
     punctuation, spacing, articles (a/an/the) and numbers — "T1"/"T2"/"Tower
     1"/"Tower 2" are the same site, so the exact numeral never blocks a
-    match. A trailing unit designator is ignored too: "Kalpataru Elitus
-    Tower 2" matches "Kalpataru Elitus" (and "Lodha Shital Baug Tower 2"
-    matches "Sital Baug" — the brand prefix AND the designator are both
-    tolerated; "Raymond Premium T-B" — T-B = Tower B — matches "Raymond
-    Premium"). Tolerates one-letter spelling variants per word ("shital
-    bag" vs "Sital Baug", "Larsen and Toubro" vs "Larsen & Toubro") and at
-    most one extra word (brand prefixes like "Lodha"). Names that differ only
-    in spacing/punctuation ("T-A" vs "TA" vs "T A") are equivalent.
-    Deliberately strict: names that merely share words are NOT matched
-    ("Sai Baug" is never "Sital Baug"), and single-letter tokens are
-    exact-only ("Site A" is never "Site B"). Returns the canonical existing
-    spelling.
+    match. A trailing unit designator is ignored too, in every spelling:
+    "Kalpataru Elitus Tower 2" matches "Kalpataru Elitus", "Kalpataru
+    Elitus Tower B" matches "Kalpataru Elitus" (T-B spelled out = Tower B),
+    "Kalpataru Elitus Wing C" / "Block A" / "Tower 9/10" as well (and
+    "Lodha Shital Baug Tower 2" matches "Sital Baug" — the brand prefix AND
+    the designator are both tolerated; "Raymond Premium T-B" matches
+    "Raymond Premium"). Tolerates one-letter spelling variants per word
+    ("shital bag" vs "Sital Baug", "Larsen and Toubro" vs "Larsen &
+    Toubro") and at most one extra word (brand prefixes like "Lodha").
+    Names that differ only in spacing/punctuation ("T-A" vs "TA" vs "T A")
+    are equivalent. Deliberately strict: names that merely share words are
+    NOT matched ("Sai Baug" is never "Sital Baug"), single-letter tokens are
+    exact-only ("Site A" is never "Site B"), and a BARE trailing unit word
+    is only ignored when a real name precedes it ("Lodha Amara Tower" is
+    "Lodha Amara", but "Lodha Woods Club House" keeps "House" — it may BE
+    the name). Returns the canonical existing spelling.
     """
     cand_forms = _match_forms(candidate)
     if not cand_forms or not cand_forms[0]:
@@ -1200,12 +1242,14 @@ class ConfigManager:
         return find_near_site(existing_sites, candidate)
 
     def site_display_name(self, site: str) -> str:
-        """*site* with a trailing dashed unit designator removed.
+        """*site* with a trailing unit designator removed.
 
-        "Raymond Premium T-B" -> "Raymond Premium", "X T-9/10" -> "X". Used
-        wherever a site is shown or stored (the popup's read-only resolution
-        AND add_site) so a tower/phase designator never lands in the field or
-        in config.json. See :func:`_strip_trailing_dash_designator`.
+        "Raymond Premium T-B" -> "Raymond Premium", "X T-9/10" -> "X",
+        "Kalpataru Elitus Tower B" -> "Kalpataru Elitus". Used wherever a
+        site is shown or stored (the popup's read-only resolution AND
+        add_site) so a tower/phase/block/wing designator never lands in the
+        field or in config.json. See
+        :func:`_strip_trailing_dash_designator`.
         """
         return _strip_trailing_dash_designator(site)
 
@@ -1373,6 +1417,13 @@ class ConfigManager:
         site = site.strip()
         if not site:
             return ""
+        if is_designator_only(site):
+            # "Tower B", "Wing C", "T-9/10" — a bare unit designator carries
+            # no place name and must NEVER become a site in config.json,
+            # regardless of which caller adds it (OCR, the Save path, or the
+            # typed Add-New-Site flow). Callers keep the typed value in the
+            # field; only the catalog is protected here.
+            return ""
         changed = False
         with self._lock:
             clients = self.load().setdefault("clients", {})
@@ -1389,10 +1440,11 @@ class ConfigManager:
                 if canonical != site:
                     print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
                 return canonical
-            # A trailing dashed unit designator ("Raymond Premium T-B" = Tower
-            # B) never becomes part of a NEW site name — the designator is
-            # not the place, so the stored site is "Raymond Premium" ("T-B
-            # is for Tower B so it shouldn't be putting T-B in Site").
+            # A trailing unit designator ("Raymond Premium T-B" = Tower B,
+            # "Kalpataru Elitus Tower B", "X Wing C") never becomes part of a
+            # NEW site name — the designator is not the place, so the stored
+            # site is "Raymond Premium" ("T-B is for Tower B so it shouldn't
+            # be putting T-B in Site").
             effective = _strip_trailing_dash_designator(site)
             if effective != site:
                 canonical = find_near_name(list(sites), effective)
