@@ -5,11 +5,11 @@
     "DC"
   ],
   "materials": {
-    "Aluminium": "A",
-    "Fastner": "F",
+    "Aluminium": "Al",
+    "Fastner": "FA",
     "Stainless Steel": "SS",
     "Mild Steel": "MS",
-    "Glass": "G",
+    "Glass": "GA",
     "Consumables": "CO",
     "Packing": "PA",
     "fitting": "FI",
