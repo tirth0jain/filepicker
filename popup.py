@@ -665,13 +665,20 @@ class MappingDialog:
     def __init__(self, parent, kind: str, config, names: List[str],
                  current: str = "",
                  on_changed: Optional[Callable[[], None]] = None) -> None:
-        self.kind = kind  # "client" | "site"
+        self.kind = kind  # "client" | "site" | "material"
         self.config = config
         self._on_changed = on_changed
         self._rows: List[tuple] = []  # [(source, target), ...] in the list
 
+        if kind == "material":
+            title, what = "Map Material", "material"
+        elif kind == "client":
+            title, what = "Map Client", "client"
+        else:
+            title, what = "Map Site", "site"
+
         self.win = ctk.CTkToplevel(parent)
-        self.win.title("Map Client" if kind == "client" else "Map Site")
+        self.win.title(title)
         self.win.configure(fg_color=_BG)
         self.win.resizable(False, False)
         self.win.attributes("-topmost", True)
@@ -690,30 +697,47 @@ class MappingDialog:
         body = ctk.CTkFrame(self.win, fg_color=_BG)
         body.pack(fill="both", expand=True, padx=16, pady=12)
 
-        what = "client" if kind == "client" else "site"
+        if kind == "material":
+            explain = ("When OCR reads the \"Description of Goods\", the "
+                       "word on the left is treated as the material on the "
+                       "right: future downloads mentioning \"nuts\" or "
+                       "\"bolts\" pre-select \"Screw\" automatically, even "
+                       "though the document never writes the material name.")
+        else:
+            explain = (f"When OCR (or this popup) reads the name on the left, "
+                       f"FilePicker switches it to the name on the right. Future "
+                       f"downloads of the same {what} are filed under the mapped "
+                       f"name automatically.")
         ctk.CTkLabel(
             body,
-            text=f"When OCR (or this popup) reads the name on the left, "
-                 f"FilePicker switches it to the name on the right. Future "
-                 f"downloads of the same {what} are filed under the mapped "
-                 f"name automatically.",
+            text=explain,
             font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
             wraplength=520,
         ).pack(anchor="w", pady=(0, 10))
 
-        ctk.CTkLabel(body, text="Document shows / OCR reads:",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+        ctk.CTkLabel(
+            body,
+            text="Goods description shows:"
+                 if kind == "material" else "Document shows / OCR reads:",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=_TEXT_MUTED,
+        ).pack(anchor="w", pady=(0, 2))
         self.source_dd = SearchableDropdown(body, values=list(names),
                                             on_change=None)
         self.source_dd.entry.configure(
-            placeholder_text="Search or type the name the document has…",
+            placeholder_text=("Search or type the word the document has…"
+                              if kind == "material"
+                              else "Search or type the name the document has…"),
         )
         self.source_dd.set(current)
 
-        ctk.CTkLabel(body, text="Map to:",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w", pady=(6, 2))
+        ctk.CTkLabel(
+            body,
+            text="Select as material:"
+                 if kind == "material" else "Map to:",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 2))
         self.target_dd = SearchableDropdown(body, values=list(names),
                                             on_change=None)
         self.target_dd.entry.configure(
@@ -773,16 +797,22 @@ class MappingDialog:
     def _alias_map(self) -> Dict[str, str]:
         if self.kind == "client":
             return self.config.client_aliases
+        if self.kind == "material":
+            return self.config.material_aliases
         return self.config.site_aliases
 
     def _set_alias(self, source: str, target: str) -> bool:
         if self.kind == "client":
             return self.config.set_client_alias(source, target)
+        if self.kind == "material":
+            return self.config.set_material_alias(source, target)
         return self.config.set_site_alias(source, target)
 
     def _remove_alias(self, source: str) -> bool:
         if self.kind == "client":
             return self.config.remove_client_alias(source)
+        if self.kind == "material":
+            return self.config.remove_material_alias(source)
         return self.config.remove_site_alias(source)
 
     def _apply_map(self) -> None:
@@ -1373,11 +1403,22 @@ class FilePickerPopup:
         self.doc_type_combo.pack(fill="x", pady=(0, self._sp(6)))
 
         # -- Materials (multi-select) -----------------------------------
-        ctk.CTkLabel(f, text="Material (multi-select)",
+        material_header = ctk.CTkFrame(f, fg_color="transparent")
+        material_header.pack(fill="x", pady=(0, self._sp(1, 1)))
+        ctk.CTkLabel(material_header, text="Material (multi-select)",
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=_TEXT_MUTED,
-                     height=self._h(28, 20)).pack(anchor="w",
-                                                  pady=(0, self._sp(1, 1)))
+                     height=self._h(28, 20)).pack(side="left")
+        # 🗺 Map: alias a word shown in the "Description of Goods" column to a
+        # material ("nuts"/"bolts" -> Screw) — future OCR reads pre-select the
+        # mapped material even when the document never writes its name.
+        self.material_map_btn = ctk.CTkButton(
+            material_header, text="🗺 Map", width=72, height=self._h(22, 20),
+            fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._open_mapping_dialog("material"),
+        )
+        self.material_map_btn.pack(side="right")
         self.material_frame = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=8)
         if self._compact:
             # The panel is the only part of the form that can flex: with the
@@ -1806,10 +1847,11 @@ class FilePickerPopup:
     # "Description of Goods" -> catalog materials
     # ------------------------------------------------------------------
     def _goods_material_matches(self, goods_text) -> List[str]:
-        """Catalog materials whose name or 2-letter code appears in *goods_text*.
+        """Catalog materials whose name, code or mapped synonym appears in text.
 
-        OCR transcribes the delivery note's "Description of Goods" table
-        verbatim (comma-separated item descriptions). Matching it against the
+        OCR transcribes ONLY the bold heading words of the "Description of
+        Goods" table (see the OCR prompt) — the item names, never the
+        sub-description lines printed below them. Matching those against the
         catalog is deliberately conservative:
 
         - whole words only (``\\b``), so "stal" never matches "Stainless" and
@@ -1817,6 +1859,9 @@ class FilePickerPopup:
         - a trailing plural is allowed ("Screws" -> "Screw");
         - both the material NAME and its shortcode are searched ("Mild Steel"
           or "MS"), which is how delivery notes usually write items;
+        - material MAPPINGS (the 🗺 Map editor) are applied: a mapped goods
+          word ("nuts"/"bolts" -> Screw) selects its material even though the
+          document never writes the material name;
         - longest match wins on overlapping text, so "GI SHEET" selects only
           "GI SHEET" and not the "GI" code of "Galvanized Iron".
 
@@ -1859,6 +1904,40 @@ class FilePickerPopup:
                         candidates.append((m.start(), m.end(), is_name, name))
                 except re.error:
                     continue
+
+        # Material MAPPINGS (the 🗺 Map button): a goods word like "nuts" or
+        # "bolts" maps to a catalog material ("Screw") even though the
+        # document never writes its name. Aliases only ever point at existing
+        # catalog materials; a mapped target that is not in the catalog is
+        # ignored (nothing that cannot be selected is invented).
+        try:
+            config = getattr(self, "config", None)
+            aliases = dict(config.material_aliases) if config is not None else {}
+        except Exception:
+            aliases = {}
+        for src, tgt in aliases.items():
+            tgt_name = str(tgt or "").strip()
+            if tgt_name not in self._materials_map:
+                continue
+            words = [w for w in re.split(r"[^A-Za-z0-9]+", str(src).lower()) if w]
+            if not words or (len(words) == 1 and len(words[0]) < 2):
+                continue
+            pieces = []
+            for idx, word in enumerate(words):
+                if (idx == len(words) - 1 and word.endswith("s")
+                        and len(word) > 2):
+                    # "nuts" also matches "nut" (singular strip on the last
+                    # word), so a "nuts" -> Screw mapping catches both.
+                    pieces.append("(?:" + re.escape(word) + "|"
+                                  + re.escape(word[:-1]) + ")")
+                else:
+                    pieces.append(re.escape(word))
+            pattern = r"\b" + r"\s+".join(pieces) + r"(?:s|es)?\b"
+            try:
+                for m in re.finditer(pattern, text):
+                    candidates.append((m.start(), m.end(), False, tgt_name))
+            except re.error:
+                continue
 
         # Longest span first (names before codes on a tie), then accept greedily
         # when the span does not overlap an already-accepted one.
@@ -2140,16 +2219,22 @@ class FilePickerPopup:
     # Name MAPPING (the 🗺 Map buttons next to Client/Site)
     # ------------------------------------------------------------------
     def _open_mapping_dialog(self, kind: str) -> None:
-        """Open the Map <Client|Site> editor for *kind*.
+        """Open the Map <Client|Site|Material> editor for *kind*.
 
         The dialog lists the existing mappings (searchable) and lets the
         user map the name the current document shows (pre-filled from the
         field) to the name to use instead. Future OCR reads of the mapped
-        source switch to the target automatically.
+        source switch to the target automatically. For materials, the
+        SOURCE is a word printed in the "Description of Goods" column and
+        the TARGET is the catalog material to pre-select for it.
         """
         if kind == "client":
             names = list(self.config.clients.keys())
             current = self.client_dropdown.get().strip()
+        elif kind == "material":
+            names = list(self.config.materials.keys())
+            current = self._selected_materials[0] \
+                if self._selected_materials else ""
         else:
             names = self.config.all_sites()
             current = self._current_site().strip()
@@ -2167,6 +2252,10 @@ class FilePickerPopup:
         just-mapped source visible in the current popup switches to the
         target right away — the same rule OCR will follow for future popups.
         """
+        if kind == "material":
+            # Material mappings affect future OCR reads of the goods
+            # description; there is no popup field to switch right now.
+            return
         try:
             if kind == "client":
                 cur = self.client_dropdown.get().strip()

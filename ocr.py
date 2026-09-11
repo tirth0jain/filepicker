@@ -108,7 +108,7 @@ OCR_PROMPT = """You are given a delivery note document. Extract the following in
 2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
 3. Site - ONLY the value of the field literally labelled "Other References" (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
 4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
-5. Description of Goods - the item descriptions from the goods/items table (the column headed "Description of Goods", e.g. "MS Angle 50x50x6", "SS Sheet 304", "Aluminium Composite Panel")
+5. Description of Goods - ONLY the BOLD heading words of each item in the goods/items table (the material name printed in bold, e.g. "MS Angle", "SS Sheet", "Aluminium Composite Panel") — NOT the smaller normal-weight description lines written below each heading
 
 Rules:
 - Company is the supplier (from the "From" / "RUBY STEEL" section)
@@ -117,7 +117,7 @@ Rules:
 - If the document has no "Other References" field, leave the Site cell EMPTY (do not substitute any other value)
 - Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 - If the Delivery Note No. is not present, leave Serial Number empty
-- Description of Goods is TRANSCRIBED, never interpreted: copy every distinct item description from the goods table exactly as written, separated by commas. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
+- Description of Goods: transcribe ONLY the BOLD heading of each item row (the material name printed in bold). IGNORE the smaller normal-weight description lines written BELOW each heading. If no text in the table is bold, transcribe only the FIRST line of each item (the heading), never the sub-lines below. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
 - Case insensitive, convert to Title Case (Description of Goods keeps the document's own wording)
 
 Output format:
@@ -128,7 +128,7 @@ Output format:
 | Client (Buyer) | [Name] |
 | Site (Other References) | [Name] |
 | Serial Number (Delivery Note No.) | [Number] |
-| Description of Goods | [Item descriptions, comma separated] |"""
+| Description of Goods | [Bold item headings, comma separated] |"""
 
 # Known-Sites section appended to the base prompt (see build_ocr_prompt).
 # The model gets the current site catalog so a document that writes a site
@@ -432,8 +432,9 @@ def extract_delivery_note(
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site, serial, goods}.
 
-    ``goods`` is the verbatim "Description of Goods" text (comma-separated
-    item descriptions); the popup matches it against the material catalog to
+    ``goods`` is the BOLD heading words of the "Description of Goods" table
+    (comma-separated item names; the sub-description lines below each heading
+    are excluded); the popup matches it against the material catalog to
     pre-select the materials the delivery contains.
 
     When ``known_sites`` / ``known_clients`` are given (names already in the

@@ -98,10 +98,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # (from OCR, or typed/saved manually) switches it to the TARGET name
     # instead. This is how a recurring OCR spelling is pinned to the
     # catalog name it belongs to without renaming anything. client_aliases
-    # maps clients to clients; site_aliases maps sites to sites. Both are
-    # shared config (synced/pushed like clients & materials).
+    # maps clients to clients; site_aliases maps sites to sites;
+    # material_aliases maps a word shown in the "Description of Goods"
+    # column to a MATERIAL (e.g. "nuts"/"bolts" -> "Screw", "hinges" ->
+    # "Fastner") so the popup pre-selects the right material even when the
+    # document never writes the catalog name. All three are shared config
+    # (synced/pushed like clients & materials).
     "client_aliases": {},
     "site_aliases": {},
+    "material_aliases": {},
     # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
     # OpenAI-compatible API). Overridable per machine in config.json.
     "ocr_model": OCR_MODEL,
@@ -706,7 +711,7 @@ class ConfigManager:
         with self._lock:
             changed = False
             for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases"):
+                        "doc_types", "client_aliases", "site_aliases", "material_aliases"):
                 if key in remote and remote[key] != self._data.get(key):
                     self._data[key] = deepcopy(remote[key])
                     changed = True
@@ -750,7 +755,7 @@ class ConfigManager:
             merged = self._merge_for_push(remote, self._data)
             changed = False
             for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases"):
+                        "doc_types", "client_aliases", "site_aliases", "material_aliases"):
                 if key in merged and merged[key] != self._data.get(key):
                     self._data[key] = merged[key]
                     changed = True
@@ -861,7 +866,7 @@ class ConfigManager:
             # If nothing to push (remote already has our catalog), skip
             # Compare only the catalog keys for cheap equality
             catalog_keys = ("companies", "company_initials", "clients", "materials",
-                            "doc_types", "client_aliases", "site_aliases")
+                            "doc_types", "client_aliases", "site_aliases", "material_aliases")
             if all(merged.get(k) == remote_data.get(k) for k in catalog_keys):
                 # For a brand-new file (remote_data empty) this is never true
                 if remote_data:
@@ -1161,7 +1166,8 @@ class ConfigManager:
         # client_aliases / site_aliases — dict union, local wins (same rule
         # as materials: a mapping added locally but not yet pushed is never
         # lost when the remote is still stale).
-        for alias_key in ("client_aliases", "site_aliases"):
+        for alias_key in ("client_aliases", "site_aliases",
+                             "material_aliases"):
             rem_al = dict(remote.get(alias_key, {}))
             loc_al = dict(local.get(alias_key, {}))
             merged_al = dict(rem_al)
@@ -1670,3 +1676,37 @@ class ConfigManager:
     def resolve_site(self, name: str) -> Optional[str]:
         """The site that *name* is mapped to (an alias target), else None."""
         return self._resolve_alias("site_aliases", name)
+
+    @property
+    def material_aliases(self) -> Dict[str, str]:
+        """Return a copy of the {goods word -> material name} map.
+
+        A word the "Description of Goods" column shows ("nuts", "bolts")
+        that is NOT a catalog material name maps to the material to select
+        instead (e.g. "nuts" -> "Screw"). Set with
+        :meth:`set_material_alias`; the popup's goods matcher applies it.
+        """
+        aliases = self.load().get("material_aliases", {})
+        return {str(k): str(v) for k, v in aliases.items()
+                if isinstance(v, str)}
+
+    def set_material_alias(self, source: str, target: str) -> bool:
+        """Map the *source* goods word (e.g. "nuts") to the *target* material.
+
+        From the next OCR read, whenever the goods description mentions the
+        source word, the target material is pre-selected. Returns True when
+        the mapping changed; push is deferred (a file must be saved first).
+        """
+        return self._set_alias("material_aliases", source, target, "material")
+
+    def remove_material_alias(self, source: str) -> bool:
+        """Delete the material mapping whose source is *source* (any casing)."""
+        return self._remove_alias("material_aliases", source, "material")
+
+    def resolve_material(self, name: str) -> Optional[str]:
+        """The material that the goods word *name* maps to, else None.
+
+        Exact case-insensitive source match first, then near-match against
+        the alias sources ("nut" for a "nuts" key still hits the mapping).
+        """
+        return self._resolve_alias("material_aliases", name)
