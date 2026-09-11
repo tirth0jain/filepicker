@@ -108,6 +108,7 @@ OCR_PROMPT = """You are given a delivery note document. Extract the following in
 2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
 3. Site - ONLY the value of the field literally labelled "Other References" (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
 4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
+5. Description of Goods - the item descriptions from the goods/items table (the column headed "Description of Goods", e.g. "MS Angle 50x50x6", "SS Sheet 304", "Aluminium Composite Panel")
 
 Rules:
 - Company is the supplier (from the "From" / "RUBY STEEL" section)
@@ -116,7 +117,8 @@ Rules:
 - If the document has no "Other References" field, leave the Site cell EMPTY (do not substitute any other value)
 - Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 - If the Delivery Note No. is not present, leave Serial Number empty
-- Case insensitive, convert to Title Case
+- Description of Goods is TRANSCRIBED, never interpreted: copy every distinct item description from the goods table exactly as written, separated by commas. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
+- Case insensitive, convert to Title Case (Description of Goods keeps the document's own wording)
 
 Output format:
 
@@ -125,7 +127,8 @@ Output format:
 | Company (Supplier) | [Name] |
 | Client (Buyer) | [Name] |
 | Site (Other References) | [Name] |
-| Serial Number (Delivery Note No.) | [Number] |"""
+| Serial Number (Delivery Note No.) | [Number] |
+| Description of Goods | [Item descriptions, comma separated] |"""
 
 # Known-Sites section appended to the base prompt (see build_ocr_prompt).
 # The model gets the current site catalog so a document that writes a site
@@ -212,6 +215,13 @@ _ROW_PATTERNS = {
         # "Delivery Note No." / "Delivery Note Number" / "Serial No."
         r"(?:Serial\s*(?:Number|No\.?)|Delivery\s*Note\s*(?:Number|No\.?))"
         r"\s*(?:\(\s*Delivery\s*Note\s*(?:Number|No\.?)\s*\))?",
+        re.IGNORECASE,
+    ),
+    # Verbatim item descriptions from the goods table (used to pre-select the
+    # catalog materials the delivery actually contains — see the popup's
+    # _goods_material_matches).
+    "goods": re.compile(
+        r"(?:Description\s+of\s+Goods|Goods\s+Description|Item\s+Description)",
         re.IGNORECASE,
     ),
 }
@@ -363,7 +373,7 @@ def _looks_like_reference(value: str) -> bool:
 
 
 def parse_table_response(content: str) -> Dict[str, Optional[str]]:
-    """Extract Company/Client/Site/Serial from the model's markdown table.
+    """Extract Company/Client/Site/Serial/Goods from the model's markdown table.
 
     Tolerates code fences, extra surrounding text, different label casing and
     values wrapped in ``**``. Fields the model couldn't determine (or that
@@ -371,6 +381,7 @@ def parse_table_response(content: str) -> Dict[str, Optional[str]]:
     """
     result: Dict[str, Optional[str]] = {
         "company": None, "client": None, "site": None, "serial": None,
+        "goods": None,
     }
     if not content:
         return result
@@ -419,7 +430,11 @@ def extract_delivery_note(
     known_clients: Optional[List[str]] = None,
     on_error: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
-    """Run OCR on *file_path* and return {company, client, site} (None on failure).
+    """Run OCR on *file_path* and return {company, client, site, serial, goods}.
+
+    ``goods`` is the verbatim "Description of Goods" text (comma-separated
+    item descriptions); the popup matches it against the material catalog to
+    pre-select the materials the delivery contains.
 
     When ``known_sites`` / ``known_clients`` are given (names already in the
     config), the prompt is rebuilt with them so the model resolves near-same
@@ -708,7 +723,8 @@ class OcrPool:
         if result and any(result.values()):
             print(f"[ocr] {file_path.name}: company={result.get('company')!r} "
                   f"client={result.get('client')!r} site={result.get('site')!r} "
-                  f"serial={result.get('serial')!r}")
+                  f"serial={result.get('serial')!r} "
+                  f"goods={result.get('goods')!r}")
         else:
             print(f"[ocr] {file_path.name}: no fields extracted")
         with self._lock:

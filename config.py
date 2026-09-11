@@ -1241,6 +1241,79 @@ class ConfigManager:
         """
         return find_near_site(existing_sites, candidate)
 
+    def find_similar_site_other_client(self, client: str, site: str):
+        """Every OTHER client that already has *site* (near-match), if any.
+
+        Returns a list of ``(other_client, their_site_spelling)`` pairs — one
+        per other client whose site list contains the same place as *site*
+        (same near-match rules as :func:`find_near_name`, so designators,
+        spacing, punctuation, one-letter variants and one extra word are all
+        ignored). The CURRENT client is skipped: a site that is already yours
+        is normal, and a match there is resolved by the ordinary canonical
+        lookup instead.
+
+        This is the check behind the popup's cross-client warning. It only
+        REPORTS — nothing is moved or reassigned here, ever (see
+        :meth:`move_client_sites` for the explicit, user-requested move).
+        """
+        out = []
+        candidate = str(site or "").strip()
+        if not candidate:
+            return out
+        current = str(client or "").strip().lower()
+        with self._lock:
+            clients = self.load().get("clients", {})
+            for name, sites in clients.items():
+                if str(name).strip().lower() == current:
+                    continue
+                hit = find_near_name(list(sites or []), candidate)
+                if hit is not None:
+                    out.append((str(name), str(hit)))
+        return out
+
+    def move_client_sites(self, source_client: str, target_client: str) -> List[str]:
+        """Move every site of *source_client* into *target_client*.
+
+        The user-driven half of the cross-client warning ("move all sites from
+        other client to present one which we save"): each of the source
+        client's sites is appended to the target's list unless the target
+        already has the same place (near-match dedupe keeps the target's
+        existing spelling); the emptied source client is then removed from the
+        catalog. Never called automatically — only after the user picks
+        "move" in the warning dialog.
+
+        Returns the target client's site list after the move. Pushes are
+        deferred like every other mutator (the push happens once a file is
+        actually saved, or on the tray force-push).
+        """
+        source = str(source_client or "").strip()
+        target = str(target_client or "").strip()
+        if not source or not target:
+            return []
+        moved_any = False
+        with self._lock:
+            clients = self.load().setdefault("clients", {})
+            src_key = self._canonical_key(clients, source)
+            tgt_key = self._canonical_key(clients, target)
+            if str(src_key).strip().lower() == str(tgt_key).strip().lower():
+                return list(clients.get(tgt_key, []))
+            target_sites = clients.setdefault(tgt_key, [])
+            for site in list(clients.get(src_key, [])):
+                if not str(site).strip():
+                    continue
+                if find_near_name(list(target_sites), site) is None:
+                    target_sites.append(site)
+                    moved_any = True
+            if src_key in clients:
+                del clients[src_key]
+                moved_any = True
+            self.save()
+            result = list(target_sites)
+        if moved_any:
+            self._mark_push_pending(
+                reason=f"move all sites from '{src_key}' to '{tgt_key}'")
+        return result
+
     def site_display_name(self, site: str) -> str:
         """*site* with a trailing unit designator removed.
 

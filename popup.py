@@ -13,6 +13,7 @@ captures the metadata needed to rename and route the file:
 
 from __future__ import annotations
 
+import re
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -190,6 +191,114 @@ def ask_duplicate_action(root, filename: str, existing_path: Path) -> str:
     dialog, callback = _duplicate_dialog_ui(root, filename, existing_path)
     dialog.wait_window()
     return callback["value"] or "skip"
+
+
+def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
+    """Build the "this site belongs to another client" warning dialog.
+
+    *conflicts* is the ``[(other_client, their_site), ...]`` list from
+    :meth:`ConfigManager.find_similar_site_other_client`. Returns
+    ``(dialog, callback)`` where ``callback["value"]`` becomes:
+
+    - ``"continue"`` — save under *client* anyway (the warning only);
+    - ``"transfer"`` — move EVERY site of the conflicting client(s) into
+      *client* and then save;
+    - ``"cancel"`` — do nothing; the popup stays open so the user can pick
+      the other client themselves.
+
+    The dialog itself never touches the config: the caller performs the move
+    only after the user explicitly clicks the transfer button. Closing the
+    window (or Escape) cancels — there is no automatic shift and no default
+    that changes any data.
+    """
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title("Site belongs to another client")
+    dialog.configure(fg_color=_BG)
+    dialog.attributes("-topmost", True)
+    dialog.resizable(False, False)
+    try:
+        sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+        dialog.geometry(f"560x300+{max((sw - 560) // 2, 0)}+{max((sh - 300) // 3, 0)}")
+    except tk.TclError:
+        pass
+
+    callback = {"value": None}
+
+    def choose(choice: str) -> None:
+        callback["value"] = choice
+        try:
+            dialog.destroy()
+        except tk.TclError:
+            pass
+
+    others = []
+    for other, other_site in conflicts:
+        if other not in others:
+            others.append(other)
+    lines = "\n".join(f"•  {other}  →  {other_site}"
+                      for other, other_site in conflicts[:6])
+    if len(conflicts) > 6:
+        lines += f"\n•  … and {len(conflicts) - 6} more"
+    if len(others) == 1:
+        transfer_text = f"Move {others[0]}'s sites here"
+    else:
+        transfer_text = f"Move all {len(others)} clients' sites here"
+
+    ctk.CTkLabel(
+        dialog, text="⚠ This site is already used by another client",
+        font=ctk.CTkFont(size=15, weight="bold"), text_color=_TEXT,
+    ).pack(anchor="w", padx=18, pady=(18, 6))
+    ctk.CTkLabel(
+        dialog,
+        text=f"\"{site}\" is the same place as a site of another client:\n"
+             f"{lines}\n\n"
+             f"Saving keeps this file under \"{client}\". Nothing is moved\n"
+             f"automatically — choose what to do:",
+        font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
+        wraplength=520,
+    ).pack(anchor="w", padx=18, pady=(0, 12))
+
+    btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+    btn_row.pack(fill="x", padx=18, pady=(0, 16))
+    keep_btn = ctk.CTkButton(
+        btn_row, text=f"Keep under {client}", command=lambda: choose("continue"),
+        fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
+        font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff",
+    )
+    keep_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+    move_btn = ctk.CTkButton(
+        btn_row, text=transfer_text, command=lambda: choose("transfer"),
+        fg_color=_BG_FIELD, hover_color="#33334a", height=38,
+        font=ctk.CTkFont(size=12), text_color=_TEXT,
+    )
+    move_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+    cancel_btn = ctk.CTkButton(
+        btn_row, text="Cancel", command=lambda: choose("cancel"),
+        fg_color=_BG_FIELD, hover_color="#33334a", width=90, height=38,
+        font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+    )
+    cancel_btn.pack(side="left", fill="x")
+
+    # Cancel is the safe default: closing or Escape changes nothing, leaving
+    # the popup open so the user can switch the client themselves.
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+    dialog.bind("<Escape>", lambda _e: choose("cancel"))
+    try:
+        keep_btn.focus_set()
+    except tk.TclError:
+        pass
+    return dialog, callback
+
+
+def ask_cross_client_site(parent, client: str, site: str, conflicts) -> str:
+    """Blocking wrapper around :func:`_cross_client_dialog_ui`.
+
+    Returns ``"continue"``, ``"transfer"`` or ``"cancel"`` (closing the
+    dialog counts as ``"cancel"``).
+    """
+    dialog, callback = _cross_client_dialog_ui(parent, client, site, conflicts)
+    dialog.wait_window()
+    return callback["value"] or "cancel"
 
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
@@ -733,6 +842,16 @@ class MappingDialog:
             self.win.destroy()
         except tk.TclError:
             pass
+
+
+# Regional spellings / known typos treated as the same WORD when matching a
+# material NAME against the "Description of Goods" text (the OCR transcription
+# keeps the document's spelling: "galvanised", "aluminum", "fastener").
+_MATERIAL_WORD_ALIASES = {
+    "galvanized": ("galvanised",),
+    "aluminium": ("aluminum",),
+    "fastner": ("fastener",),
+}
 
 
 class FilePickerPopup:
@@ -1684,6 +1803,103 @@ class FilePickerPopup:
         self._refresh_preview()
 
     # ------------------------------------------------------------------
+    # "Description of Goods" -> catalog materials
+    # ------------------------------------------------------------------
+    def _goods_material_matches(self, goods_text) -> List[str]:
+        """Catalog materials whose name or 2-letter code appears in *goods_text*.
+
+        OCR transcribes the delivery note's "Description of Goods" table
+        verbatim (comma-separated item descriptions). Matching it against the
+        catalog is deliberately conservative:
+
+        - whole words only (``\\b``), so "stal" never matches "Stainless" and
+          "customer" never matches the "CO" code;
+        - a trailing plural is allowed ("Screws" -> "Screw");
+        - both the material NAME and its shortcode are searched ("Mild Steel"
+          or "MS"), which is how delivery notes usually write items;
+        - longest match wins on overlapping text, so "GI SHEET" selects only
+          "GI SHEET" and not the "GI" code of "Galvanized Iron".
+
+        Returns the matched material names in the order they appear in the
+        goods text (empty when nothing matches — the caller then leaves the
+        material selection untouched).
+        """
+        text = str(goods_text or "").strip().lower()
+        if not text:
+            return []
+        # Punctuation to spaces keeps word boundaries ("MS-ANGLE" -> "ms angle");
+        # squeezing runs of whitespace makes the "\s+" in the patterns cheap.
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return []
+
+        candidates = []  # (start, end, is_name, material_name)
+        for name, code in self._materials_map.items():
+            terms = [(str(name), True)]
+            if code and len(str(code)) >= 2:
+                terms.append((str(code), False))
+            for term, is_name in terms:
+                words = [w for w in re.split(r"[^A-Za-z0-9]+", term.lower()) if w]
+                if not words:
+                    continue
+                if len(words) == 1 and len(words[0]) < 2:
+                    continue  # a single letter is never a material signal
+                pieces = []
+                for word in words:
+                    alts = _MATERIAL_WORD_ALIASES.get(word) if is_name else None
+                    if alts:
+                        pieces.append("(?:" + "|".join(
+                            re.escape(w) for w in (word,) + tuple(alts)) + ")")
+                    else:
+                        pieces.append(re.escape(word))
+                pattern = (r"\b" + r"\s+".join(pieces) + r"(?:s|es)?\b")
+                try:
+                    for m in re.finditer(pattern, text):
+                        candidates.append((m.start(), m.end(), is_name, name))
+                except re.error:
+                    continue
+
+        # Longest span first (names before codes on a tie), then accept greedily
+        # when the span does not overlap an already-accepted one.
+        candidates.sort(key=lambda c: (-(c[1] - c[0]), not c[2], c[0]))
+        taken = []
+        chosen = []
+        chosen_names = set()
+        for start, end, _is_name, name in candidates:
+            if any(start < t_end and t_start < end for t_start, t_end in taken):
+                continue
+            taken.append((start, end))
+            if name in chosen_names:
+                continue
+            chosen_names.add(name)
+            chosen.append((start, name))
+        chosen.sort(key=lambda c: c[0])
+        return [name for _start, name in chosen]
+
+    def _apply_goods_materials(self, goods_text) -> bool:
+        """Pre-select the catalog materials the goods description mentions.
+
+        Only ADDS to an untouched selection: when the user already picked
+        materials (or OCR already filled them), nothing is changed, and when
+        the goods text matches nothing at all the selection is left exactly as
+        it is — no material is ever invented, renamed or cleared.
+        """
+        if self._selected_materials:
+            return False
+        matches = self._goods_material_matches(goods_text)
+        if not matches:
+            return False
+        for name in matches:
+            if name not in self._selected_materials:
+                self._selected_materials.append(name)
+        try:
+            self._render_material_chips()
+        except Exception:
+            pass
+        return True
+
+    # ------------------------------------------------------------------
     # Hotkeys (Alt + 2-letter code) — work from any field
     # ------------------------------------------------------------------
     # Alt+RC toggles the Received-copy checkbox (the "RC" pseudo-code; no
@@ -2195,6 +2411,16 @@ class FilePickerPopup:
             self._serial_var.set(serial)
             changed = True
 
+        # "Description of Goods" -> catalog materials: pre-select the
+        # materials the delivery actually contains (name or shortcode found in
+        # the transcribed item descriptions). Independent of the client/site
+        # fields, so it runs even when those were already typed; a goods text
+        # that matches nothing leaves the selection untouched (no material is
+        # ever invented).
+        if self._apply_goods_materials(result.get("goods")):
+            changed = True
+            self._refresh_preview()
+
         # If the user already started filling client/site, leave the dropdown
         # fields alone (the serial above is still applied, though).
         if self.client_dropdown.entry.get().strip() or self.site_dropdown.entry.get().strip():
@@ -2489,6 +2715,46 @@ class FilePickerPopup:
                 self.client_dropdown.set(client)
         except Exception:
             pass
+        # Cross-client site check (0.6.28): is *site* already the same place as
+        # a site of ANOTHER client? This is a WARNING only — the file is never
+        # shifted to the other client and nothing is ever merged automatically.
+        # The user explicitly chooses one of:
+        #   continue  -> save under THIS client as chosen (warning only);
+        #   transfer  -> move ALL sites of the conflicting client(s) into THIS
+        #                client, then save (explicit "move all sites from
+        #                other client to present one which we save");
+        #   cancel    -> abort; the popup stays open so the user can pick the
+        #                other client themselves.
+        try:
+            conflicts = self.config.find_similar_site_other_client(client, site)
+        except Exception:
+            conflicts = []
+        if conflicts:
+            try:
+                choice = ask_cross_client_site(
+                    self.window, client, site, conflicts)
+            except Exception:
+                choice = "continue"
+            if choice == "cancel":
+                return
+            if choice == "transfer":
+                for other, _other_site in conflicts:
+                    try:
+                        self.config.move_client_sites(other, client)
+                    except Exception as exc:
+                        print(f"[filepicker] could not move sites from "
+                              f"'{other}': {exc}")
+                # Refresh the dropdowns so the merged catalog is live (and the
+                # removed client disappears from the list).
+                try:
+                    self.client_dropdown.configure(
+                        values=list(self.config.clients.keys())
+                        + [ADD_NEW_CLIENT_OPTION])
+                    self.client_dropdown.set(client)
+                    self._client_var.set(client)
+                    self._populate_sites(client)
+                except Exception:
+                    pass
         site = self._ensure_site_in_config(client, site)
         if site != self.site_dropdown.get():
             try:
