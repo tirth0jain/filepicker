@@ -378,7 +378,8 @@
       "LODHA - WORLD PLACE",
       "LODHA - WORLD VIEW",
       "LODHA - XPERIA MALL - DOMBIVALI",
-      "LODHA- GITANJALI"
+      "LODHA- GITANJALI",
+      "Lodha Sahana Worli"
     ],
     "Alder Residency Pvt Ltd": [
       "Kalpataru Vivant Tower"
@@ -398,5 +399,6 @@
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
     "Raymond Ten X": "Raymond Primium"
-  }
+  },
+  "material_aliases": {}
 }
