@@ -39,7 +39,9 @@
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
-    "ALUMAYER INDIA PVT LTD": [],
+    "ALUMAYER INDIA PVT LTD": [
+      "Lodha Sital Baug"
+    ],
     "AMI CONSTRUCTIONS": [],
     "ANTARIKSH LIFESPACES PRIVATE LIMITED": [
       "Antriksh"
