@@ -422,6 +422,7 @@
   },
   "material_aliases": {
     "consumable goods": "Consumables",
-    "stud": "Fastner"
+    "stud": "Fastner",
+    "Spigot": "fitting"
   }
 }
