@@ -420,5 +420,7 @@
     "Nmial Dapoli": "Navi Mumbai International Airport",
     "Raymond Ten X": "Raymond Primium"
   },
-  "material_aliases": {}
+  "material_aliases": {
+    "consumable goods": "Consumables"
+  }
 }
