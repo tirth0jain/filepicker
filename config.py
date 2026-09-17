@@ -107,6 +107,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "client_aliases": {},
     "site_aliases": {},
     "material_aliases": {},
+    # Clients removed by the cross-client site MOVE (see move_client_sites):
+    # the GitHub union-merge re-adds any client that still exists remotely, so
+    # a moved-away client needs an explicit tombstone to stay gone on every
+    # machine. Cleared automatically when the client is explicitly re-added.
+    "removed_clients": [],
     # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
     # OpenAI-compatible API). Overridable per machine in config.json.
     "ocr_model": OCR_MODEL,
@@ -711,10 +716,30 @@ class ConfigManager:
         with self._lock:
             changed = False
             for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases", "material_aliases"):
-                if key in remote and remote[key] != self._data.get(key):
-                    self._data[key] = deepcopy(remote[key])
+                        "doc_types", "client_aliases", "site_aliases", "material_aliases",
+                        "removed_clients"):
+                if key not in remote or remote[key] == self._data.get(key):
+                    continue
+                if key == "clients" and isinstance(remote[key], dict):
+                    # A forced pull must not undo a site MOVE: clients the
+                    # user moved away are tombstoned, so the still-old remote
+                    # entry for them is skipped (unless the client was
+                    # explicitly re-added locally).
+                    removed = {str(r).strip().lower()
+                               for r in (self._data.get("removed_clients") or [])
+                               if str(r).strip()}
+                    local_names = {str(k).strip().lower()
+                                   for k in (self._data.get("clients") or {})}
+                    pruned = {
+                        k: v for k, v in remote[key].items()
+                        if str(k).strip().lower() not in removed
+                        or str(k).strip().lower() in local_names
+                    }
+                    self._data[key] = deepcopy(pruned)
                     changed = True
+                    continue
+                self._data[key] = deepcopy(remote[key])
+                changed = True
             for key in ("enable_live_config", "enable_github_push", "auto_start"):
                 if key in remote and remote[key] != self._data.get(key):
                     self._data[key] = remote[key]
@@ -755,7 +780,8 @@ class ConfigManager:
             merged = self._merge_for_push(remote, self._data)
             changed = False
             for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases", "material_aliases"):
+                        "doc_types", "client_aliases", "site_aliases", "material_aliases",
+                        "removed_clients"):
                 if key in merged and merged[key] != self._data.get(key):
                     self._data[key] = merged[key]
                     changed = True
@@ -866,7 +892,8 @@ class ConfigManager:
             # If nothing to push (remote already has our catalog), skip
             # Compare only the catalog keys for cheap equality
             catalog_keys = ("companies", "company_initials", "clients", "materials",
-                            "doc_types", "client_aliases", "site_aliases", "material_aliases")
+                            "doc_types", "client_aliases", "site_aliases", "material_aliases",
+                            "removed_clients")
             if all(merged.get(k) == remote_data.get(k) for k in catalog_keys):
                 # For a brand-new file (remote_data empty) this is never true
                 if remote_data:
@@ -1135,8 +1162,36 @@ class ConfigManager:
         # Build from remote first
         merged_clients: Dict[str, List[str]] = {}
         lower_to_key: Dict[str, str] = {}
+
+        # Clients a MOVE deleted (see move_client_sites) are tombstoned: the
+        # union below would otherwise resurrect them from the stale remote
+        # copy (and the next auto-pull would bring them back locally), so a
+        # tombstoned client is dropped from BOTH sides here. The tombstones
+        # themselves are union-merged further down, so every machine honours
+        # the removal.
+        def _tombstones(*sources) -> set:
+            out = set()
+            for src in sources:
+                vals = src.get("removed_clients", []) if isinstance(src, dict) else []
+                if not isinstance(vals, list):
+                    continue
+                for v in vals:
+                    name = str(v).strip().lower()
+                    if name:
+                        out.add(name)
+            return out
+
+        removed_names = _tombstones(remote, local)
+        # A name that the LOCAL config still has is not removed: an explicit
+        # re-add (add_client/add_site, which also clears the local tombstone)
+        # always wins over a stale tombstone that other machines still carry.
+        local_names = {str(k).strip().lower() for k in loc_clients}
+
         for k, v in rem_clients.items():
             key = str(k)
+            low = key.strip().lower()
+            if low in removed_names and low not in local_names:
+                continue  # moved away — never resurrect it from the remote
             lower_to_key[key.lower()] = key
             merged_clients[key] = list(v) if isinstance(v, list) else []
 
@@ -1155,6 +1210,20 @@ class ConfigManager:
                 merged_clients[canon] = _merge_list_str(merged_sites, loc_sites)
 
         merged["clients"] = merged_clients
+
+        # removed_clients — union of the tombstones (case-insensitive dedupe),
+        # minus any name that exists in the merged catalog: a tombstone never
+        # outlives an explicit re-add, and it is dropped from the published
+        # list as soon as the client is back.
+        rem_tomb = remote.get("removed_clients", [])
+        loc_tomb = local.get("removed_clients", [])
+        present = {str(k).strip().lower() for k in merged_clients}
+        merged["removed_clients"] = [
+            r for r in _merge_list_str(
+                rem_tomb if isinstance(rem_tomb, list) else [],
+                loc_tomb if isinstance(loc_tomb, list) else [])
+            if str(r).strip().lower() not in present
+        ]
 
         # materials — dict union, local wins
         rem_mat = dict(remote.get("materials", {}))
@@ -1288,6 +1357,16 @@ class ConfigManager:
         catalog. Never called automatically — only after the user picks
         "move" in the warning dialog.
 
+        The move is durable and applies to FUTURE documents too:
+
+        - the source client is TOMBSTONED in ``removed_clients``, because the
+          GitHub union-merge would otherwise resurrect it from the stale
+          remote copy (and the next auto-pull would bring it back locally), so
+          the move would silently undo itself;
+        - a client MAPPING (``client_aliases``) is added from the source name
+          to the target, so any later document/OCR that still names the old
+          client resolves to the target automatically.
+
         Returns the target client's site list after the move. Pushes are
         deferred like every other mutator (the push happens once a file is
         actually saved, or on the tray force-push).
@@ -1296,26 +1375,53 @@ class ConfigManager:
         target = str(target_client or "").strip()
         if not source or not target:
             return []
-        moved_any = False
+        changed = False
         with self._lock:
-            clients = self.load().setdefault("clients", {})
+            data = self.load()
+            clients = data.setdefault("clients", {})
             src_key = self._canonical_key(clients, source)
             tgt_key = self._canonical_key(clients, target)
-            if str(src_key).strip().lower() == str(tgt_key).strip().lower():
+            if src_key not in clients:
+                # Nothing to move (already gone / unknown name) — leave the
+                # rest of the config exactly as it is.
                 return list(clients.get(tgt_key, []))
+            if str(src_key).strip().lower() == str(tgt_key).strip().lower():
+                return list(clients.get(src_key, []))
             target_sites = clients.setdefault(tgt_key, [])
             for site in list(clients.get(src_key, [])):
                 if not str(site).strip():
                     continue
                 if find_near_name(list(target_sites), site) is None:
                     target_sites.append(site)
-                    moved_any = True
-            if src_key in clients:
-                del clients[src_key]
-                moved_any = True
+                    changed = True
+            del clients[src_key]
+            changed = True
+            # Tombstone: keeps the moved-away client gone through the union
+            # merge on push AND on every later auto-pull.
+            removed = data.get("removed_clients")
+            if not isinstance(removed, list):
+                removed = []
+                data["removed_clients"] = removed
+            if not any(str(r).strip().lower() == str(src_key).strip().lower()
+                       for r in removed):
+                removed.append(str(src_key))
+            # Map the old client name to the new one for FUTURE cases: a
+            # later document that still says "LODHA" is filed under the client
+            # it was merged into.
+            aliases = data.get("client_aliases")
+            if not isinstance(aliases, dict):
+                aliases = {}
+                data["client_aliases"] = aliases
+            alias_key = str(src_key)
+            for k in list(aliases):
+                if str(k).strip().lower() == str(src_key).strip().lower():
+                    alias_key = str(k)
+                    break
+            if aliases.get(alias_key) != str(tgt_key):
+                aliases[alias_key] = str(tgt_key)
             self.save()
             result = list(target_sites)
-        if moved_any:
+        if changed:
             self._mark_push_pending(
                 reason=f"move all sites from '{src_key}' to '{tgt_key}'")
         return result
@@ -1468,13 +1574,19 @@ class ConfigManager:
             return ""
         changed = False
         with self._lock:
-            clients = self.load().setdefault("clients", {})
+            data = self.load()
+            clients = data.setdefault("clients", {})
             canonical = find_near_name(list(clients.keys()), client)
             if canonical is not None:
                 if canonical != client:
                     print(f"[config] client '{client}' is the same client as '{canonical}' — reusing existing name")
                 return canonical
             clients[client] = list(sites or [])
+            # An explicit re-add WINS over an earlier move-away tombstone.
+            removed = data.get("removed_clients")
+            if isinstance(removed, list):
+                removed[:] = [r for r in removed
+                              if str(r).strip().lower() != client.lower()]
             self.save()
             changed = True
         if changed:
@@ -1505,7 +1617,8 @@ class ConfigManager:
             return ""
         changed = False
         with self._lock:
-            clients = self.load().setdefault("clients", {})
+            data = self.load()
+            clients = data.setdefault("clients", {})
             key = self._canonical_key(clients, client)
             if key == client and key not in clients:
                 # No exact (case-insensitive) client match — reuse a
@@ -1513,6 +1626,13 @@ class ConfigManager:
                 near = find_near_name(list(clients.keys()), client)
                 if near is not None:
                     key = str(near)
+            if key not in clients:
+                # This save creates the client: an explicit re-add WINS over
+                # an earlier move-away tombstone.
+                removed = data.get("removed_clients")
+                if isinstance(removed, list):
+                    removed[:] = [r for r in removed
+                                  if str(r).strip().lower() != str(key).lower()]
             sites = clients.setdefault(key, [])
             canonical = find_near_name(list(sites), site)
             if canonical is not None:

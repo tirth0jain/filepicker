@@ -214,17 +214,49 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     dialog = ctk.CTkToplevel(parent)
     dialog.title("Site belongs to another client")
     dialog.configure(fg_color=_BG)
+    # Stay ABOVE the popup: without transient(), the two topmost windows
+    # fight and this dialog could land behind the popup (the user then had to
+    # click its taskbar entry to bring it up). transient() ties it to the
+    # popup, and lift()/focus_force() raise it now. Only tie to a VISIBLE
+    # parent: transient to a withdrawn window unmaps the dialog (Tk) — the
+    # inline prompts and tests that pass an unmapped parent keep working.
+    try:
+        if parent is not None and parent.winfo_viewable():
+            dialog.transient(parent)
+    except Exception:
+        pass
     dialog.attributes("-topmost", True)
     dialog.resizable(False, False)
+    # Center over the POPUP (not the screen corner) so it is visibly attached
+    # to the window that asked the question.
     try:
-        sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-        dialog.geometry(f"560x300+{max((sw - 560) // 2, 0)}+{max((sh - 300) // 3, 0)}")
-    except tk.TclError:
-        pass
+        overlay = parent is not None and parent.winfo_viewable() \
+            and parent.winfo_width() > 100
+    except Exception:
+        overlay = False
+    if overlay:
+        try:
+            parent.update_idletasks()
+            w, h = 560, 300
+            px = parent.winfo_rootx() + max((parent.winfo_width() - w) // 2, 0)
+            py = parent.winfo_rooty() + max((parent.winfo_height() - h) // 2, 0)
+            dialog.geometry(f"{w}x{h}+{max(px, 0)}+{max(py, 0)}")
+        except tk.TclError:
+            overlay = False
+    if not overlay:
+        try:
+            sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+            dialog.geometry(f"560x300+{max((sw - 560) // 2, 0)}+{max((sh - 300) // 3, 0)}")
+        except tk.TclError:
+            pass
 
     callback = {"value": None}
 
     def choose(choice: str) -> None:
+        try:
+            dialog.grab_release()
+        except Exception:
+            pass
         callback["value"] = choice
         try:
             dialog.destroy()
@@ -286,6 +318,28 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     try:
         keep_btn.focus_set()
     except tk.TclError:
+        pass
+
+    # Re-raise once mapped: topmost + transient can lose the race against the
+    # popup's own topmost flag on the first map, which put this dialog behind
+    # the popup. The modal grab is taken here too (the window is viewable by
+    # now; grabbing an unmapped window fails).
+    def _raise_me() -> None:
+        try:
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+            dialog.focus_force()
+        except Exception:
+            pass
+        try:
+            if dialog.winfo_viewable() and dialog.grab_current() is None:
+                dialog.grab_set()
+        except Exception:
+            pass
+
+    try:
+        dialog.after(0, _raise_me)
+    except Exception:
         pass
     return dialog, callback
 
