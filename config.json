@@ -367,7 +367,8 @@
   "material_aliases": {
     "consumable goods": "Consumables",
     "stud": "Fastner",
-    "Spigot": "fitting"
+    "Spigot": "fitting",
+    "Washer": "Screw"
   },
   "removed_clients": [
     "LODHA",
