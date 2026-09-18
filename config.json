@@ -166,8 +166,7 @@
     "RAHEJA UNIVERSAL LTD": [
       "Raheja Verona &Sienna",
       "Raheja Exotica",
-      "Raheja Solaris (Tower-B)",
-      "Raheja Solaris (Tower-A)"
+      "Raheja Solaris"
     ],
     "RAJESH SALUJA": [],
     "RAK ITALIANO OVERSEAS LLP": [],
@@ -262,8 +261,7 @@
       "L & T (Retail)"
     ],
     "DLF Limited": [
-      "DLF - GOA",
-      "DLF Dahlias"
+      "DLF - GOA"
     ],
     "Cowtown Infotech Services Limited": [
       "LODHA - MULUND BAYA- Regalia",
@@ -335,9 +333,6 @@
     ],
     "Simba Properties LLP": [
       "Viceroy Prive"
-    ],
-    "Transcon Developers Private Limited": [
-      "Transcon"
     ]
   },
   "auto_start": true,
@@ -368,8 +363,7 @@
   "material_aliases": {
     "consumable goods": "Consumables",
     "stud": "Fastner",
-    "Spigot": "fitting",
-    "Washer": "Screw"
+    "Spigot": "fitting"
   },
   "removed_clients": [
     "LODHA",
