@@ -30,12 +30,6 @@
   "company_initials": {
     "Ruby Steel": "RS"
   },
-  "enable_live_config": true,
-  "enable_github_push": true,
-  "auto_start": true,
-  "enable_ocr": true,
-  "ocr_model": "deepseek-v4-flash-vision-exp",
-  "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
@@ -326,7 +320,7 @@
       "LODHA - XPERIA MALL - DOMBIVALI",
       "LODHA- GITANJALI",
       "Lodha Sahana Worli",
-      "Mirabella-T5 & 7",
+      "Mirabelle",
       "Acme Ozobe(Bellavista)"
     ],
     "Arimas Real Estate Private Limited": [
@@ -342,6 +336,14 @@
       "Viceroy Prive"
     ]
   },
+  "auto_start": true,
+  "enable_live_config": true,
+  "enable_github_push": true,
+  "enable_ocr": true,
+  "preview_open_by_default": true,
+  "block_alt_for_other_apps": true,
+  "ocr_model": "deepseek-v4-flash-vision-exp",
+  "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "client_aliases": {
     "Alder Residency Pvt Ltd": "KALPATARU",
     "Arimas Real Estate Private Limited": "KALPATARU",
