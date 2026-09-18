@@ -39,9 +39,6 @@
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
-    "ALUMAYER INDIA PVT LTD": [
-      "Lodha Sital Baug"
-    ],
     "AMI CONSTRUCTIONS": [],
     "ANTARIKSH LIFESPACES PRIVATE LIMITED": [
       "Antriksh"
@@ -119,10 +116,6 @@
     "LARKINS REALTORS": [],
     "LARSEN & TOUBRO LTD": [
       "Elixir Reserve"
-    ],
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": [
-      "Lodha Sital Baug",
-      "Lodha Nibm"
     ],
     "LODHA-BRICKMART CONSTRUCTIONS and DEVELOPERS PVT LTD": [],
     "LODHA-G Corp Homes Pvt. Ltd-banglore": [],
@@ -358,7 +351,9 @@
     "Shapoorji Pallonji And Company Private Limited": "SHAPOORJI & PALLONJI CO. LTD",
     "LODHA": "Cowtown Infotech Services Limited",
     "LODHA -LODHA DEVELOPERS LIMITED": "Cowtown Infotech Services Limited",
-    "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited"
+    "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited",
+    "ALUMAYER INDIA PVT LTD": "Cowtown Infotech Services Limited",
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -374,6 +369,8 @@
   "removed_clients": [
     "LODHA",
     "LODHA -LODHA DEVELOPERS LIMITED",
-    "LODHA- world One Co operative Housing Society Limited"
+    "LODHA- world One Co operative Housing Society Limited",
+    "ALUMAYER INDIA PVT LTD",
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD"
   ]
 }
