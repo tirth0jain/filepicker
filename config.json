@@ -21,7 +21,8 @@
     "Galvanized Iron": "GI",
     "Abs": "AB",
     "Railing": "RA",
-    "Screw": "SC"
+    "Screw": "SC",
+    "Other": "OT"
   },
   "companies": [
     "Ruby Steel",
@@ -324,7 +325,8 @@
       "Lodha Sahana Worli",
       "Mirabelle",
       "Acme Ozobe(Bellavista)",
-      "Lodha Palava -Fire Station"
+      "Lodha Palava -Fire Station",
+      "Lodha Altamount"
     ],
     "Arimas Real Estate Private Limited": [
       "Kalpataru Elitus"
