@@ -120,69 +120,9 @@
     "LARSEN & TOUBRO LTD": [
       "Elixir Reserve"
     ],
-    "LODHA": [
-      "LODHA - AMRUT TARA SALES TOWER Versova",
-      "LODHA - AURUM -KANJURMARG",
-      "LODHA - AZZURO ALUMLITE",
-      "LODHA - BANER PUNE",
-      "LODHA - BELAIR -JOGESHWARI",
-      "LODHA - Belmondo pune",
-      "LODHA - BRADBURY-bellevue",
-      "LODHA - CHARITABLE TRUST",
-      "LODHA - COSTIEREA CONDOMINIUM",
-      "LODHA - CROWN BUILDMART PVT. LTD",
-      "LODHA - DWELLERS PVT LTD",
-      "LODHA - ETERNIS",
-      "LODHA - FIORENZA",
-      "LODHA - Fiorenza-PO No. - 4400049003",
-      "LODHA - G Corp Homes Pvt. Ltd-banglore",
-      "LODHA - GOLD CREST-LONAVALA",
-      "LODHA - HEALTHY CONSTRUCTIONS & DEVELOPERS PVT LTD",
-      "LODHA - IMPERIA SITE",
-      "LODHA - KHARADI -PUNE",
-      "LODHA - KOLSHET-THANE",
-      "LODHA - LUXIRIA CROWN",
-      "LODHA - MATUNGA DIVINO",
-      "LODHA - MULUND BAYA- Regalia",
-      "LODHA - NCP WADALA",
-      "LODHA - NIBM-PUNE",
-      "LODHA - PALAVA - SERENITY",
-      "LODHA - PALAVA -B -II",
-      "LODHA - PALAVA -Premier-Signet",
-      "LODHA - PALAVA -TRINITY TOWER-A",
-      "LODHA - PALAVA -TRINITY TOWER-B",
-      "LODHA - PARADISE -VFVA TOWER",
-      "LODHA - PATEL ESTATE-JOGESHWARI",
-      "LODHA - Powai Bellagio",
-      "LODHA - PRIMO -KEM",
-      "LODHA - SITUAL BAUG",
-      "LODHA - SPLENDORA",
-      "LODHA - STELLA OR RAJTATTVA",
-      "LODHA - Supermus-CLDPL HO PROJECT",
-      "LODHA - THE PARK",
-      "LODHA - TRUMP TOWER -PENT HOUSE",
-      "LODHA - Upper Thane -TIARA - E & F",
-      "LODHA - VENEZIA-RUBY STEEL",
-      "LODHA - VIKHROLI",
-      "LODHA - W ONE LODHA PLACE -OLP",
-      "LODHA - WASHINGTON HOUSE",
-      "LODHA - WOOD-kandivali",
-      "LODHA - WORLD CREST",
-      "LODHA - WORLD ONE",
-      "LODHA - WORLD PLACE",
-      "LODHA - WORLD VIEW",
-      "LODHA - XPERIA MALL - DOMBIVALI",
-      "LODHA- GITANJALI"
-    ],
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": [
       "Lodha Sital Baug",
       "Lodha Nibm"
-    ],
-    "LODHA -LODHA DEVELOPERS LIMITED": [
-      "World One"
-    ],
-    "LODHA- world One Co operative Housing Society Limited": [
-      "World One"
     ],
     "LODHA-BRICKMART CONSTRUCTIONS and DEVELOPERS PVT LTD": [],
     "LODHA-G Corp Homes Pvt. Ltd-banglore": [],
@@ -414,7 +354,10 @@
   "client_aliases": {
     "Alder Residency Pvt Ltd": "KALPATARU",
     "Arimas Real Estate Private Limited": "KALPATARU",
-    "Shapoorji Pallonji And Company Private Limited": "SHAPOORJI & PALLONJI CO. LTD"
+    "Shapoorji Pallonji And Company Private Limited": "SHAPOORJI & PALLONJI CO. LTD",
+    "LODHA": "Cowtown Infotech Services Limited",
+    "LODHA -LODHA DEVELOPERS LIMITED": "Cowtown Infotech Services Limited",
+    "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -426,5 +369,10 @@
     "consumable goods": "Consumables",
     "stud": "Fastner",
     "Spigot": "fitting"
-  }
+  },
+  "removed_clients": [
+    "LODHA",
+    "LODHA -LODHA DEVELOPERS LIMITED",
+    "LODHA- world One Co operative Housing Society Limited"
+  ]
 }
