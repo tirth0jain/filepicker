@@ -35,6 +35,15 @@ from popup import FilePickerPopup, ask_duplicate_action
 from version import VERSION
 from watcher import DownloadWatcher
 
+# How long the FIRST file's read may hold the rest of the batch back. The
+# first popup's file is read on its own (it gets the whole gateway, so the
+# popup the user is looking at fills in as fast as possible) and the other
+# downloads are sent together as soon as that read finishes. This cap is only
+# a safety valve: if the first read is genuinely slow (a retry storm, a huge
+# scan) the batch is not held hostage — after this many seconds the remaining
+# files are sent anyway.
+_OCR_FIRST_HEAD_START = 20.0
+
 
 def _setup_file_logging() -> None:
     """Mirror all prints to FilePicker.log next to the exe (visible even with --windows-console-mode=disable)."""
@@ -137,6 +146,8 @@ class FilePickerController:
         self._popups_shown = 0       # popups displayed so far (1-based next)
         self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
         self._ocr_lock = threading.Lock()  # guards _ocr_submitted (watcher + UI threads)
+        self._ocr_released = False   # True once the rest of the batch may be sent
+        self._ocr_head_timer = None  # safety valve for a slow first read
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -221,12 +232,10 @@ class FilePickerController:
         """Called from the watcher's worker thread when a file settles."""
         self._popup_queue.put(path)
         self._file_order.append(Path(path))
-        # OCR starts the moment the file lands — EVERY file, all together:
-        # the pool opens one vision call per download (up to
-        # MAX_CONCURRENT_OCR in flight), so a batch of files that arrives
-        # together is read simultaneously and each popup normally opens with
-        # its fields already filled. Nothing waits for the user to work
-        # through the earlier popups.
+        # OCR starts the moment the file lands: the FIRST file — the one whose
+        # popup opens first — is read on its own so the popup the user is
+        # looking at fills in as fast as possible, and the rest of the batch is
+        # sent together the instant that read finishes (see _submit_ocr_all).
         try:
             self._submit_ocr_all()
         except Exception as exc:
@@ -269,6 +278,8 @@ class FilePickerController:
         self._popups_shown += 1
         # Safety net: if this file arrived before the OCR pool existed (pool
         # created at startup, or OCR enabled later), make sure it is queued.
+        # A file still held back by the first-read sequencing is submitted by
+        # the popup itself (_start_ocr), so the file on screen never waits.
         self._submit_ocr_all()
         popup = FilePickerPopup(
             config=self.config,
@@ -286,15 +297,22 @@ class FilePickerController:
             self._current_popup = None
 
     def _submit_ocr_all(self) -> None:
-        """Queue OCR for every file that has landed and is not queued yet.
+        """Queue OCR for the files that have landed, first popup first.
+
+        Order matters: the FIRST file — the one whose popup opens first — is
+        read ON ITS OWN, so the popup the user is actually looking at gets the
+        whole gateway and fills in as fast as possible. The rest of the batch
+        is then sent TOGETHER the moment that first read finishes (or after
+        :data:`_OCR_FIRST_HEAD_START` seconds if it is slow), so they are
+        still all read simultaneously while the user works through the queue.
+        Files that arrive after the batch was released are read immediately.
 
         Called from two places:
-        - every file arrival (``_on_file_completed``, watcher thread) — the
-          whole batch is submitted at once, so all downloads are read
-          simultaneously and a popup normally opens with its fields already
-          filled instead of showing "reading document…";
+        - every file arrival (``_on_file_completed``, watcher thread);
         - when a popup opens (``_show_popup``) — a safety net for a file that
-          arrived before the OCR pool was ready.
+          arrived before the OCR pool was ready. (A popup whose file is still
+          held back reads it anyway: the popup subscribes its own file to the
+          pool, so the file being looked at never waits.)
 
         Submissions are deduped by the pool, and the cursor is lock-guarded
         because arrivals come from the watcher thread.
@@ -302,14 +320,64 @@ class FilePickerController:
         pool = getattr(self, "_ocr_pool", None)
         if pool is None:
             return
+        head = None
+        pending = None
         with self._ocr_lock:
-            while self._ocr_submitted < len(self._file_order):
-                path = self._file_order[self._ocr_submitted]
-                self._ocr_submitted += 1
-                try:
-                    pool.submit(path)
-                except Exception as exc:
-                    print(f"[filepicker] OCR submit error: {exc}")
+            if not self._file_order:
+                return
+            if self._ocr_submitted == 0:
+                head = self._file_order[0]
+                self._ocr_submitted = 1
+            elif self._ocr_released:
+                pending = self._file_order[self._ocr_submitted:]
+                self._ocr_submitted = len(self._file_order)
+            else:
+                return  # the first read is still going: batch stays held
+        if head is not None:
+            # Read the first file alone, then release the batch. The callback
+            # fires on a worker thread when the read finishes (immediately
+            # when the result is already cached or OCR has no API key).
+            self._arm_ocr_first_head_start()
+            try:
+                pool.submit(head, self._on_first_ocr_done)
+            except Exception as exc:
+                print(f"[filepicker] OCR submit error: {exc}")
+                self._release_ocr_rest()
+            return
+        for path in pending:
+            try:
+                pool.submit(path)
+            except Exception as exc:
+                print(f"[filepicker] OCR submit error: {exc}")
+
+    def _arm_ocr_first_head_start(self) -> None:
+        """Start the safety valve for the first (popup) file's read."""
+        timer = threading.Timer(_OCR_FIRST_HEAD_START, self._release_ocr_rest)
+        timer.daemon = True
+        with self._ocr_lock:
+            if self._ocr_released:
+                return
+            self._ocr_head_timer = timer
+        timer.start()
+
+    def _on_first_ocr_done(self, _result=None) -> None:
+        """The first popup's read finished — send the rest of the batch."""
+        self._release_ocr_rest()
+
+    def _release_ocr_rest(self) -> None:
+        """Allow the remaining files to be submitted (idempotent)."""
+        with self._ocr_lock:
+            if self._ocr_released:
+                return
+            self._ocr_released = True
+            timer = self._ocr_head_timer
+            self._ocr_head_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._submit_ocr_all()
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:

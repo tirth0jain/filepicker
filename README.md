@@ -121,9 +121,13 @@ supplier / buyer / site read from the document — no manual typing.
    `deepseek-v4-flash-vision-exp`) is upgraded to the current model
    automatically, so an existing `config.json` switches over by itself.
 
-Every file is submitted for OCR the moment it lands and the whole batch is
-read **simultaneously** (up to 32 vision calls at once), so a popup normally
-opens already filled. While a read is still in flight the popup shows
+The **first** file — the one whose popup opens first — is read on its own, so
+the popup you are looking at gets the whole gateway and fills in fastest. The
+rest of the batch is sent together the moment that read finishes (or after
+20 s if it is slow), so they are still read **simultaneously** (up to 32
+vision calls at once) while you work through the queue. A popup whose file
+has not been sent yet reads it immediately, so the file on screen never
+waits. While a read is in flight the popup shows
 `OCR: reading document… (N files read together)`. Results are
 applied only if you haven't started typing; names that already exist in the
 catalog are matched case-insensitively (canonical spelling is used), and
