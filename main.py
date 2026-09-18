@@ -29,26 +29,11 @@ if _APP_DIR not in sys.path:
 import customtkinter as ctk
 
 from config import ConfigManager
-from ocr import MAX_CONCURRENT_OCR as _OCR_BATCH
+from ocr import MAX_CONCURRENT_OCR as _OCR_MAX
 from organizer import OrganizeRequest, organize, output_paths
 from popup import FilePickerPopup, ask_duplicate_action
 from version import VERSION
 from watcher import DownloadWatcher
-
-
-def _ocr_submit_until(popup_index: int) -> int:
-    """How many files (in arrival order) must have OCR started when the popup
-    with 1-based index ``popup_index`` opens.
-
-    OCR runs in batches of :data:`_OCR_BATCH`. The batch after the current
-    one is submitted while the user is checking the LAST file of the current
-    batch ("after 9 saves, the next 10 are being read"), so the next popup is
-    pre-filled by the time the user gets to it — without firing vision calls
-    for the whole queue at once.
-    """
-    batch = (popup_index + _OCR_BATCH - 1) // _OCR_BATCH
-    next_batch = _OCR_BATCH if popup_index % _OCR_BATCH == 0 else 0
-    return batch * _OCR_BATCH + next_batch
 
 
 def _setup_file_logging() -> None:
@@ -147,7 +132,7 @@ class FilePickerController:
         self._tray = None
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
-        self._ocr_pool = None  # OcrPool — bounded background OCR (see _OCR_BATCH)
+        self._ocr_pool = None  # OcrPool — reads every download at once (see _OCR_MAX)
         self._file_order: list = []  # completed files in arrival order
         self._popups_shown = 0       # popups displayed so far (1-based next)
         self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
@@ -236,14 +221,14 @@ class FilePickerController:
         """Called from the watcher's worker thread when a file settles."""
         self._popup_queue.put(path)
         self._file_order.append(Path(path))
-        # Submit OCR for the new file IMMEDIATELY (when the pacing window
-        # allows) — the first batch of 10 files (or fewer) is always read in
-        # the background as files arrive, never only once a popup opens. The
-        # ceiling only covers the batch the user is in plus the next one, so
-        # a 30-file folder doesn't fire 30 vision calls at once.
+        # OCR starts the moment the file lands — EVERY file, all together:
+        # the pool opens one vision call per download (up to
+        # MAX_CONCURRENT_OCR in flight), so a batch of files that arrives
+        # together is read simultaneously and each popup normally opens with
+        # its fields already filled. Nothing waits for the user to work
+        # through the earlier popups.
         try:
-            self._submit_ocr_window(
-                _ocr_submit_until(max(1, self._popups_shown + 1)))
+            self._submit_ocr_all()
         except Exception as exc:
             print(f"[filepicker] background OCR submit error: {exc}")
 
@@ -282,7 +267,9 @@ class FilePickerController:
 
     def _show_popup(self, path: Path) -> None:
         self._popups_shown += 1
-        self._submit_ocr_window(_ocr_submit_until(self._popups_shown))
+        # Safety net: if this file arrived before the OCR pool existed (pool
+        # created at startup, or OCR enabled later), make sure it is queued.
+        self._submit_ocr_all()
         popup = FilePickerPopup(
             config=self.config,
             file_path=path,
@@ -298,16 +285,16 @@ class FilePickerController:
         finally:
             self._current_popup = None
 
-    def _submit_ocr_window(self, submit_until: int) -> None:
-        """Start OCR for files up to index ``submit_until`` (batches).
+    def _submit_ocr_all(self) -> None:
+        """Queue OCR for every file that has landed and is not queued yet.
 
         Called from two places:
-        - every file arrival (``_on_file_completed``, watcher thread) — so
-          the current batch is always being read in the background while the
-          user works through its popups;
-        - when a popup opens (``_show_popup``) — which widens the window by
-          one batch once the user reaches the last file of the current batch,
-          so the next 10 are being read before their popups appear.
+        - every file arrival (``_on_file_completed``, watcher thread) — the
+          whole batch is submitted at once, so all downloads are read
+          simultaneously and a popup normally opens with its fields already
+          filled instead of showing "reading document…";
+        - when a popup opens (``_show_popup``) — a safety net for a file that
+          arrived before the OCR pool was ready.
 
         Submissions are deduped by the pool, and the cursor is lock-guarded
         because arrivals come from the watcher thread.
@@ -316,8 +303,7 @@ class FilePickerController:
         if pool is None:
             return
         with self._ocr_lock:
-            end = min(submit_until, len(self._file_order))
-            while self._ocr_submitted < end:
+            while self._ocr_submitted < len(self._file_order):
                 path = self._file_order[self._ocr_submitted]
                 self._ocr_submitted += 1
                 try:
@@ -606,8 +592,9 @@ class FilePickerController:
         self._schedule_old_cleanup_retries()
         self._show_update_notice_if_any()
 
-        # Background OCR pool: every completed file is read eagerly (up to 5
-        # vision calls at once) so popups open pre-filled.
+        # Background OCR pool: EVERY file that lands is read immediately, all
+        # together (up to _OCR_MAX simultaneous vision calls), so each popup
+        # opens with its fields already filled.
         if self.config.enable_ocr:
             try:
                 from ocr import OcrPool
@@ -623,11 +610,13 @@ class FilePickerController:
                     known_clients_provider=self.config.all_clients,
                 )
                 if self._ocr_pool.available:
-                    self._set_status(f"OCR enabled — delivery notes auto-filled ({_OCR_BATCH} concurrent reads)")
+                    self._set_status(
+                        f"OCR enabled — every delivery note is read on arrival "
+                        f"({_OCR_MAX} at once)")
                 else:
                     self._set_status("OCR enabled but no API key found")
                 print(f"[filepicker] OCR pool ready (model={self.config.ocr_model}, "
-                      f"concurrent={_OCR_BATCH}, "
+                      f"concurrent={_OCR_MAX}, "
                       f"token={'yes' if self._ocr_pool.available else 'MISSING'})")
             except Exception as exc:
                 print(f"[filepicker] OCR pool init error: {exc}")

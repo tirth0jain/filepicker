@@ -18,7 +18,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ocr import OCR_API_BASE, OCR_MODEL
+from ocr import LEGACY_OCR_MODELS, OCR_API_BASE, OCR_MODEL
 
 # Remote live config — single source of truth for clients/sites.
 # Every popup fetches this so all users see the same data instantly.
@@ -112,8 +112,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # a moved-away client needs an explicit tombstone to stay gone on every
     # machine. Cleared automatically when the client is explicitly re-added.
     "removed_clients": [],
-    # Vision model + endpoint used by the OCR feature (OpenCode Go catalog,
-    # OpenAI-compatible API). Overridable per machine in config.json.
+    # Model + endpoint used by the OCR feature (OpenCode Go catalog,
+    # OpenAI-compatible API). Overridable per machine in config.json; a value
+    # that is merely an OLD DEFAULT (see ocr.LEGACY_OCR_MODELS) is upgraded to
+    # the current model on load, so switching the default reaches installs
+    # whose config.json pinned the previous name.
     "ocr_model": OCR_MODEL,
     "ocr_api_base": OCR_API_BASE,
 }
@@ -559,6 +562,9 @@ class ConfigManager:
             # keys are handled at the accessor level (each uses .get with a
             # safe fallback) without being written back.
             self._data = loaded
+            # Upgrade values that an older build wrote as its then-current
+            # default (currently only the OCR model) — see the method.
+            self._migrate_old_defaults()
             # Baseline: the mtime of the app's last write (persisted), so a
             # hand edit made while the app was closed is still detected and
             # never clobbered by the auto-sync. Falls back to the current
@@ -570,6 +576,25 @@ class ConfigManager:
             # Fall back to defaults but never crash the watcher.
             self._data = deepcopy(DEFAULT_CONFIG)
             print(f"[config] Could not read {self.path}: {exc}")
+
+    def _migrate_old_defaults(self) -> None:
+        """Upgrade config values that are merely an OLD DEFAULT of this app.
+
+        ``ocr_model`` is a local-only key, so config.json is the source of
+        truth for it: an install that ran an older build has the old model id
+        written in the file, and changing the default in ``ocr.py`` would
+        never reach it. A stored value from :data:`ocr.LEGACY_OCR_MODELS` is
+        therefore treated as "never chosen by the user" and replaced with the
+        current :data:`ocr.OCR_MODEL` — in memory here, and on disk at the
+        next :meth:`save` (no surprise write during load, so a hand-edited
+        config keeps its mtime and is not mistaken for an external edit).
+        Any other value is a deliberate per-machine override: left alone.
+        """
+        model = self._data.get("ocr_model")
+        if isinstance(model, str) and model.strip() in LEGACY_OCR_MODELS:
+            print(f"[config] OCR model '{model}' is an old default — "
+                  f"upgrading to '{OCR_MODEL}'")
+            self._data["ocr_model"] = OCR_MODEL
 
     @staticmethod
     def _file_mtime(path: Path) -> Optional[float]:
@@ -1256,6 +1281,9 @@ class ConfigManager:
     def save(self) -> None:
         """Write the current in-memory config to disk atomically."""
         with self._lock:
+            # Persist the old-default upgrade (e.g. the OCR model) with the
+            # next normal write instead of writing during load.
+            self._migrate_old_defaults()
             tmp = self.path.with_suffix(".json.tmp")
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1493,8 +1521,18 @@ class ConfigManager:
 
     @property
     def ocr_model(self) -> str:
-        """The vision model id used for OCR (OpenCode Go catalog)."""
-        return str(self.load().get("ocr_model", OCR_MODEL))
+        """The model id used for OCR (OpenCode Go catalog).
+
+        A value that is merely an OLD DEFAULT of this app (see
+        :data:`ocr.LEGACY_OCR_MODELS`) is upgraded to the current model, so an
+        install whose config.json pinned the previous name switches over
+        without the user editing anything. Any other value is a deliberate
+        per-machine override and is returned as-is.
+        """
+        model = str(self.load().get("ocr_model", OCR_MODEL)).strip()
+        if not model or model in LEGACY_OCR_MODELS:
+            return OCR_MODEL
+        return model
 
     @property
     def ocr_api_base(self) -> str:

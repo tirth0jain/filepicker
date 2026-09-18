@@ -53,6 +53,12 @@ _MATERIAL_ROW_PITCH_COMPACT = 30
 # switches to the compact spacing.
 _FORM_H_COMFORT = 790
 
+# How often the "OCR: reading document…" line refreshes its live counters
+# ("12 files read together") while this file's read is still in flight. Every
+# download is read simultaneously, so the counters show the batch is being
+# read together rather than this one file being stuck "processing".
+_OCR_PROGRESS_MS = 500
+
 
 def material_display_order(materials_map, selected) -> List:
     """Chip display order for a popup: selected materials move to the top.
@@ -974,6 +980,11 @@ class FilePickerPopup:
         # Raw Company/Client/Site values the OCR returned (before any
         # canonicalization) — shown highlighted in yellow in the preview.
         self._ocr_highlight_terms: List[str] = []
+        # Live OCR status line: `_ocr_progress_after` is the pending
+        # after()-tick that refreshes the "reading document…" counters, and
+        # `_ocr_poll_done` stops it once the outcome has been applied.
+        self._ocr_progress_after = None
+        self._ocr_poll_done = False
 
         # Material name -> shortcode mapping loaded once.
         self._materials_map: Dict[str, str] = {}
@@ -2377,7 +2388,7 @@ class FilePickerPopup:
                       width=100).pack(side="left", pady=(0, 16))
 
     # ------------------------------------------------------------------
-    # OCR auto-fill (OpenCode Go "DeepSeek V4 Flash Vision Exp")
+    # OCR auto-fill (OpenCode Go "DeepSeek V4.1 Flash")
     # ------------------------------------------------------------------
     def _set_ocr_status(self, text: str, color: str = _TEXT_MUTED) -> None:
         label = getattr(self, "_ocr_label", None)
@@ -2385,6 +2396,87 @@ class FilePickerPopup:
             return
         try:
             label.configure(text=text, text_color=color)
+        except Exception:
+            pass
+
+    def _ocr_pool_finished(self, pool) -> bool:
+        """True when the pool already has an OUTCOME for this file.
+
+        ``pool.get()`` returns None both for "not read yet" and for "read but
+        nothing could be extracted"; without this distinction a file that was
+        already read (and failed) opened with a "reading document…" line that
+        looked like OCR had restarted. Pools without the accessor (older/fake
+        ones) simply report False.
+        """
+        finished = getattr(pool, "finished", None)
+        if not callable(finished):
+            return False
+        try:
+            return bool(finished(self.file_path))
+        except Exception:
+            return False
+
+    def _ocr_reading_text(self) -> str:
+        """The "reading document…" line, with live batch counters.
+
+        Every download is read simultaneously (the pool is submitted for the
+        whole batch the moment the files land), so the counters tell the user
+        that the OTHER files are being read too — this line is not a stuck
+        "processing" for this one file.
+        """
+        pool = getattr(self, "ocr_pool", None)
+        running = queued = 0
+        progress = getattr(pool, "progress", None)
+        if callable(progress):
+            try:
+                running, queued = progress()
+            except Exception:
+                running = queued = 0
+        if queued:
+            return f"OCR: reading document… ({running} reading, {queued} queued)"
+        if running > 1:
+            return f"OCR: reading document… ({running} files read together)"
+        return "OCR: reading document…"
+
+    def _start_ocr_progress(self) -> None:
+        """Refresh the status line every :data:`_OCR_PROGRESS_MS` while reading."""
+        self._stop_ocr_progress()
+        self._ocr_poll_done = False
+        try:
+            self._ocr_progress_after = self.window.after(
+                _OCR_PROGRESS_MS, self._tick_ocr_progress)
+        except tk.TclError:
+            self._ocr_progress_after = None
+
+    def _tick_ocr_progress(self) -> None:
+        self._ocr_progress_after = None
+        if getattr(self, "_ocr_poll_done", True):
+            return
+        # Safety net: the pool's completion callback is delivered from a
+        # worker thread through window.after(); if that ever fails to land (a
+        # Tk cross-thread hiccup) the popup would sit on "reading document…"
+        # for a file that is already read. This tick runs on the UI thread, so
+        # it picks the outcome up itself the moment the pool has it — a file
+        # can never stay stuck on "processing OCR" once its read is done.
+        pool = getattr(self, "ocr_pool", None)
+        if pool is not None and self._ocr_pool_finished(pool):
+            self._apply_ocr_outcome(pool.get(self.file_path))
+            return
+        self._set_ocr_status(self._ocr_reading_text(), _ACCENT)
+        try:
+            self._ocr_progress_after = self.window.after(
+                _OCR_PROGRESS_MS, self._tick_ocr_progress)
+        except tk.TclError:
+            self._ocr_progress_after = None
+
+    def _stop_ocr_progress(self) -> None:
+        """Cancel the pending status tick (idempotent, never raises)."""
+        after = getattr(self, "_ocr_progress_after", None)
+        self._ocr_progress_after = None
+        if after is None:
+            return
+        try:
+            self.window.after_cancel(after)
         except Exception:
             pass
 
@@ -2431,6 +2523,7 @@ class FilePickerPopup:
         except Exception:
             pass
         self._set_ocr_status("OCR: retrying…", _ACCENT)
+        self._start_ocr_progress()
 
         def on_done(result) -> None:
             def apply() -> None:
@@ -2455,11 +2548,13 @@ class FilePickerPopup:
     def _start_ocr(self) -> None:
         """Consume the background OCR result for this file (if any).
 
-        OCR of every completed download is kicked off eagerly by the
-        controller's OcrPool (bounded to 10 concurrent vision calls), so by
-        the time a popup opens the result is usually already cached. If it is
-        still in flight we subscribe to its completion; results are applied
-        on the UI thread and never clobber anything the user already typed.
+        EVERY completed download is submitted to the controller's OcrPool the
+        moment it lands, all together, so by the time a popup opens the result
+        is normally already cached — including for the files further down the
+        queue. If this one is still in flight we subscribe to its completion
+        and keep a live "N files read together" counter on the status line;
+        results are applied on the UI thread and never clobber anything the
+        user already typed.
         """
         pool = getattr(self, "ocr_pool", None)
         if pool is None:
@@ -2477,11 +2572,12 @@ class FilePickerPopup:
             return
 
         cached = pool.get(self.file_path)
-        if cached is not None:
+        if cached is not None or self._ocr_pool_finished(pool):
             self._apply_ocr_outcome(cached)
             return
 
-        self._set_ocr_status("OCR: reading document…", _ACCENT)
+        self._set_ocr_status(self._ocr_reading_text(), _ACCENT)
+        self._start_ocr_progress()
 
         def on_done(result) -> None:
             def apply() -> None:
@@ -2501,6 +2597,10 @@ class FilePickerPopup:
 
     def _apply_ocr_outcome(self, result) -> None:
         """Update the status line + fields once an OCR result is available."""
+        # The read is over (success, empty or failure): stop refreshing the
+        # "reading document…" counters so they can never overwrite the result.
+        self._ocr_poll_done = True
+        self._stop_ocr_progress()
         err = None
         if getattr(self, "ocr_pool", None) is not None:
             try:
@@ -2953,6 +3053,12 @@ class FilePickerPopup:
         # Stop live config polling first so no after() fires on a destroyed window.
         try:
             self._stop_config_poll()
+        except Exception:
+            pass
+        # Same for the OCR status tick ("reading document… (N read together)").
+        try:
+            self._ocr_poll_done = True
+            self._stop_ocr_progress()
         except Exception:
             pass
         # Close the preview first so it releases the file handle; otherwise the

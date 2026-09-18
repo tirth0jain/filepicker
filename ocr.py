@@ -1,9 +1,8 @@
 """OCR of delivery-note documents via the OpenCode Go vision model.
 
-When ``enable_ocr`` is on, the popup sends the first page of a new download
-(PDF or image) to the **DeepSeek V4 Flash Vision Exp** model on the OpenCode
-Go catalog (`opencode.ai/zen/go/v1`, OpenAI-compatible API) with a prompt
-that asks for:
+When ``enable_ocr`` is on, every new download (PDF or image) is sent to the
+**DeepSeek V4.1 Flash** model on the OpenCode Go catalog
+(`opencode.ai/zen/go/v1`, OpenAI-compatible API) with a prompt that asks for:
 
     Company (Supplier) / Client (Buyer) / Site (Other References) /
     Serial Number (Delivery Note No.)
@@ -43,10 +42,20 @@ from version import VERSION
 # under /zen/go/v1.
 OCR_API_BASE = "https://opencode.ai/zen/go/v1"
 
-# The vision model from the user's OpenCode Go subscription ("DeepSeek V4
-# Flash Vision Exp"). Reasoning-heavy: needs a large max_tokens budget or it
-# runs out of room before producing the answer table (see OCR_MAX_TOKENS).
-OCR_MODEL = "deepseek-v4-flash-vision-exp"
+# The model from the user's OpenCode Go subscription ("DeepSeek V4.1 Flash").
+# Multimodal (text + image input) and reasoning-capable: it needs a large
+# max_tokens budget or it runs out of room before producing the answer table
+# (see OCR_MAX_TOKENS).
+OCR_MODEL = "deepseek-v4.1-flash"
+
+# Model ids that OLDER builds wrote into config.json as the then-current
+# default. config.json is the source of truth for the model id (it is a
+# local-only key — never synced from GitHub nor pushed), so merely changing
+# the default above would never reach an existing install: the file keeps
+# pinning the old name. config.py upgrades a stored value from this list to
+# OCR_MODEL when it loads (and persists it on the next save). Any OTHER value
+# is a deliberate per-machine override and is left untouched.
+LEGACY_OCR_MODELS = ("deepseek-v4-flash-vision-exp",)
 
 # The model burns ~1500 tokens reasoning on a simple delivery note, and
 # harder documents (long tables, faint scans, the full known-sites/clients
@@ -69,11 +78,13 @@ OCR_MAX_IMAGE_DIM = 1600
 # JPEG quality used when compressing the rendered page for the API call.
 OCR_JPEG_QUALITY = 90
 
-# Maximum number of vision calls run at the same time. When many files land
-# at once, OCR is processed in batches of this size: as soon as one of the
-# current calls finishes, the next queued file starts (so at most
-# MAX_CONCURRENT_OCR requests are ever in flight).
-MAX_CONCURRENT_OCR = 10
+# Maximum number of vision calls in flight at the same time. Every file that
+# lands in the watch folder is submitted for OCR IMMEDIATELY (see main.py) and
+# the pool spawns one worker per queued file up to this ceiling, so a batch of
+# downloads is read SIMULTANEOUSLY instead of in waves. The ceiling only
+# exists so that dropping hundreds of files at once cannot open hundreds of
+# sockets at once; anything above it starts as the first reads finish.
+MAX_CONCURRENT_OCR = 32
 
 # Cloudflare in front of the OpenCode gateway blocks the default
 # "Python-urllib" user agent (HTTP 403, error code 1010), so every request
@@ -536,19 +547,20 @@ def extract_delivery_note(
 
 
 class OcrPool:
-    """Bounded background OCR worker pool.
+    """Background OCR pool that reads a whole batch of files AT ONCE.
 
-    Every file that lands in the watch folder is submitted eagerly, so by the
-    time its popup opens the result is usually already cached. At most
-    :data:`MAX_CONCURRENT_OCR` vision calls run at once — when many files
-    arrive together they are processed in batches of that size: as soon as
-    one call finishes, the next queued file starts (never more than 5
-    requests in flight).
+    Every file that lands in the watch folder is submitted the moment it
+    arrives (see main.py), and the pool spawns one worker per queued file —
+    up to :data:`MAX_CONCURRENT_OCR` — so ten downloads that land together
+    are ten simultaneous vision calls, not a queue that trickles. By the time
+    a popup opens its result is normally already cached, and no file ever
+    shows "reading document…" merely because it was still waiting behind the
+    files the user already handled.
 
-    Results are cached by resolved path; callers either poll :meth:`get` or
-    register a completion callback with :meth:`submit`. Never raises: every
-    failure surfaces as a ``None`` result. Workers are daemon threads so the
-    app can always quit immediately, even mid-call.
+    Results are cached by resolved path; callers either poll :meth:`get` /
+    :meth:`finished` or register a completion callback with :meth:`submit`.
+    Never raises: every failure surfaces as a ``None`` result. Workers are
+    daemon threads so the app can always quit immediately, even mid-call.
     """
 
     # Sentinel pushed on shutdown to stop the workers.
@@ -581,13 +593,14 @@ class OcrPool:
         self._errors: Dict[str, str] = {}
         self._active: set = set()          # paths queued or running
         self._waiters: Dict[str, List[Callable]] = {}
-        self._workers = [
-            threading.Thread(target=self._worker, daemon=True,
-                             name=f"filepicker-ocr-{i}")
-            for i in range(self._max)
-        ]
-        for w in self._workers:
-            w.start()
+        # Worker threads: ONE PER SUBMITTED FILE, up to _max. A file that
+        # lands therefore gets its own thread and starts its vision call
+        # immediately (a burst of N downloads is read N-at-a-time), while the
+        # threads that are not busy simply wait for the next submission.
+        # Submissions made after the ceiling is reached wait in the queue for
+        # a worker to free up.
+        self._workers: List[threading.Thread] = []
+        self._stopped = False
 
     @property
     def available(self) -> bool:
@@ -601,6 +614,29 @@ class OcrPool:
         """The cached OCR result for *file_path* (None if not finished yet)."""
         with self._lock:
             return self._results.get(self._key(file_path))
+
+    def finished(self, file_path) -> bool:
+        """True once *file_path* has an outcome — INCLUDING a failed read.
+
+        :meth:`get` returns ``None`` both for "not read yet" and for "read,
+        but nothing could be extracted", which made the popup show a
+        "reading document…" line for a file that was already done (and then
+        flip straight to the failure). This tells the two apart.
+        """
+        with self._lock:
+            return self._key(file_path) in self._results
+
+    def progress(self):
+        """Live counters ``(running, queued)`` for the popup's status line.
+
+        ``running`` is how many reads are in flight right now and ``queued``
+        how many submitted files are still waiting for a free worker (always
+        0 while the batch fits under :data:`MAX_CONCURRENT_OCR`).
+        """
+        with self._lock:
+            queued = self._queue.qsize()
+            running = max(0, len(self._active) - queued)
+        return running, queued
 
     def get_error(self, file_path) -> Optional[str]:
         """The failure message for *file_path*'s LAST run, if it failed.
@@ -641,6 +677,7 @@ class OcrPool:
             if on_done is not None:
                 self._waiters.setdefault(key, []).append(on_done)
             self._queue.put((Path(file_path), key))
+            self._ensure_worker()
             return True
 
     def submit(self, file_path, on_done: Optional[Callable] = None) -> bool:
@@ -673,6 +710,7 @@ class OcrPool:
                 if on_done is not None:
                     self._waiters.setdefault(key, []).append(on_done)
                 self._queue.put((Path(file_path), key))
+                self._ensure_worker()
                 return True
         if done and on_done is not None:
             try:
@@ -680,6 +718,27 @@ class OcrPool:
             except Exception:
                 pass
         return False
+
+    def _ensure_worker(self) -> None:
+        """Start a worker for this submission (up to the concurrency ceiling).
+
+        Called with ``self._lock`` held, right after a file is queued: every
+        file gets its own thread until :data:`MAX_CONCURRENT_OCR` workers
+        exist, so a whole batch of downloads is read simultaneously instead of
+        one wave at a time. Deliberately NOT an idle-worker bookkeeping
+        scheme — a stale "worker is free" count could leave a queued file
+        waiting behind a busy one (which is exactly the "the next file says
+        processing OCR again" symptom). Threads that are not busy just block
+        on the queue; files submitted after the ceiling wait for a free
+        worker.
+        """
+        if self._stopped or len(self._workers) >= self._max:
+            return
+        worker = threading.Thread(
+            target=self._worker, daemon=True,
+            name=f"filepicker-ocr-{len(self._workers)}")
+        self._workers.append(worker)
+        worker.start()
 
     def _worker(self) -> None:
         while True:
@@ -744,7 +803,10 @@ class OcrPool:
 
     def shutdown(self) -> None:
         """Stop the workers (in-flight calls finish; queued ones are dropped)."""
-        for _ in range(self._max):
+        with self._lock:
+            self._stopped = True
+            workers = list(self._workers)
+        for _ in workers:
             try:
                 self._queue.put(self._STOP)
             except Exception:

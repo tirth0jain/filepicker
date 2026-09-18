@@ -45,11 +45,11 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
 - **Config persistence** — all companies, clients, sites, materials and doc
   types are read from and written back to `config.json` dynamically.
 - **OCR auto-fill (optional)** — set `"enable_ocr": true` in `config.json` and
-  the popup automatically reads each delivery note (PDF or image) with the
-  **DeepSeek V4 Flash Vision Exp** vision model and pre-fills **Company
-  (Supplier) / Client (Buyer) / Site (Other References)** so you only have to
-  verify and hit *Save & Organize*. Uses your **OpenCode Go** subscription API
-  key — see [OCR setup](#ocr-setup-deepseek-v4-flash-vision-exp).
+  every download is read the moment it lands (PDF or image, all files at once)
+  with the **DeepSeek V4.1 Flash** model, pre-filling **Company (Supplier) /
+  Client (Buyer) / Site (Other References)** so you only have to verify and hit
+  *Save & Organize*. Uses your **OpenCode Go** subscription API key — see
+  [OCR setup](#ocr-setup-deepseek-v41-flash).
 
 ---
 
@@ -90,7 +90,7 @@ New companies, clients, sites, materials and doc types added from the UI are
 saved back to this file automatically. The first entry in `companies` is the
 default shown in the popup's Company dropdown.
 
-## OCR setup (DeepSeek V4 Flash Vision Exp)
+## OCR setup (DeepSeek V4.1 Flash)
 
 When enabled, every new download opens the popup already pre-filled with the
 supplier / buyer / site read from the document — no manual typing.
@@ -109,16 +109,22 @@ supplier / buyer / site read from the document — no manual typing.
    ```json
    {
      "enable_ocr": true,
-     "ocr_model": "deepseek-v4-flash-vision-exp",
+     "ocr_model": "deepseek-v4.1-flash",
      "ocr_api_base": "https://opencode.ai/zen/go/v1"
    }
    ```
 
    `enable_ocr` is a **local-only** flag: it is never synced from the GitHub
    config and never pushed back, because OCR needs this machine's own key.
-   The model/endpoint defaults above can be overridden per machine.
+   The model/endpoint defaults above can be overridden per machine — a value
+   that is only an *old default* of the app (e.g.
+   `deepseek-v4-flash-vision-exp`) is upgraded to the current model
+   automatically, so an existing `config.json` switches over by itself.
 
-While OCR runs, the popup shows `OCR: reading document…`. Results are
+Every file is submitted for OCR the moment it lands and the whole batch is
+read **simultaneously** (up to 32 vision calls at once), so a popup normally
+opens already filled. While a read is still in flight the popup shows
+`OCR: reading document… (N files read together)`. Results are
 applied only if you haven't started typing; names that already exist in the
 catalog are matched case-insensitively (canonical spelling is used), and
 brand-new names stay typed so you can review (and optionally *Add*) them
@@ -273,7 +279,7 @@ filepicker/
 ├── config.py        # ConfigManager (load/save config.json)
 ├── watcher.py       # watchdog-based folder watcher + lock debounce
 ├── popup.py         # customtkinter metadata popup
-├── ocr.py           # OCR auto-fill (OpenCode Go DeepSeek V4 Flash Vision Exp)
+├── ocr.py           # OCR auto-fill (OpenCode Go DeepSeek V4.1 Flash)
 ├── viewer.py        # lightweight PDF / image / Excel preview window
 ├── filename.py      # filename formatting & collision resolution
 ├── organizer.py     # directory routing & file distribution

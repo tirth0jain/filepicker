@@ -341,7 +341,7 @@
   "enable_ocr": true,
   "preview_open_by_default": true,
   "block_alt_for_other_apps": true,
-  "ocr_model": "deepseek-v4-flash-vision-exp",
+  "ocr_model": "deepseek-v4.1-flash",
   "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "client_aliases": {
     "Alder Residency Pvt Ltd": "KALPATARU",
