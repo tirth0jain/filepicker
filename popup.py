@@ -24,6 +24,7 @@ from typing import Callable, Dict, List, Optional
 import customtkinter as ctk
 
 import filename as fn
+import winfocus
 from config import ConfigManager
 from version import VERSION
 
@@ -91,12 +92,110 @@ def alt_seq_step(pending: str, keysym: str) -> tuple:
     return "", seq.upper()
 
 
+# Outline drawn around the option the arrow keys currently point at (see
+# _wire_dialog_choices). Every question dialog shows its options' letters in
+# the button label, so the keyboard route is discoverable without a manual.
+_DIALOG_SELECT_BORDER = 3
+
+
+def _wire_dialog_choices(dialog, buttons, letters, default_index: int = 0) -> dict:
+    """Make a question dialog's options selectable by keyboard.
+
+    Two ways to answer, both acting immediately (no confirmation step):
+
+    - the arrow keys move a visible selection (Up/Left = previous, Down/Right
+      = next, wrapping) and Enter/Space presses the selected option;
+    - **Ctrl+<letter>** presses the option whose letter that is, wherever the
+      focus is inside the dialog — one letter always, never a chord.
+
+    *buttons* are the CTkButtons in visual order and *letters* the matching
+    single letters (the same ones shown in their labels). The selected option
+    is outlined so the arrows have something visible to move; the caller keeps
+    its own bindings (Escape, Ctrl+S, ...). Returns the selection state dict.
+    """
+    count = len(buttons)
+    if not count:
+        return {"index": 0}
+    state = {"index": max(0, min(int(default_index), count - 1))}
+
+    def render() -> None:
+        for i, btn in enumerate(buttons):
+            try:
+                btn.configure(
+                    border_width=_DIALOG_SELECT_BORDER if i == state["index"] else 0,
+                    border_color=_TEXT if i == state["index"] else _BG_FIELD,
+                )
+            except Exception:
+                pass
+        try:
+            buttons[state["index"]].focus_set()
+        except Exception:
+            pass
+
+    def move(step: int) -> None:
+        state["index"] = (state["index"] + step) % count
+        render()
+
+    def activate() -> None:
+        try:
+            buttons[state["index"]].invoke()
+        except Exception:
+            pass
+
+    for seq, handler in (
+        ("<Left>", lambda _e: move(-1)),
+        ("<Up>", lambda _e: move(-1)),
+        ("<Right>", lambda _e: move(1)),
+        ("<Down>", lambda _e: move(1)),
+        ("<Return>", lambda _e: activate()),
+        ("<KP_Enter>", lambda _e: activate()),
+        ("<space>", lambda _e: activate()),
+    ):
+        try:
+            dialog.bind(seq, handler)
+        except Exception:
+            pass
+
+    for index, letter in enumerate(letters):
+        if not letter or index >= count:
+            continue
+        for seq in (f"<Control-{letter.lower()}>", f"<Control-{letter.upper()}>"):
+            try:
+                dialog.bind(seq, lambda _e, i=index: buttons[i].invoke())
+            except Exception:
+                continue
+
+    # The same keys while a button itself holds the focus (Tk buttons consume
+    # some of them before the toplevel binding sees them).
+    for btn in buttons:
+        for seq, handler in (
+            ("<Return>", lambda _e: activate()),
+            ("<KP_Enter>", lambda _e: activate()),
+            ("<space>", lambda _e: activate()),
+            ("<Left>", lambda _e: move(-1)),
+            ("<Up>", lambda _e: move(-1)),
+            ("<Right>", lambda _e: move(1)),
+            ("<Down>", lambda _e: move(1)),
+        ):
+            try:
+                btn.bind(seq, handler)
+            except Exception:
+                pass
+
+    render()
+    return state
+
+
 def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     """Build the "file already exists" question dialog.
 
     Returns ``(dialog, callback)`` where ``callback["value"]`` is set to
     ``"skip"`` or ``"replace"`` when a button is pressed (the dialog is
     destroyed with it). Closing the window counts as "skip".
+
+    Answering by keyboard: the arrow keys select an option (Enter/Space
+    presses it) and Ctrl+Y = Yes (replace) / Ctrl+N = No (skip) act
+    immediately — as do the older Ctrl+S (replace) and Ctrl+Delete (skip).
     """
     dialog = ctk.CTkToplevel(root)
     dialog.title("File already exists")
@@ -107,7 +206,7 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     # Center over the popup/screen, like every other FilePicker window.
     try:
         sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-        dialog.geometry(f"500x240+{max((sw - 500) // 2, 0)}+{max((sh - 240) // 3, 0)}")
+        dialog.geometry(f"520x266+{max((sw - 520) // 2, 0)}+{max((sh - 266) // 3, 0)}")
     except tk.TclError:
         pass
 
@@ -149,23 +248,24 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     ctk.CTkLabel(
         dialog,
         text=f"\"{filename}\" already exists at:\n{existing_path.parent}\n\n"
-             "The new download would be saved with the same name.\n"
-             "What should FilePicker do?\n\n"
-             "Ctrl+S = Replace  •  Ctrl+Delete = Skip",
+             "Replace the old file with this new download?\n\n"
+             "Ctrl+Y = Yes (replace)  •  Ctrl+N = No (skip)\n"
+             "Arrows + Enter also work  •  Ctrl+S = replace  •  Ctrl+Delete = skip",
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
-        wraplength=460,
+        wraplength=480,
     ).pack(anchor="w", padx=18, pady=(0, 12))
 
     btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
     btn_row.pack(fill="x", padx=18, pady=(0, 16))
     skip_btn = ctk.CTkButton(
-        btn_row, text="Skip New File", command=lambda: choose("skip"),
+        btn_row, text="No — Skip New File  (N)", command=lambda: choose("skip"),
         fg_color=_BG_FIELD, hover_color="#33334a", height=38,
         font=ctk.CTkFont(size=13), text_color=_TEXT,
     )
     skip_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
     replace_btn = ctk.CTkButton(
-        btn_row, text="Replace Old with New", command=lambda: choose("replace"),
+        btn_row, text="Yes — Replace Old with New  (Y)",
+        command=lambda: choose("replace"),
         fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
         font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff",
     )
@@ -179,9 +279,15 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     dialog.bind("<Control-s>", lambda _e: choose("replace"))
     dialog.bind("<Control-Delete>", lambda _e: choose("skip"))
     dialog.bind("<Escape>", lambda _e: choose("skip"))
+    # Arrow selection + the letters shown on the buttons (Y = replace, N =
+    # skip); the safe option (skip) is selected first, so a stray Enter never
+    # overwrites an existing file.
+    _wire_dialog_choices(dialog, [skip_btn, replace_btn], ["n", "y"], default_index=0)
+    # Give the question the keyboard the moment it appears (the popup was
+    # dismissed, so Windows may have handed focus back to another program).
     try:
-        skip_btn.focus_set()
-    except tk.TclError:
+        winfocus.claim(dialog)
+    except Exception:
         pass
     return dialog, callback
 
@@ -243,7 +349,7 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     if overlay:
         try:
             parent.update_idletasks()
-            w, h = 560, 300
+            w, h = 560, 330
             px = parent.winfo_rootx() + max((parent.winfo_width() - w) // 2, 0)
             py = parent.winfo_rooty() + max((parent.winfo_height() - h) // 2, 0)
             dialog.geometry(f"{w}x{h}+{max(px, 0)}+{max(py, 0)}")
@@ -252,7 +358,7 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     if not overlay:
         try:
             sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-            dialog.geometry(f"560x300+{max((sw - 560) // 2, 0)}+{max((sh - 300) // 3, 0)}")
+            dialog.geometry(f"560x330+{max((sw - 560) // 2, 0)}+{max((sh - 330) // 3, 0)}")
         except tk.TclError:
             pass
 
@@ -291,7 +397,9 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
         text=f"\"{site}\" is the same place as a site of another client:\n"
              f"{lines}\n\n"
              f"Saving keeps this file under \"{client}\". Nothing is moved\n"
-             f"automatically — choose what to do:",
+             f"automatically — choose what to do:\n\n"
+             f"Ctrl+Y = keep  •  Ctrl+M = move sites  •  Ctrl+N = cancel\n"
+             f"Arrows + Enter also work",
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
         wraplength=520,
     ).pack(anchor="w", padx=18, pady=(0, 12))
@@ -299,19 +407,19 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
     btn_row.pack(fill="x", padx=18, pady=(0, 16))
     keep_btn = ctk.CTkButton(
-        btn_row, text=f"Keep under {client}", command=lambda: choose("continue"),
+        btn_row, text=f"Keep under {client}  (Y)", command=lambda: choose("continue"),
         fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
         font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff",
     )
     keep_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
     move_btn = ctk.CTkButton(
-        btn_row, text=transfer_text, command=lambda: choose("transfer"),
+        btn_row, text=f"{transfer_text}  (M)", command=lambda: choose("transfer"),
         fg_color=_BG_FIELD, hover_color="#33334a", height=38,
         font=ctk.CTkFont(size=12), text_color=_TEXT,
     )
     move_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
     cancel_btn = ctk.CTkButton(
-        btn_row, text="Cancel", command=lambda: choose("cancel"),
+        btn_row, text="Cancel  (N)", command=lambda: choose("cancel"),
         fg_color=_BG_FIELD, hover_color="#33334a", width=90, height=38,
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
     )
@@ -321,10 +429,10 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     # the popup open so the user can switch the client themselves.
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
     dialog.bind("<Escape>", lambda _e: choose("cancel"))
-    try:
-        keep_btn.focus_set()
-    except tk.TclError:
-        pass
+    # Arrow selection + the letters shown on the buttons: Y = keep this file
+    # here, M = move the other client's sites, N = cancel.
+    _wire_dialog_choices(
+        dialog, [keep_btn, move_btn, cancel_btn], ["y", "m", "n"], default_index=0)
 
     # Re-raise once mapped: topmost + transient can lose the race against the
     # popup's own topmost flag on the first map, which put this dialog behind
@@ -345,6 +453,12 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
 
     try:
         dialog.after(0, _raise_me)
+    except Exception:
+        pass
+    # ...and take the Windows foreground too (the popup may be the foreground
+    # window of another process' input queue, which swallows focus_force).
+    try:
+        winfocus.claim(dialog)
     except Exception:
         pass
     return dialog, callback
@@ -943,6 +1057,13 @@ _MATERIAL_WORD_ALIASES = {
     "fastner": ("fastener",),
 }
 
+# Separators between "Description of Goods" item headings. The OCR prompt asks
+# for comma-separated headings, but models answer with one per line, with
+# semicolons, table pipes or bullets just as often — every one of those starts
+# a NEW item, and each item gets at most ONE material (see
+# FilePickerPopup._goods_material_matches).
+_GOODS_ITEM_SPLIT = re.compile(r"[,;|\n\r•·]+")
+
 
 class FilePickerPopup:
     """Modal dialog that gathers metadata and hands it to a callback."""
@@ -1008,10 +1129,28 @@ class FilePickerPopup:
         self._serial_var.trace_add("write", lambda *_: self._refresh_preview())
         self._received_var.trace_add("write", lambda *_: self._refresh_preview())
 
-        # Keep the popup on top of everything.
-        self.window.attributes("-topmost", True)
-        self.window.lift()
-        self.window.focus_force()
+        # Keep the popup on top of everything AND give it the keyboard: the
+        # download finished while the user was in another program, so Windows
+        # refuses a plain focus_force() from this background process — the
+        # popup was visible but every keystroke still went elsewhere (Ctrl+S
+        # did nothing until the popup was clicked). winfocus takes the
+        # foreground properly and retries right after the window is mapped.
+        try:
+            winfocus.claim(self.window)
+        except Exception as exc:
+            print(f"[filepicker] focus claim error: {exc}")
+            try:
+                self.window.attributes("-topmost", True)
+                self.window.lift()
+                self.window.focus_force()
+            except Exception:
+                pass
+        # A popup can be de-minimised/restored from the taskbar: take the
+        # keyboard again whenever it is mapped, not only at creation.
+        try:
+            self.window.bind("<Map>", lambda _e: winfocus.claim(self.window), add="+")
+        except Exception:
+            pass
 
         # Global Alt suppression (Windows): while this popup is open, Alt+key
         # is swallowed for every other program (AutoDesk etc.) and re-posted
@@ -1912,12 +2051,20 @@ class FilePickerPopup:
     # "Description of Goods" -> catalog materials
     # ------------------------------------------------------------------
     def _goods_material_matches(self, goods_text) -> List[str]:
-        """Catalog materials whose name, code or mapped synonym appears in text.
+        """The ONE catalog material each goods item refers to.
 
         OCR transcribes ONLY the bold heading words of the "Description of
         Goods" table (see the OCR prompt) — the item names, never the
-        sub-description lines printed below them. Matching those against the
-        catalog is deliberately conservative:
+        sub-description lines printed below them. Each item heading names ONE
+        material, so every heading is matched on its own and only its best
+        match is taken: "SS Spigot" is a spigot (the mapped word, six
+        characters) made of SS (a two-letter code), so longest-match wins and
+        only "fitting" is selected — reading the whole goods text as one blob
+        used to add "Stainless Steel" as a second, wrong material for the same
+        line. Headings are separated by commas (what the OCR prompt asks for),
+        newlines, semicolons, pipes or bullets.
+
+        Within one heading the matching is deliberately conservative:
 
         - whole words only (``\\b``), so "stal" never matches "Stainless" and
           "customer" never matches the "CO" code;
@@ -1927,29 +2074,45 @@ class FilePickerPopup:
         - material MAPPINGS (the 🗺 Map editor) are applied: a mapped goods
           word ("nuts"/"bolts" -> Screw) selects its material even though the
           document never writes the material name;
-        - longest match wins on overlapping text, so "GI SHEET" selects only
-          "GI SHEET" and not the "GI" code of "Galvanized Iron".
+        - the longest match wins (a NAME before a mapped word before a code on
+          a tie), so "GI SHEET" selects only "GI SHEET" and not the "GI" code
+          of "Galvanized Iron".
 
-        Returns the matched material names in the order they appear in the
-        goods text (empty when nothing matches — the caller then leaves the
+        Returns the matched material names in the order the items appear in
+        the goods text (empty when nothing matches — the caller then leaves the
         material selection untouched).
         """
-        text = str(goods_text or "").strip().lower()
-        if not text:
+        raw = str(goods_text or "").strip()
+        if not raw:
             return []
-        # Punctuation to spaces keeps word boundaries ("MS-ANGLE" -> "ms angle");
-        # squeezing runs of whitespace makes the "\s+" in the patterns cheap.
-        text = re.sub(r"[^a-z0-9]+", " ", text)
+        chosen: List[str] = []
+        for item in _GOODS_ITEM_SPLIT.split(raw):
+            name = self._best_material_in_item(item)
+            if name and name not in chosen:
+                chosen.append(name)
+        return chosen
+
+    def _best_material_in_item(self, item: str) -> Optional[str]:
+        """The single best catalog material named by ONE goods item heading.
+
+        Candidates are every catalog material whose name, shortcode or mapped
+        synonym appears in the heading; the most specific one (longest span,
+        then NAME > mapped word > code) is the material the item is about.
+        Returns None when the heading mentions no catalog material.
+        """
+        text = re.sub(r"[^a-z0-9]+", " ", str(item or "").lower())
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
-            return []
+            return None
 
-        candidates = []  # (start, end, is_name, material_name)
+        # (start, end, rank, material_name); rank: 0 = material NAME,
+        # 1 = mapped goods word, 2 = shortcode.
+        candidates = []
         for name, code in self._materials_map.items():
-            terms = [(str(name), True)]
+            terms = [(str(name), 0)]
             if code and len(str(code)) >= 2:
-                terms.append((str(code), False))
-            for term, is_name in terms:
+                terms.append((str(code), 2))
+            for term, rank in terms:
                 words = [w for w in re.split(r"[^A-Za-z0-9]+", term.lower()) if w]
                 if not words:
                     continue
@@ -1957,7 +2120,7 @@ class FilePickerPopup:
                     continue  # a single letter is never a material signal
                 pieces = []
                 for word in words:
-                    alts = _MATERIAL_WORD_ALIASES.get(word) if is_name else None
+                    alts = _MATERIAL_WORD_ALIASES.get(word) if rank == 0 else None
                     if alts:
                         pieces.append("(?:" + "|".join(
                             re.escape(w) for w in (word,) + tuple(alts)) + ")")
@@ -1966,7 +2129,7 @@ class FilePickerPopup:
                 pattern = (r"\b" + r"\s+".join(pieces) + r"(?:s|es)?\b")
                 try:
                     for m in re.finditer(pattern, text):
-                        candidates.append((m.start(), m.end(), is_name, name))
+                        candidates.append((m.start(), m.end(), rank, name))
                 except re.error:
                     continue
 
@@ -2000,26 +2163,16 @@ class FilePickerPopup:
             pattern = r"\b" + r"\s+".join(pieces) + r"(?:s|es)?\b"
             try:
                 for m in re.finditer(pattern, text):
-                    candidates.append((m.start(), m.end(), False, tgt_name))
+                    candidates.append((m.start(), m.end(), 1, tgt_name))
             except re.error:
                 continue
 
-        # Longest span first (names before codes on a tie), then accept greedily
-        # when the span does not overlap an already-accepted one.
-        candidates.sort(key=lambda c: (-(c[1] - c[0]), not c[2], c[0]))
-        taken = []
-        chosen = []
-        chosen_names = set()
-        for start, end, _is_name, name in candidates:
-            if any(start < t_end and t_start < end for t_start, t_end in taken):
-                continue
-            taken.append((start, end))
-            if name in chosen_names:
-                continue
-            chosen_names.add(name)
-            chosen.append((start, name))
-        chosen.sort(key=lambda c: c[0])
-        return [name for _start, name in chosen]
+        if not candidates:
+            return None
+        # Longest span first, then the most specific kind of match, then the
+        # earliest one — the winner is the material this item is about.
+        candidates.sort(key=lambda c: (-(c[1] - c[0]), c[2], c[0]))
+        return candidates[0][3]
 
     def _apply_goods_materials(self, goods_text) -> bool:
         """Pre-select the catalog materials the goods description mentions.
@@ -2595,6 +2748,25 @@ class FilePickerPopup:
 
         pool.submit(self.file_path, on_done)
 
+    def _ocr_seconds(self) -> str:
+        """``" in 3.2s"`` for the last read of this file ("" when unknown).
+
+        The pool records how long each read took; showing it next to the
+        filled fields makes the effect of the speed settings visible at a
+        glance (pools without the accessor — older/fake ones — add nothing).
+        """
+        pool = getattr(self, "ocr_pool", None)
+        duration = getattr(pool, "duration", None)
+        if not callable(duration):
+            return ""
+        try:
+            seconds = duration(self.file_path)
+        except Exception:
+            return ""
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            return ""
+        return f" in {seconds:.1f}s"
+
     def _apply_ocr_outcome(self, result) -> None:
         """Update the status line + fields once an OCR result is available."""
         # The read is over (success, empty or failure): stop refreshing the
@@ -2627,9 +2799,10 @@ class FilePickerPopup:
         # carries the serial — back-fill it as a fallback (never clobbers).
         if not self._serial_var.get().strip() and self._apply_serial_from_filename():
             changed = True
+        took = self._ocr_seconds()
         self._set_ocr_status(
-            "OCR: fields filled — check before saving" if changed
-            else "OCR: done (fields already filled)",
+            f"OCR: fields filled{took} — check before saving" if changed
+            else f"OCR: done{took} (fields already filled)",
             _SUCCESS,
         )
         self._set_ocr_retry_visible(True)

@@ -670,6 +670,10 @@ class FilePickerController:
                     token=self.config.opencode_token,
                     model=self.config.ocr_model,
                     api_base=self.config.ocr_api_base,
+                    # How hard the model may think before answering: the
+                    # default effort is what made one read take 10+ seconds
+                    # (see ocr.OCR_REASONING_EFFORT). "" sends no effort field.
+                    reasoning_effort=self.config.ocr_reasoning_effort,
                     # The current site + client catalog is sent with every read so the
                     # AI resolves near-same spellings ("sital baug",
                     # "Larsen and Toubro") to the existing names instead of
@@ -685,6 +689,7 @@ class FilePickerController:
                     self._set_status("OCR enabled but no API key found")
                 print(f"[filepicker] OCR pool ready (model={self.config.ocr_model}, "
                       f"concurrent={_OCR_MAX}, "
+                      f"reasoning_effort={self.config.ocr_reasoning_effort or 'default'}, "
                       f"token={'yes' if self._ocr_pool.available else 'MISSING'})")
             except Exception as exc:
                 print(f"[filepicker] OCR pool init error: {exc}")

@@ -50,6 +50,13 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   Client (Buyer) / Site (Other References)** so you only have to verify and hit
   *Save & Organize*. Uses your **OpenCode Go** subscription API key — see
   [OCR setup](#ocr-setup-deepseek-v41-flash).
+- **Keyboard-first** — the popup takes the keyboard the moment it opens (no
+  click needed), so its shortcuts work immediately: **Ctrl+S** Save & Organize,
+  **Ctrl+Delete** Skip, **Ctrl+P** Preview, and **Alt + a material's 2-letter
+  code** (Alt+AL = Aluminium) to toggle a material from any field. Question
+  dialogs (duplicate file, site of another client) show a letter on every
+  option — press **Ctrl+Y / Ctrl+N / Ctrl+M** to answer instantly, or move the
+  selection with the **arrow keys** and press **Enter**.
 
 ---
 
@@ -110,7 +117,8 @@ supplier / buyer / site read from the document — no manual typing.
    {
      "enable_ocr": true,
      "ocr_model": "deepseek-v4.1-flash",
-     "ocr_api_base": "https://opencode.ai/zen/go/v1"
+     "ocr_api_base": "https://opencode.ai/zen/go/v1",
+     "ocr_reasoning_effort": "low"
    }
    ```
 
@@ -137,12 +145,25 @@ before saving. The Serial Number is read from the **Delivery Note No.** field
 the file name (`RS-DC-26-27-6.pdf` → `6`). The key never lands in
 `config.json`, so it can't leak to the public repo.
 
-**Batches of 10, paced to your review:** files are OCR'd in batches of
-**10 concurrent vision calls**, and the next batch starts only once you are
-checking the last file of the current one — after 9 saves the next 10 are
-already being read in the background, so each popup is pre-filled by the
-time you get to it. A folder of 20 notes never fires more than 10 vision
-calls at once, and OCR doesn't run ahead of what you're actually reviewing.
+**Speed (`ocr_reasoning_effort`):** a read is dominated by how long the model
+*thinks* before answering, not by the upload or the prompt — the default
+effort spent thousands of reasoning tokens copying out a five-row table,
+which is where the 10+ seconds per file went. Every read now asks for
+`"reasoning_effort": "low"`, which cuts that to a fraction while keeping the
+extraction accurate. Set it to `medium`/`high` in `config.json` if a hard
+document ever comes back wrong, or to `""` to send nothing and let the model
+use its own default (slow). If the gateway ever rejects the field the app
+drops it automatically and keeps working. Each read logs its seconds
+(`[ocr] RS-DC-26-27-6.pdf: read in 3.4s, 412 tokens, reasoning_effort=low`)
+and the popup shows them too: `OCR: fields filled in 3.4s — check before
+saving`.
+
+**Materials from the goods table:** the OCR transcribes the bold item
+headings of the "Description of Goods" table, and **each heading selects at
+most ONE material** — the most specific match in that line. A line reading
+`SS Spigot` therefore selects the *fitting* (the mapped word, longer and more
+specific) and **not** Stainless Steel as well; comma-, newline-, semicolon-,
+pipe- or bullet-separated headings each contribute their own single material.
 
 ## Usage
 
@@ -284,6 +305,7 @@ filepicker/
 ├── watcher.py       # watchdog-based folder watcher + lock debounce
 ├── popup.py         # customtkinter metadata popup
 ├── ocr.py           # OCR auto-fill (OpenCode Go DeepSeek V4.1 Flash)
+├── winfocus.py      # Windows foreground/focus claim for popups & dialogs
 ├── viewer.py        # lightweight PDF / image / Excel preview window
 ├── filename.py      # filename formatting & collision resolution
 ├── organizer.py     # directory routing & file distribution

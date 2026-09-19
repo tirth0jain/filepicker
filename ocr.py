@@ -63,8 +63,30 @@ LEGACY_OCR_MODELS = ("deepseek-v4-flash-vision-exp",)
 # reasoning alone, leaving nothing for the answer table. 8192 gave it room,
 # but on dense documents the reasoning still consumed the ENTIRE budget and
 # the model returned no fields at all ("reasoning consumed all 8192
-# tokens") — doubled to 16384 so the answer table always has room.
+# tokens") — doubled to 16384 so the answer table always has room. The budget
+# is only a ceiling (it costs nothing when unused) and is kept at 16384 even
+# though OCR_REASONING_EFFORT now keeps the reasoning short: a gateway that
+# rejects the effort field (see _REASONING_EFFORT_SUPPORTED) falls back to
+# the model's own default, which needs the full budget again.
 OCR_MAX_TOKENS = 16384
+
+# How hard the model thinks before answering. This is the single biggest
+# latency lever for a read: the default effort spends thousands of reasoning
+# tokens on a delivery note that only needs a five-row table copied out, which
+# is where the 10+ seconds per file went. "low" keeps the extraction accurate
+# (the fields are read off the document, not inferred) while cutting the
+# thinking to a fraction; the OpenCode Go gateway accepts low/medium/high/max
+# for this model and answers 400 for anything else. config.json's
+# "ocr_reasoning_effort" (local-only) overrides it per machine — set it to
+# "medium"/"high" if a hard document ever comes back wrong, or to "" to send
+# nothing at all and let the model use its own default.
+OCR_REASONING_EFFORT = "low"
+
+# Statuses that make the read retry once WITHOUT reasoning_effort: a gateway
+# that rejects the field (400 "unknown parameter") must never be able to break
+# OCR. The field is only dropped for the rest of the run when that retry then
+# succeeds — see _disable_reasoning_effort.
+OCR_EFFORT_REJECT_STATUS = {400, 404, 422}
 
 # Total wall-clock budget for one OCR call (seconds). Vision + reasoning on a
 # busy gateway can take a while; 120s keeps the popup snappy while allowing
@@ -75,8 +97,10 @@ OCR_TIMEOUT = 120
 # small and fast without hurting text legibility.
 OCR_MAX_IMAGE_DIM = 1600
 
-# JPEG quality used when compressing the rendered page for the API call.
-OCR_JPEG_QUALITY = 90
+# JPEG quality used when compressing the rendered page for the API call. 85
+# is visually indistinguishable from 90 on a scanned page but ~13% fewer
+# bytes, i.e. less to upload before the model can even start.
+OCR_JPEG_QUALITY = 85
 
 # Maximum number of vision calls in flight at the same time. Every file that
 # lands in the watch folder is submitted for OCR IMMEDIATELY (see main.py) and
@@ -108,6 +132,12 @@ OCR_RETRY_BACKOFF = (2.0, 5.0)
 # for FilePicker: all OCR reads share the same prompt text, so a stable ID
 # lets the gateway reuse prompt caches across the whole batch.
 OCR_SESSION_ID = str(uuid.uuid4())
+
+# Whether the endpoint accepted the reasoning_effort field (see
+# OCR_REASONING_EFFORT). A gateway that rejects it is remembered for the rest
+# of the run so no later file pays for a second round trip: the very first
+# read retries once without the field and every following one simply omits it.
+_REASONING_EFFORT_SUPPORTED = True
 
 # The extraction prompt — verbatim from the feature spec (Serial Number added
 # in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits.
@@ -440,6 +470,7 @@ def extract_delivery_note(
     known_sites: Optional[List[str]] = None,
     known_clients: Optional[List[str]] = None,
     on_error: Optional[Callable[[str], None]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site, serial, goods}.
 
@@ -458,6 +489,12 @@ def extract_delivery_note(
     logged) — callers use it to tell the user WHY OCR failed. Never raises:
     network/render/model errors are logged and return None so the popup can
     simply skip auto-fill (or offer a retry).
+
+    ``reasoning_effort`` is how hard the model may think before answering
+    (None = :data:`OCR_REASONING_EFFORT`, "" = send nothing). It is the main
+    latency knob for a read; an endpoint that rejects the field is detected
+    once and the call is retried without it (see
+    :data:`_REASONING_EFFORT_SUPPORTED`).
     """
     if known_sites is not None or known_clients is not None:
         prompt = build_ocr_prompt(known_sites, known_clients)
@@ -465,30 +502,16 @@ def extract_delivery_note(
     if data_url is None:
         return None
 
-    body = json.dumps({
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
-        "max_tokens": max_tokens,
-    }).encode("utf-8")
-
     endpoint = api_base.rstrip("/") + "/chat/completions"
-    req = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": _UA,
-            "x-opencode-session": OCR_SESSION_ID,
-        },
-        method="POST",
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": _UA,
+        "x-opencode-session": OCR_SESSION_ID,
+    }
+    effort = (OCR_REASONING_EFFORT if reasoning_effort is None
+              else str(reasoning_effort).strip())
+    started = time.monotonic()
 
     def _report(msg: str) -> None:
         if on_error is not None:
@@ -498,7 +521,32 @@ def extract_delivery_note(
                 pass
 
     attempt = 0
+    sent_effort = False
+    dropped_effort = False       # the field was dropped for THIS call already
+    reject_status = 0
+    reject_detail = ""
     while True:
+        payload = {
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            "max_tokens": max_tokens,
+        }
+        # Ask for a short think instead of the model's own (much longer)
+        # default — see OCR_REASONING_EFFORT. Dropped for good as soon as an
+        # endpoint says it does not know the field.
+        sent_effort = bool(effort) and _REASONING_EFFORT_SUPPORTED and not dropped_effort
+        if sent_effort:
+            payload["reasoning_effort"] = effort
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint, data=body, headers=headers, method="POST")
+
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -509,6 +557,19 @@ def extract_delivery_note(
                 detail = e.read().decode("utf-8", errors="ignore")[:300]
             except Exception:
                 pass
+            # A rejected field must never be able to break OCR: any
+            # 400/404/422 on the request that CARRIED reasoning_effort is
+            # retried once without it (same attempt, no backoff). When that
+            # retry then succeeds the field was the problem and it is dropped
+            # for the rest of the run; when it fails too, the field was
+            # innocent and stays on for the next file.
+            if sent_effort and e.code in OCR_EFFORT_REJECT_STATUS:
+                dropped_effort = True
+                reject_status, reject_detail = e.code, detail
+                print(f"[ocr] OpenCode Go API error ({e.code}) with "
+                      f"reasoning_effort — retrying the same read without it"
+                      + (f": {detail[:160]}" if detail else ""))
+                continue
             msg = f"OpenCode Go API error ({e.code})"
             if detail:
                 msg += f": {detail}"
@@ -529,11 +590,27 @@ def extract_delivery_note(
             _report(msg)
             return None
 
+    if dropped_effort:
+        # The retry (without the field) worked: remember it for the run so no
+        # later file pays for the extra round trip.
+        _disable_reasoning_effort(reject_status, reject_detail)
+
     try:
         content = data["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError, TypeError):
         print(f"[ocr] unexpected API response: {str(data)[:300]}")
         return None
+
+    try:
+        content = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError):
+        print(f"[ocr] unexpected API response: {str(data)[:300]}")
+        return None
+
+    # One line per read so the log shows what the speed knobs actually did
+    # (elapsed seconds, how much the model wrote, whether the short think was
+    # requested) — the popup shows the same seconds next to its status.
+    _log_timing(file_path, time.monotonic() - started, data, effort if sent_effort else "")
 
     result = parse_table_response(content)
     if not any(result.values()):
@@ -544,6 +621,39 @@ def extract_delivery_note(
             reason = f"reasoning consumed all {usage.get('completion_tokens')} tokens"
         print(f"[ocr] model returned no fields ({reason})")
     return result
+
+
+def _disable_reasoning_effort(status: int, detail: str = "") -> None:
+    """Stop sending reasoning_effort for the rest of this run (idempotent).
+
+    Only called once the field has been proven guilty — i.e. a request that
+    carried it was rejected and the identical request without it succeeded.
+    """
+    global _REASONING_EFFORT_SUPPORTED
+    if not _REASONING_EFFORT_SUPPORTED:
+        return
+    _REASONING_EFFORT_SUPPORTED = False
+    extra = f": {detail[:160]}" if detail else ""
+    print(f"[ocr] endpoint rejected reasoning_effort ({status}){extra} — "
+          f"the read succeeded without it, so it is not sent again "
+          f"(the model's own effort is used from now on)")
+
+
+def _log_timing(file_path, elapsed: float, data: dict, effort: str = "") -> None:
+    """Log how long a read took (and what the model spent) in one line."""
+    usage = data.get("usage") if isinstance(data, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    bits = [f"read in {elapsed:.1f}s"]
+    tokens = usage.get("completion_tokens")
+    if isinstance(tokens, int):
+        bits.append(f"{tokens} tokens")
+    if effort:
+        bits.append(f"reasoning_effort={effort}")
+    try:
+        name = Path(file_path).name
+    except Exception:
+        name = str(file_path)
+    print(f"[ocr] {name}: " + ", ".join(bits))
 
 
 class OcrPool:
@@ -574,11 +684,16 @@ class OcrPool:
         max_concurrent: int = MAX_CONCURRENT_OCR,
         known_sites_provider: Optional[Callable[[], List[str]]] = None,
         known_clients_provider: Optional[Callable[[], List[str]]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self._token = token
         self._model = model
         self._api_base = api_base
         self._max = max(1, max_concurrent)
+        # How hard the model may think per read (None = OCR_REASONING_EFFORT).
+        # The popup reports the seconds each read took, so the effect of this
+        # setting is visible without digging through the log.
+        self._reasoning_effort = reasoning_effort
         # Called per file (just before the vision call) to fetch the current
         # site/client catalog, so names added mid-batch are known to later
         # reads.
@@ -591,6 +706,8 @@ class OcrPool:
         # the worker from extract_delivery_note's on_error callback). Used
         # by the popup to say WHY OCR failed and offer a retry.
         self._errors: Dict[str, str] = {}
+        # Per-file wall-clock seconds of the last read (for the popup status).
+        self._durations: Dict[str, float] = {}
         self._active: set = set()          # paths queued or running
         self._waiters: Dict[str, List[Callable]] = {}
         # Worker threads: ONE PER SUBMITTED FILE, up to _max. A file that
@@ -647,6 +764,15 @@ class OcrPool:
         """
         with self._lock:
             return self._errors.get(self._key(file_path))
+
+    def duration(self, file_path) -> Optional[float]:
+        """Seconds the last read of *file_path* took (None when unknown).
+
+        Shown by the popup next to the filled fields ("fields filled in
+        3.2s"), so the effect of the speed settings is visible at a glance.
+        """
+        with self._lock:
+            return self._durations.get(self._key(file_path))
 
     def retry(self, file_path, on_done: Optional[Callable] = None) -> bool:
         """Forget any cached result/error for *file_path* and re-run OCR.
@@ -772,14 +898,18 @@ class OcrPool:
         try:
             print(f"[ocr] reading {file_path.name} …")
             errors: List[str] = []
+            started = time.monotonic()
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
                 api_base=self._api_base, known_sites=known_sites,
                 known_clients=known_clients, on_error=errors.append,
+                reasoning_effort=self._reasoning_effort,
             )
+            elapsed = time.monotonic() - started
         except Exception as exc:  # belt & braces: extract never raises
             print(f"[ocr] OCR error for {file_path}: {exc}")
             result = None
+            elapsed = time.monotonic() - started
         if result and any(result.values()):
             print(f"[ocr] {file_path.name}: company={result.get('company')!r} "
                   f"client={result.get('client')!r} site={result.get('site')!r} "
@@ -789,6 +919,7 @@ class OcrPool:
             print(f"[ocr] {file_path.name}: no fields extracted")
         with self._lock:
             self._results[key] = result
+            self._durations[key] = elapsed
             if errors:
                 self._errors[key] = errors[-1]
             else:

@@ -18,7 +18,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ocr import LEGACY_OCR_MODELS, OCR_API_BASE, OCR_MODEL
+from ocr import (
+    LEGACY_OCR_MODELS,
+    OCR_API_BASE,
+    OCR_MODEL,
+    OCR_REASONING_EFFORT,
+)
 
 # Remote live config — single source of truth for clients/sites.
 # Every popup fetches this so all users see the same data instantly.
@@ -79,10 +84,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # `github_token.txt` next to the exe (or env FILEPICKER_GITHUB_TOKEN).
     "enable_github_push": True,
     # OCR auto-fill of the popup (Company/Client/Site) using the OpenCode Go
-    # "DeepSeek V4 Flash Vision Exp" model. LOCAL-ONLY toggle: it is never
-    # synced from the GitHub config nor pushed back, because OCR needs this
-    # machine's own API key (see _read_opencode_token) and one machine
-    # enabling it must not force it on every install.
+    # catalog. LOCAL-ONLY toggle: it is never synced from the GitHub config nor
+    # pushed back, because OCR needs this machine's own API key (see
+    # _read_opencode_token) and one machine enabling it must not force it on
+    # every install.
     "enable_ocr": True,
     # Open the file preview automatically with every popup. Set to false to
     # start with the metadata form only (Ctrl+P / the Preview button still
@@ -119,6 +124,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # whose config.json pinned the previous name.
     "ocr_model": OCR_MODEL,
     "ocr_api_base": OCR_API_BASE,
+    # How hard the OCR model may think before answering (low/medium/high/max,
+    # or "" to send nothing). "low" is the default because the reasoning — not
+    # the image or the prompt — is what made a single read take 10+ seconds;
+    # the gateway answers 400 for a value it does not know and the app then
+    # falls back to the model's own effort automatically. LOCAL-ONLY, like the
+    # model and the endpoint.
+    "ocr_reasoning_effort": OCR_REASONING_EFFORT,
 }
 
 
@@ -1538,6 +1550,22 @@ class ConfigManager:
     def ocr_api_base(self) -> str:
         """The OpenAI-compatible endpoint base used for OCR."""
         return str(self.load().get("ocr_api_base", OCR_API_BASE))
+
+    @property
+    def ocr_reasoning_effort(self) -> str:
+        """How hard the OCR model may think before answering.
+
+        One of ``low``/``medium``/``high``/``max`` (see
+        :data:`ocr.OCR_REASONING_EFFORT`) — or ``""`` to send no effort field
+        at all and let the model use its own default. This is the main
+        latency knob for a read: the default effort spends thousands of
+        reasoning tokens on a delivery note that only needs a small table
+        copied out. LOCAL-ONLY, like ``ocr_model``: never synced or pushed.
+        """
+        value = self.load().get("ocr_reasoning_effort", OCR_REASONING_EFFORT)
+        if value is None:
+            return OCR_REASONING_EFFORT
+        return str(value).strip()
 
     @property
     def opencode_token(self) -> Optional[str]:
