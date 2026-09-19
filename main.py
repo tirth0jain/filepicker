@@ -281,6 +281,13 @@ class FilePickerController:
         # A file still held back by the first-read sequencing is submitted by
         # the popup itself (_start_ocr), so the file on screen never waits.
         self._submit_ocr_all()
+        # Log both ends of a popup's life: with the popup invisible (or never
+        # built) the queue is blocked, and the log then says which of the two
+        # happened instead of leaving a silent gap next to the OCR lines (see
+        # popup._ensure_popup_visible for the visibility watchdog).
+        waiting = self._popup_queue.qsize()
+        print(f"[filepicker] popup {self._popups_shown} for {path.name} "
+              f"({waiting} more waiting)")
         popup = FilePickerPopup(
             config=self.config,
             file_path=path,
@@ -295,6 +302,7 @@ class FilePickerController:
             popup.show()
         finally:
             self._current_popup = None
+            print(f"[filepicker] popup {self._popups_shown} closed ({path.name})")
 
     def _submit_ocr_all(self) -> None:
         """Queue OCR for the files that have landed, first popup first.

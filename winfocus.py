@@ -11,22 +11,33 @@ popup appeared on top (it is topmost) but every keystroke still went to the
 other program: Ctrl+S did nothing and the Alt material chords only worked
 because the global hook re-posts them to our window.
 
-:func:`claim` re-takes the foreground the way a window manager would:
-attach to the current foreground thread's input queue, then
-``BringWindowToTop`` / ``SetForegroundWindow`` / ``SetFocus`` (detaching
-again afterwards), and it restores the widget-level focus Tk had inside the
-window (so the focused button or search field keeps the caret). It is called
-immediately when the popup is built and retried shortly after the window is
-mapped, because the first attempt can still lose the race against the window
-actually becoming visible.
+:func:`claim` fixes that in two clearly separated halves:
 
-Everything here is best-effort and never raises: off Windows only the Tk
-calls happen, and a failure just leaves the window exactly as it was.
+* on the Tk/main thread — ``lift``, ``-topmost`` and ``focus_force`` (cheap,
+  safe, works everywhere), plus the widget-level focus restore;
+* off the main thread — the Win32 foreground steal (attach to the current
+  foreground thread's input queue, then ``BringWindowToTop`` /
+  ``SetForegroundWindow`` / ``SetFocus``).
+
+The Win32 half **never runs on the UI thread**: ``AttachThreadInput`` +
+``SetForegroundWindow`` activate another process' window, and if that
+process is busy (AutoCAD rendering, a browser modal, ...) the call can block
+until it pumps messages. A popup that hangs the main thread would freeze the
+whole app *and* leave the popup invisible, so that work happens in a daemon
+thread that the UI never waits for.
+
+Nothing here ever changes a window's visibility: Tk (and CustomTkinter's own
+titlebar handling) owns that. :func:`visible` only *reports* whether the
+window is really on screen — the popup uses it as a watchdog.
+
+Everything is best-effort and never raises: off Windows only the Tk calls
+happen, and a failure just leaves the window exactly as it was.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 from typing import Optional
 
 # Delays (ms) at which a failed claim is retried. 0 = next event-loop pass
@@ -34,14 +45,25 @@ from typing import Optional
 # only allows the activation a moment later.
 CLAIM_RETRY_MS = (0, 120, 350)
 
+# Upper bound on foreground-steal threads that may be alive at once. Each one
+# is a daemon that normally finishes in microseconds; the cap only exists so
+# that a permanently hung foreground application (where the steal can never
+# return) cannot spawn an unbounded number of threads.
+_MAX_STEAL_THREADS = 4
+
+_steal_lock = threading.Lock()
+_steal_threads: list = []
+
 
 def claim(window, retries=CLAIM_RETRY_MS) -> bool:
     """Put *window* in front and give it the keyboard.
 
-    Returns True when the window holds the keyboard after this call. When the
-    first attempt does not win, a few retries are scheduled on the Tk event
-    loop (each one is a silent no-op once the window is gone) — the foreground
-    lock can release a moment after the window is mapped.
+    Returns True when the window already holds the keyboard (or the Tk half
+    succeeded); the Win32 half is asynchronous and never blocks the caller.
+    When the window does not have the keyboard yet, a few retries are
+    scheduled on the Tk event loop (each a silent no-op once the window is
+    gone) — the foreground lock can release a moment after the window is
+    mapped.
     """
     ok = _claim_once(window)
     if not ok:
@@ -51,6 +73,33 @@ def claim(window, retries=CLAIM_RETRY_MS) -> bool:
             except Exception:
                 break
     return ok
+
+
+def visible(window) -> bool:
+    """True when *window* is really on screen.
+
+    Tk's ``winfo_viewable`` is not enough on Windows: a window can be mapped
+    as far as Tk knows while Win32 keeps it hidden (CustomTkinter briefly
+    withdraws every new window to colour its title bar, and a mis-ordered
+    revert can leave it that way). On Windows the answer therefore comes from
+    ``IsWindowVisible`` on the real top-level handle.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            hwnd = _hwnd(window)
+            if hwnd:
+                return bool(user32.IsWindowVisible(hwnd))
+        except Exception:
+            pass  # fall through to the Tk answer
+    try:
+        return bool(window.winfo_viewable())
+    except Exception:
+        return False
 
 
 def _alive(window) -> bool:
@@ -90,16 +139,16 @@ def _last_focus(window):
 
 
 def _claim_once(window) -> bool:
-    """One best-effort focus grab. Never raises."""
+    """One best-effort focus grab. Never raises, never blocks."""
     if not _alive(window):
         return False
-    already = _tk_focused(window) and _win_foreground(window)
-    if already:
+    already = _tk_focused(window)
+    if already and (sys.platform != "win32" or _win_foreground(window)):
         return True
 
     last = _last_focus(window)
 
-    # --- Tk-level raise (works everywhere, incl. off Windows) -------------
+    # --- Tk-level raise (main thread; works everywhere, incl. off Windows) --
     for call in (
         lambda: window.lift(),
         lambda: window.attributes("-topmost", True),
@@ -110,8 +159,16 @@ def _claim_once(window) -> bool:
         except Exception:
             pass
 
-    # --- Windows-level foreground ----------------------------------------
-    ok = _force_foreground_win(window)
+    # --- Windows-level foreground, OFF the UI thread -----------------------
+    # Only for a window that is actually on screen: poking a withdrawn window
+    # (CustomTkinter withdraws every new window for ~5ms to colour its title
+    # bar) is what can confuse its re-show bookkeeping.
+    if sys.platform == "win32" and _alive(window):
+        try:
+            if window.winfo_viewable():
+                _steal_foreground_async(window)
+        except Exception:
+            pass
 
     # Restore the widget-level focus (the Skip button, the search field, ...)
     # so forcing the toplevel never moves the caret to the window frame.
@@ -121,7 +178,7 @@ def _claim_once(window) -> bool:
                 last.focus_set()
         except Exception:
             pass
-    return ok
+    return already
 
 
 def _win_foreground(window) -> bool:
@@ -133,13 +190,28 @@ def _win_foreground(window) -> bool:
         from ctypes import wintypes
         user32 = ctypes.windll.user32
         user32.GetForegroundWindow.restype = wintypes.HWND
-        return int(user32.GetForegroundWindow() or 0) == _hwnd(window)
+        hwnd = _hwnd(window)
+        return bool(hwnd) and int(user32.GetForegroundWindow() or 0) == hwnd
     except Exception:
         return False
 
 
 def _hwnd(window) -> int:
-    """The Win32 handle of a Tk toplevel (0 when unavailable)."""
+    """The real Win32 top-level handle of a Tk window (0 when unavailable).
+
+    ``winfo_id()`` returns Tk's own window, which on Windows is a CHILD of the
+    window-manager frame — and ``SetForegroundWindow``/``IsWindowVisible``
+    need the frame. ``wm_frame()`` returns exactly that (as a hex string).
+    """
+    try:
+        frame = window.wm_frame()
+    except Exception:
+        frame = None
+    if frame:
+        try:
+            return int(str(frame), 16)
+        except Exception:
+            pass
     try:
         raw = window.winfo_id()
     except Exception:
@@ -147,24 +219,42 @@ def _hwnd(window) -> int:
     if isinstance(raw, int):
         return raw
     try:
-        return int(str(raw), 0)   # Tk may hand back a hex/decimal string
+        return int(str(raw), 0)
     except Exception:
         return 0
 
 
-def _force_foreground_win(window) -> bool:
-    """Steal the foreground for *window* on Windows. True when it now has it.
+def _steal_foreground_async(window) -> None:
+    """Run the Win32 foreground steal in a daemon thread (UI never waits)."""
+    hwnd = _hwnd(window)
+    if not hwnd:
+        return
+    with _steal_lock:
+        _steal_threads[:] = [t for t in _steal_threads if t.is_alive()]
+        if len(_steal_threads) >= _MAX_STEAL_THREADS:
+            return
+        worker = threading.Thread(
+            target=_force_foreground_win, args=(hwnd,), daemon=True,
+            name="filepicker-focus")
+        _steal_threads.append(worker)
+    try:
+        worker.start()
+    except Exception:
+        pass
+
+
+def _force_foreground_win(hwnd: int) -> bool:
+    """Steal the foreground for *hwnd* on Windows. True when it now has it.
 
     The ``AttachThreadInput`` dance is what makes this work from a background
     process: Windows only lets the foreground thread (or a thread attached to
     its input queue) call ``SetForegroundWindow`` successfully. Off Windows,
-    or when anything here fails, this is a silent no-op.
+    or when anything here fails, this is a silent no-op. Called from a worker
+    thread — it may block while the other application is busy, which is
+    exactly why it must not run on the UI thread.
     """
-    if sys.platform != "win32":
+    if sys.platform != "win32" or not hwnd:
         return True
-    hwnd = _hwnd(window)
-    if not hwnd:
-        return False
     try:
         import ctypes
         from ctypes import wintypes
@@ -184,10 +274,6 @@ def _force_foreground_win(window) -> bool:
         user32.BringWindowToTop.argtypes = [wintypes.HWND]
         user32.SetForegroundWindow.argtypes = [wintypes.HWND]
         user32.SetFocus.argtypes = [wintypes.HWND]
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.SetWindowPos.argtypes = [
-            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-            ctypes.c_int, ctypes.c_int, wintypes.UINT]
 
         foreground = int(user32.GetForegroundWindow() or 0)
         if foreground == hwnd:
@@ -198,16 +284,9 @@ def _force_foreground_win(window) -> bool:
         if tid_fg and tid_fg != tid_me:
             attached = bool(user32.AttachThreadInput(tid_fg, tid_me, True))
         try:
-            user32.ShowWindow(hwnd, 5)          # SW_SHOW (never un-minimises)
             user32.BringWindowToTop(hwnd)
             user32.SetForegroundWindow(hwnd)
             user32.SetFocus(hwnd)
-            # Keep it above every other topmost window (the popup is topmost;
-            # without this another topmost window can stay in front).
-            HWND_TOPMOST, SWP_NOSIZE, SWP_NOMOVE, SWP_SHOWWINDOW = -1, 0x1, 0x2, 0x40
-            user32.SetWindowPos(
-                hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW)
         finally:
             if attached:
                 user32.AttachThreadInput(tid_fg, tid_me, False)

@@ -57,6 +57,9 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   dialogs (duplicate file, site of another client) show a letter on every
   option — press **Ctrl+Y / Ctrl+N / Ctrl+M** to answer instantly, or move the
   selection with the **arrow keys** and press **Enter**.
+  The popup also verifies a moment after opening that it is really on screen
+  and re-shows itself if Windows left it hidden, so a popup can never be
+  silently missing while the queue waits for it.
 
 ---
 

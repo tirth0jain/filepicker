@@ -60,6 +60,12 @@ _FORM_H_COMFORT = 790
 # read together rather than this one file being stuck "processing".
 _OCR_PROGRESS_MS = 500
 
+# When a new popup is checked for actually being on screen (see
+# FilePickerPopup._ensure_popup_visible). Late enough for CustomTkinter's
+# withdraw/re-show titlebar dance to have finished, early enough that a
+# hidden popup is repaired before the user wonders where it went.
+_POPUP_VISIBLE_CHECK_MS = 1200
+
 
 def material_display_order(materials_map, selected) -> List:
     """Chip display order for a popup: selected materials move to the top.
@@ -1149,6 +1155,17 @@ class FilePickerPopup:
         # keyboard again whenever it is mapped, not only at creation.
         try:
             self.window.bind("<Map>", lambda _e: winfocus.claim(self.window), add="+")
+        except Exception:
+            pass
+        # Watchdog: CustomTkinter briefly withdraws every new window to colour
+        # its title bar, and if that dance ever ends with the window still
+        # hidden the popup would sit there invisible while the controller
+        # waits for it — the user would see downloads being OCR'd and no popup
+        # at all, forever. Make sure it is really on screen and repair it if
+        # not (never for an intentionally minimised popup).
+        self._visible_checks_left = 3
+        try:
+            self.window.after(_POPUP_VISIBLE_CHECK_MS, self._ensure_popup_visible)
         except Exception:
             pass
 
@@ -2299,6 +2316,61 @@ class FilePickerPopup:
             self.window.iconify()
         except tk.TclError:
             pass
+
+    def _ensure_popup_visible(self) -> None:
+        """Watchdog: the popup must really be on screen.
+
+        CustomTkinter withdraws every new window for a few milliseconds to
+        colour its title bar and re-shows it from an ``after(5)`` callback. If
+        anything disturbs that dance the window can stay hidden while Tk still
+        believes it is mapped — the popup is then invisible but alive, and
+        because the controller waits for it before showing the next one, NO
+        popup would ever appear again while OCR kept running in the
+        background. This check (a few attempts, a moment apart) re-shows such
+        a window and says so in the log, so the worst case is a popup that
+        appears a second late instead of a queue that silently stops.
+
+        A popup the user minimised on purpose (``iconic``) is left alone.
+        """
+        try:
+            if not self.window.winfo_exists():
+                return
+            state = str(self.window.state())
+        except Exception:
+            return
+        if state == "iconic":
+            return
+        if winfocus.visible(self.window):
+            return
+        print(f"[filepicker] popup window was not visible (state={state!r}) — "
+              f"re-showing it")
+        try:
+            self.window.deiconify()
+            self.window.lift()
+            self.window.attributes("-topmost", True)
+        except Exception as exc:
+            print(f"[filepicker] could not re-show the popup: {exc}")
+        if not winfocus.visible(self.window):
+            # Tk thinks it is mapped while Win32 keeps it hidden: force a real
+            # re-map (safe here — the titlebar dance is long over).
+            try:
+                self.window.withdraw()
+                self.window.update_idletasks()
+                self.window.deiconify()
+                self.window.lift()
+            except Exception as exc:
+                print(f"[filepicker] could not re-map the popup: {exc}")
+        try:
+            winfocus.claim(self.window)
+        except Exception:
+            pass
+        self._visible_checks_left = getattr(self, "_visible_checks_left", 1) - 1
+        if self._visible_checks_left > 0:
+            try:
+                self.window.after(
+                    _POPUP_VISIBLE_CHECK_MS, self._ensure_popup_visible)
+            except Exception:
+                pass
 
     def _prompt_add_material(self) -> None:
         self._ask_text(
