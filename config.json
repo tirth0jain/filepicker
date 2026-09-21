@@ -328,7 +328,8 @@
       "Mirabelle",
       "Acme Ozobe(Bellavista)",
       "Lodha Palava -Fire Station",
-      "Lodha Altamount"
+      "Lodha Altamount",
+      "LODHA - BRADBURY-benellevue"
     ],
     "Arimas Real Estate Private Limited": [
       "Kalpataru Elitus"
@@ -442,14 +443,10 @@
     "consumable goods": "Consumables",
     "stud": "Fastner",
     "Spigot": "fitting",
-    "Washer": "Screw"
+    "Washer": "Screw",
+    "Ply": "Consumables"
   },
   "removed_clients": [
-    "LODHA",
-    "LODHA -LODHA DEVELOPERS LIMITED",
-    "LODHA- world One Co operative Housing Society Limited",
-    "ALUMAYER INDIA PVT LTD",
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
     "Alder Residency Pvt Ltd"
   ]
 }
