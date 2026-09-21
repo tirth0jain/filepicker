@@ -10,3 +10,5 @@ github_token.txt
 *_token.txt
 FilePicker.log
 CONTEXT.md
+.localtests/
+

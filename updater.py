@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -291,7 +292,7 @@ def _cleanup_old_files_deep(
                 if path.is_dir():
                     shutil.rmtree(path, ignore_errors=True)
                 else:
-                    path.unlink(missing_ok=True)
+                    _force_unlink(path)
                 if not path.exists():
                     return True
             except OSError:
@@ -522,6 +523,73 @@ class UpdateError(Exception):
     """Raised when an update cannot be applied; carries a user-friendly reason."""
 
 
+def _force_unlink(path: Path) -> bool:
+    """Delete a file even when it is read-only. Never raises.
+
+    A file copied out of an update zip can carry the read-only attribute, and
+    ``unlink`` on a read-only file fails on Windows — which is one of the ways
+    a ``.old`` leftover survives every cleanup pass.
+    """
+    for attempt in range(2):
+        try:
+            path.unlink(missing_ok=True)
+            if not path.exists():
+                return True
+        except OSError:
+            pass
+        if attempt == 0:
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
+    return not path.exists()
+
+
+def _move_aside(path: Path, attempts: int = 3, delay: float = 0.4) -> Optional[Path]:
+    """Move *path* out of the way as ``<name>.old``; None when impossible.
+
+    Windows refuses a plain rename when the destination already exists
+    (``WinError 183: Cannot create a file when that file already exists``),
+    which used to ABORT an update whenever a ``.old`` from an earlier swap was
+    still lying around — the running exe then kept the old version forever.
+    A leftover must never be able to block an update, so this tries, in order:
+
+    1. ``os.replace`` — atomic, overwrites a stale ``.old`` in one step;
+    2. delete the leftover (read-only files included) and rename;
+    3. a fresh unique name (``FilePicker.exe.old2``, ``.old3``, ...), so even
+       a *locked* leftover cannot get in the way.
+
+    The whole sequence is retried a couple of times because these locks are
+    usually transient (a dying process, a Defender scan, Explorer). Returns
+    the path the file was moved to, or None when nothing worked.
+    """
+    target = path.with_name(path.name + ".old")
+    if not path.exists():
+        return None       # nothing to move (never wait for a missing file)
+    candidates = [target] + [
+        path.with_name(f"{path.name}.old{i}") for i in range(2, 2 + attempts + 2)
+    ]
+    for round_no in range(attempts):
+        # 1. Atomic replace: the canonical name, no leftover check needed.
+        try:
+            os.replace(path, target)
+            return target
+        except OSError:
+            pass
+        # 2./3. Delete the leftover, then rename — or use a free name.
+        for candidate in candidates:
+            if candidate.exists():
+                _force_unlink(candidate)
+            try:
+                path.rename(candidate)
+                return candidate
+            except OSError:
+                continue
+        if round_no + 1 < attempts:
+            time.sleep(delay)
+    return None
+
+
 def _replace_file(src: Path, dst: Path) -> bool:
     """Copy one file; never raises. Returns True on success.
 
@@ -536,11 +604,7 @@ def _replace_file(src: Path, dst: Path) -> bool:
         return True
     except PermissionError:
         pass
-    old = dst.with_name(dst.name + ".old")
-    try:
-        old.unlink(missing_ok=True)
-        dst.rename(old)
-    except OSError:
+    if _move_aside(dst) is None:
         return False
     try:
         shutil.copy2(src, dst)
@@ -584,10 +648,9 @@ def _prune_stale_files(app_dir: Path, new_files: set) -> None:
                 else:
                     existing.unlink(missing_ok=True)
             except (PermissionError, OSError):
-                try:
-                    existing.rename(existing.with_name(existing.name + ".old"))
-                except OSError:
-                    pass
+                # Locked by the running process: park it as `.old` (a stale
+                # `.old` must never make this fail too — see _move_aside).
+                _move_aside(existing)
     except Exception as exc:
         print(f"[updater] stale cleanup warning: {exc}")
 
@@ -699,25 +762,21 @@ def install_update(update: dict, staged_zip: Path) -> bool:
 
     # 2. Swap the running exe FIRST: rename it aside, then copy the new exe
     # in. Its name is free after the rename, so this cannot realistically fail
-    # and the app is always relaunchable.
-    old_exe = app_dir / "FilePicker.exe.old"
-    if old_exe.exists():
-        try:
-            old_exe.unlink(missing_ok=True)
-        except OSError:
-            pass
-    try:
-        exe.rename(old_exe)
-    except OSError as exc:
+    # and the app is always relaunchable. The rename goes through _move_aside,
+    # which survives a stale (or even locked) FilePicker.exe.old from an
+    # earlier swap — that leftover used to make the rename fail with WinError
+    # 183 and abort the update for good.
+    old_exe = _move_aside(exe)
+    if old_exe is None:
         abort_pending()
-        fail(f"Could not rename the running FilePicker.exe "
-             f"(it may be locked): {exc}")
+        fail(f"Could not move the running FilePicker.exe aside "
+             f"(it may be locked): {exe}")
     try:
         shutil.copy2(new_exe, exe)
     except OSError as exc:
         # Nothing else has been touched yet — restore the old exe and abort.
         try:
-            old_exe.rename(exe)
+            os.replace(old_exe, exe)
         except OSError:
             pass
         abort_pending()

@@ -288,6 +288,13 @@ swaps the app folder, and relaunches — the same experience, minus the AV noise
   to `.old`, and the freshly launched process removes all `.old` files at
   first startup (`resume_pending_update`) — leftovers never accumulate, even
   if a swap is interrupted.
+- **A leftover `.old` can never block an update:** the running exe is moved
+  aside with `os.replace` (which overwrites a stale `FilePicker.exe.old`
+  atomically) and, when that leftover is locked by something else (antivirus,
+  a dying process), the swap falls back to a free name
+  (`FilePicker.exe.old2`, …) instead of failing. Older builds reported
+  `WinError 183: Cannot create a file when that file already exists` here and
+  stayed on their old version forever.
 - **After an update, a popup appears** telling you what version it was updated
   from and to (e.g. `v0.1.2-aaa -> v0.1.2-bbb`).
 - The current version is shown in the title bar of every window
