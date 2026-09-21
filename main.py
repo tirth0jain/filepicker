@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 # Ensure the app's own folder is importable no matter the working directory.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -96,6 +96,13 @@ _DANGER = "#ff6b6b"
 # automatically (the app then swaps the exe and relaunches on its own).
 _UPDATE_APPLY_DELAY_MS = 3000
 
+# Wait this long before re-trying an update whose INSTALL failed (30 min, 1 h,
+# 2 h, then 6 h for every further attempt). The periodic check runs every
+# 5 minutes and re-downloads the whole asset each time, so a release that
+# cannot be installed on this machine (a locked FilePicker.exe.old, a blocked
+# relaunch) must back off instead of pulling ~55 MB five times an hour.
+_UPDATE_RETRY_BACKOFF = (1800, 3600, 7200, 21600)
+
 
 def show_update_notice(root, notice: str) -> None:
     """Show a small popup telling the user the app was updated."""
@@ -137,6 +144,11 @@ class FilePickerController:
         self._organize_active = False
         self._pending_update = None  # (update_dict, staged_path) awaiting install
         self._update_dialog_open = False  # true while the "updating" dialog is up
+        # Failed install attempts per release tag -> (attempts, next try at
+        # monotonic). Without this a build that cannot be installed (a locked
+        # FilePicker.exe.old, a blocked relaunch) made the app re-download the
+        # whole ~55 MB asset every 5 minutes, forever.
+        self._update_retries: Dict[str, tuple] = {}
         self._ui_commands: "queue.Queue[str]" = queue.Queue()  # tray -> main thread
         self._tray = None
         self._root = None
@@ -611,19 +623,41 @@ class FilePickerController:
                 # install_update aborted (e.g. the exe is locked); never leave
                 # the user thinking it worked.
                 print(f"[filepicker] update install FAILED ({update['version']}).")
+                self._note_update_failure(update["version"])
                 self._show_update_failed(update)
         except Exception as exc:
             print(f"[filepicker] install error: {exc}")
+            self._note_update_failure(update["version"])
             try:
                 self._show_update_failed(update, str(exc))
             except Exception:
                 pass
 
+    def _note_update_failure(self, version: str) -> None:
+        """Back off after a failed install instead of re-downloading forever."""
+        attempts, _next_at = self._update_retries.get(version, (0, 0.0))
+        attempts += 1
+        delay = _UPDATE_RETRY_BACKOFF[
+            min(attempts - 1, len(_UPDATE_RETRY_BACKOFF) - 1)]
+        self._update_retries[version] = (attempts, time.monotonic() + delay)
+        print(f"[filepicker] update {version} could not be installed "
+              f"({attempts}x); next automatic attempt in {delay / 60:.0f} min "
+              f"(the tray's Check for updates retries immediately)")
+
+    def _update_retry_blocked(self, version: str) -> Optional[float]:
+        """Seconds left before another automatic install attempt (None = now)."""
+        entry = self._update_retries.get(version)
+        if not entry:
+            return None
+        _attempts, next_at = entry
+        remaining = next_at - time.monotonic()
+        return remaining if remaining > 0 else None
+
     def _show_update_failed(self, update: dict, detail: str = "") -> None:
         """Surface a failed update so it is never a silent no-op."""
         win = ctk.CTkToplevel(self._root)
         win.title(f"FilePicker v{VERSION} — Update Failed")
-        win.geometry("460x220")
+        win.geometry("480x300")
         win.configure(fg_color=_BG)
         win.transient(self._root)
         win.attributes("-topmost", True)
@@ -636,15 +670,23 @@ class FilePickerController:
         ctk.CTkLabel(
             win, text="⚠ Update Failed", font=ctk.CTkFont(size=16, weight="bold"),
             text_color=_DANGER,
-        ).pack(pady=(24, 8))
+        ).pack(pady=(20, 8))
         ctk.CTkLabel(
             win, text=msg, font=ctk.CTkFont(size=13), text_color=_TEXT_MUTED,
-            justify="center", wraplength=400,
-        ).pack(pady=(0, 12))
+            justify="center", wraplength=420,
+        ).pack(pady=(0, 10))
+        ctk.CTkLabel(
+            win,
+            text="What to do: quit FilePicker (tray → Quit) and start it again.\n"
+                 "Its startup cleanup removes the leftover .old file, and the\n"
+                 "next check installs the update.",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
+            justify="center", wraplength=420,
+        ).pack(pady=(0, 10))
         ctk.CTkButton(
             win, text="OK", width=120, height=34, command=win.destroy,
             fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color="#ffffff",
-        ).pack(pady=(0, 16))
+        ).pack(pady=(0, 14))
         win.lift()
         win.focus_force()
 
@@ -858,13 +900,18 @@ class FilePickerController:
         threading.Thread(target=work, name="filepicker-tray-push", daemon=True).start()
 
     def _check_update_now(self) -> None:
-        """Manual 'Check for updates' from the tray (runs on the main thread)."""
+        """Manual 'Check for updates' from the tray (runs on the main thread).
+
+        A manual check always tries immediately: it clears any install-failure
+        backoff for the version it finds, so the user is never told to wait.
+        """
         try:
             from updater import check_for_update, download_update
             update = check_for_update(strict=False)
             if not update:
                 self._set_status("Already up to date.")
                 return
+            self._update_retries.pop(update["version"], None)
             staged = download_update(update)
             if staged:
                 self._pending_update = (update, staged)
@@ -899,10 +946,17 @@ class FilePickerController:
                 def work() -> None:
                     try:
                         update = check_for_update()
-                        if update:
-                            staged = download_update(update)
-                            if staged:
-                                self._root.after(0, lambda: self._stage_update(update, staged))
+                        if not update:
+                            return
+                        blocked = self._update_retry_blocked(update["version"])
+                        if blocked is not None:
+                            print(f"[filepicker] update {update['version']} is in "
+                                  f"backoff after a failed install; next attempt "
+                                  f"in {blocked / 60:.0f} min")
+                            return
+                        staged = download_update(update)
+                        if staged:
+                            self._root.after(0, lambda: self._stage_update(update, staged))
                     except Exception as exc:
                         print(f"[filepicker] updater check error: {exc}")
 
