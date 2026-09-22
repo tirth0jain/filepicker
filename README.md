@@ -280,9 +280,13 @@ contain — and registering that phantom path is exactly how auto-start ended up
 doing nothing at login while the log still claimed an entry was present. The
 target is resolved the same way the updater resolves it, nothing is ever
 registered for a file that is not there, and both writes are read back before
-they are reported as installed. If registration fails, the log says so
-explicitly, with the reason (`[filepicker] auto-start FAILED …`) instead of
-failing silently. Control it from the tray (**Auto-start at login: On/Off**) or:
+they are reported as installed. Windows' own **Task Manager → Startup apps**
+switch is honoured too: if that entry is switched off, the log says so
+(`switched OFF in Task Manager -> Startup apps`) and tells you to turn it back
+on there — the app never flips it behind your back. If registration fails, the
+log says so explicitly, with the reason (`[filepicker] auto-start FAILED …`)
+instead of failing silently. Control it from the tray (**Auto-start at login:
+On/Off**) or:
 
 - Disable auto-start: set `"auto_start": false` in `config.json` (or use the tray).
 - Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`

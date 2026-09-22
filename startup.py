@@ -57,6 +57,11 @@ _APP_EXE_NAME = "FilePicker.exe"
 _RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_VALUE_NAME = "FilePicker"
 
+# Windows' own per-entry switch for the Run key (Task Manager -> Startup apps).
+# A switched-off entry keeps its value in the Run key but is never started.
+_APPROVED_KEY_PATH = (r"Software\Microsoft\Windows\CurrentVersion"
+                      r"\Explorer\StartupApproved\Run")
+
 
 def _is_windows() -> bool:
     """True when the Windows startup mechanisms are available.
@@ -214,6 +219,42 @@ def run_key_command() -> Optional[str]:
     except OSError as exc:
         print(f"[startup] could not read the Run key: {exc}")
         return None
+
+
+def run_key_switch() -> Optional[bool]:
+    """Whether Windows will actually start the Run entry at login.
+
+    Task Manager's **Startup apps** tab keeps its own per-entry switch under
+    ``...\\Explorer\\StartupApproved\\Run``: a switched-off entry stays in the
+    Run key with a perfectly correct command and is simply never started, which
+    looks exactly like "auto-start does not work" however right the registration
+    is. The app never flips that switch itself (it is the user's, and Task
+    Manager shows it) but it must be able to SAY so — otherwise the log claims
+    auto-start is fine while nothing happens at login.
+
+    True = Windows will start it, False = switched off, None = no switch
+    recorded (starts normally) or unreadable.
+    """
+    if winreg is None or not _is_windows():
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APPROVED_KEY_PATH, 0,
+                            winreg.KEY_READ) as key:
+            data, _type = winreg.QueryValueEx(key, _RUN_VALUE_NAME)
+    except FileNotFoundError:
+        return None  # no switch recorded — Windows starts the entry
+    except OSError as exc:
+        print(f"[startup] could not read the Startup-apps switch: {exc}")
+        return None
+    try:
+        first = bytes(data)[0]
+    except Exception:
+        return None
+    if first == 3:  # 0x03 = disabled by the user
+        return False
+    if first in (2, 6):  # 0x02 = enabled, 0x06 = enabled after a policy
+        return True
+    return None
 
 
 def install_run_key() -> bool:
@@ -447,11 +488,15 @@ def verify() -> bool:
 
     A mechanism only counts when it points at the CURRENTLY running app (not a
     stale path from a previous install location) and its target still exists.
+    A Run key that the user switched OFF in Task Manager -> Startup apps does
+    not count either: Windows will not start it, however correct the command is
+    (the Startup shortcut is a separate entry and still counts).
     """
     if not _is_windows():
         return False
     target, _args, _workdir = _target()
-    return _run_key_ok(target) or _shortcut_ok(target)
+    run_ok = _run_key_ok(target) and run_key_switch() is not False
+    return run_ok or _shortcut_ok(target)
 
 
 def state() -> str:
@@ -467,6 +512,8 @@ def state() -> str:
     else:
         bits.append(f"shortcut={lnk_target or 'unreadable'}")
     bits.append(f"working={'yes' if verify() else 'NO'}")
+    if command and run_key_switch() is False:
+        bits.append("switched OFF in Task Manager -> Startup apps")
     return ", ".join(bits)
 
 
@@ -518,4 +565,8 @@ def ensure() -> bool:
     ok = verify()
     print(f"[startup] auto-start {'repaired' if ok else 'repair FAILED'} "
           f"({state()})")
+    if not ok and run_key_switch() is False:
+        print("[startup] Windows has FilePicker switched OFF in Task Manager "
+              "-> Startup apps: turn it back on there (it stays off until you "
+              "do, whatever the app registers)")
     return ok
