@@ -51,6 +51,12 @@ _OCR_FIRST_HEAD_START = 20.0
 _STARTUP_ATTEMPTS = 3
 _STARTUP_RETRY_DELAY = 5.0
 
+# How often the UI thread checks the popup queue. 50ms (it was 100ms) so a
+# file the watcher just declared complete opens its popup as soon as the
+# queue entry exists instead of up to a tenth of a second later — part of
+# making the popup feel immediate after a scan lands.
+_POPUP_POLL_MS = 50
+
 # How long to wait for the watch folder (a mapped network drive) to appear
 # before giving up: 180 x 10s = 30 minutes, which comfortably covers a drive
 # that reconnects a while after login (or after a VPN comes up).
@@ -300,7 +306,7 @@ class FilePickerController:
                 finally:
                     self._popup_active = False
         self._maybe_install_update()
-        self._root.after(100, self._poll_popups)
+        self._root.after(_POPUP_POLL_MS, self._poll_popups)
 
     def _show_popup(self, path: Path) -> None:
         self._popups_shown += 1
@@ -766,7 +772,7 @@ class FilePickerController:
         self._watcher = None
         self._start_watcher_when_ready(watch_dir)
 
-        self._root.after(100, self._poll_popups)
+        self._root.after(_POPUP_POLL_MS, self._poll_popups)
         self._schedule_update_checks()
         # NOTE: no background config pull — the config is fetched only when a
         # popup opens (see popup._start_config_poll). A periodic pull would
@@ -807,6 +813,11 @@ class FilePickerController:
                     watcher = DownloadWatcher(
                         watch_directory=watch_dir,
                         on_completed=self._on_file_completed,
+                        # How long a finished file waits before its popup
+                        # opens (config: popup_delay_seconds, default 1.0s).
+                        # The watcher still requires the file to be unlocked,
+                        # so a download in progress never pops up early.
+                        stable_window=self.config.popup_delay_seconds,
                     )
                     watcher.start()
                 except Exception as exc:

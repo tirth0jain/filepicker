@@ -25,11 +25,14 @@ from watchdog.observers import Observer
 _TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".opdownload", ".partial")
 # The default size to assume a file has when only metadata is available.
 _DEFAULT_SIZE = 0
-# Seconds to require a stable size before declaring a file "done". Must be
-# longer than the pauses between write bursts of a slow download (browsers
-# write in bursts; a 0.4s pause mid-transfer is normal, 3s of total silence
-# means the transfer really ended / the connection died).
-_STABLE_WINDOW = 3.0
+# Seconds to require a stable size before declaring a file "done" — i.e. how
+# long the popup waits after the scan/download stops growing. It was 3.0s,
+# which the user felt as "the popup takes ages to appear"; 1.0s is still
+# longer than the pause between write bursts of a real transfer while making
+# the popup appear about two seconds sooner. The LOCK check below is the
+# primary guard for a browser that is still downloading (it holds the file
+# open), and `popup_delay_seconds` in config.json tunes this per machine.
+_STABLE_WINDOW = 1.0
 # Retry back-off for files that are still locked.
 _LOCK_RETRY_DELAY = 0.1
 

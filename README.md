@@ -53,13 +53,29 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
 - **Keyboard-first** — the popup takes the keyboard the moment it opens (no
   click needed), so its shortcuts work immediately: **Ctrl+S** Save & Organize,
   **Ctrl+Delete** Skip, **Ctrl+P** Preview, and **Alt + a material's 2-letter
-  code** (Alt+AL = Aluminium) to toggle a material from any field. Question
+  code** (Alt+AL = Aluminium) to toggle a material from any field. Shortcuts
+  are **Caps Lock-proof**: Tk matches a key by its keysym, and Caps Lock turns
+  Ctrl+S into keysym `S`, so every letter shortcut is bound in both spellings
+  (and the Alt chord is case-folded) — Caps Lock on or off, the same keys
+  work. Question
   dialogs (duplicate file, site of another client) show a letter on every
   option — press **Ctrl+Y / Ctrl+N / Ctrl+M** to answer instantly, or move the
   selection with the **arrow keys** and press **Enter**.
   The popup also verifies a moment after opening that it is really on screen
   and re-shows itself if Windows left it hidden, so a popup can never be
   silently missing while the queue waits for it.
+
+---
+
+**How fast a popup appears:** the watcher waits until the new file has stopped
+growing **and** is no longer locked, then opens the popup — that wait is
+**1 second** by default (`"popup_delay_seconds"` in `config.json`, clamped to
+0-10s; it was 3s before 0.6.42), and the UI checks its popup queue every 50ms,
+so a finished scan is on screen about a second after the scanner stops writing.
+The lock check is what protects a download that is still in progress: a browser
+writing a file holds it open, so it never pops up early. Raise
+`popup_delay_seconds` on a machine whose scanner writes in slow bursts, or set
+it to `0` for the snappiest popups.
 
 ---
 
@@ -160,7 +176,10 @@ The designator is recognised in **every** spelling vendors and OCR use,
 including the one where the dash comes first — `Lodha Wood-T6`,
 `Lodha Wood T6`, `Lodha Wood T-6`, `Lodha Wood-T-6` are all `Lodha Wood`
 (that spelling used to keep its T6), and inside brackets — `L & T (T-10)` and
-`L & T (T-A)` are `L & T` — while a bare trailing letter is still part of the
+`L & T (T-A)` are `L & T`. Designators are also **chained**: a tower plus a
+unit type is one designator, so `Lodha Nibm-T6 Pent House` (and `Penthouse`,
+`Lodha Nibm - T6 - Pent House`) is `Lodha Nibm`, not a site called
+"Lodha Nibm-T6 Pent". While a bare trailing letter is still part of the
 name (`Site A` is never `Site B`), `Parc-V` stays `Parc-V` and a bracket
 holding a real name is left alone (`Acme Ozobe(Bellavista)`, `L & T (Retail)`).
 A bracketed tower is only dropped when the value as printed matches nothing:

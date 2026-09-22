@@ -136,6 +136,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # that refuses a field costs one extra round trip, never a broken read.
     # LOCAL-ONLY, like the model and the endpoint.
     "ocr_thinking": OCR_THINKING,
+    # How long the watcher waits after a new file stops growing before the
+    # popup opens (seconds). The file must also be unlocked, so a download
+    # that is still running never pops up early; this only decides how long a
+    # *finished* file sits in the watch folder before the popup appears. 1.0
+    # is the default; raise it on a machine whose scanner/copier keeps a file
+    # open (or writes in slow bursts), lower it for the snappiest popups.
+    # LOCAL-ONLY, like the OCR keys.
+    "popup_delay_seconds": 1.0,
 }
 
 
@@ -416,6 +424,10 @@ _UNIT_WORDS = {
     "house", "building", "annex", "annexe", "plot", "flat", "shop", "sector",
     "zone", "stage", "pod", "yard", "office", "centre", "center",
     "winga", "wingb", "wingc", "wingd",
+    # A unit TYPE is a designator too: "Lodha Nibm-T6 Pent House" is "Lodha
+    # Nibm" (the user's report). Both spellings, because the value may be
+    # written "Pent House" or "Penthouse".
+    "pent", "penthouse",
 }
 
 
@@ -517,6 +529,18 @@ def _is_bare_unit_word(match_text: str) -> bool:
     return match_text.strip().lower() in _UNIT_WORDS
 
 
+def _word_count(text: str) -> int:
+    """How many words a name fragment holds.
+
+    Punctuation separates words for this purpose: "Antriksh-T6" is the place
+    "Antriksh" plus a tower, i.e. TWO words — counting whitespace alone made
+    it look like one, and the bare-unit-word guard below then refused to strip
+    the "Pent" of "Antriksh-T6 Pent House" (the chained designator stopped
+    after one step and the site kept "T6 Pent").
+    """
+    return len(re.findall(r"[0-9a-z]+", str(text).lower()))
+
+
 # A trailing BRACKETED designator: "L & T (T-10)" is "L & T" — a tower/block/
 # wing inside brackets is the same designator as the bare spelling (the user:
 # "'L & T (T-10)' should also be changed to L & T"). Only a bracket whose
@@ -525,40 +549,26 @@ def _is_bare_unit_word(match_text: str) -> bool:
 _BRACKETED_TAIL_RE = re.compile(r"\(\s*([^()]*?)\s*\)\s*$")
 
 
-def _strip_trailing_dash_designator(name, brackets: bool = True) -> str:
-    """Drop ONE trailing designator ("Raymond Premium T-B",
-    "Raymond Premium T-9/10", "Raymond Premium Phase-2A" -> "Raymond
-    Premium"; "Kalpataru Elitus Tower", "Kalpataru Elitus Tower B",
-    "Kalpataru Elitus Tower 9/10", "Kalpataru Elitus Wing C" -> "Kalpataru
-    Elitus"; "L & T (T-10)" -> "L & T"). Returns the input when nothing is
-    stripped; never returns an empty string. A BARE trailing unit word is only
-    treated as a designator when a multi-word place name precedes it ("Lodha
-    Woods Club House" keeps "House" — it may BE the name; "Lodha Amara Tower"
-    strips it) and a standalone designator ("Tower B") stays as-is here
-    (callers use :func:`is_designator_only` to detect those).
+# How many designator pieces may be peeled off one name. "Lodha Nibm-T6 Pent
+# House" needs three ("House", "Pent", "T6"); the cap keeps a pathological
+# value from being chipped away to nothing.
+_DESIGNATOR_PEEL_LIMIT = 4
 
-    *brackets* controls whether a designator written inside brackets counts
-    ("L & T (T-10)"). It is on for the name a site is SHOWN and STORED as, and
-    off for MATCHING (:func:`_match_forms`): the catalog legitimately holds
-    "Raheja Solaris (Tower-A)" and "Raheja Solaris (Tower-B)" as two different
-    sites, and a matcher that ignored the bracket would consider a Tower-B
-    document the same place as Tower-A and file it in the wrong folder.
+
+def _peel_one_designator(raw: str, brackets: bool = True) -> str:
+    """Drop ONE trailing designator (a bracketed one included).
+
+    Returns *raw* unchanged when there is nothing to drop, so callers can loop
+    until the value settles.
     """
-    raw = str(name).strip()
-    if not raw:
-        return raw
-    # A bracket holding nothing but a designator is peeled off first (twice at
-    # most, so "X (T-10) Tower 2" collapses to "X"): the designator may be
-    # written inside brackets, and the bracket would otherwise hide it from
-    # the rules below (they all anchor at the very end of the string).
-    for _ in range(2 if brackets else 0):
+    if brackets:
         m = _BRACKETED_TAIL_RE.search(raw)
-        if not m or not is_designator_only(m.group(1)):
-            break
-        peeled = raw[:m.start()].rstrip(" \t(")
-        if not peeled:
-            break  # the bracket was the whole name — nothing to keep
-        raw = peeled
+        if m and is_designator_only(m.group(1)):
+            peeled = raw[:m.start()].rstrip(" \t(")
+            if peeled:
+                return peeled
+            # A bracket that was the whole name leaves nothing to keep; fall
+            # through to the other rules, which will find nothing either.
     # Prefer the match that starts EARLIEST, i.e. the longest designator: in
     # "Kalpataru Elitus Tower 9/10" the unit-word rule sees "Tower 9/10" while
     # the dashed rule would only see the "9/10" tail, and stripping the tail
@@ -572,11 +582,46 @@ def _strip_trailing_dash_designator(name, brackets: bool = True) -> str:
         out = raw[:m.start()].rstrip(" \t(")
         if not out:
             continue  # nothing but a designator — no place name to keep
-        if _is_bare_unit_word(m.group(0)) and len(out.split()) < 2:
+        if _is_bare_unit_word(m.group(0)) and _word_count(out) < 2:
             # "Lodha Tower" / "Lodha Woods Club House": the bare unit word may
             # BE part of the name; only strip when a real name precedes it.
             continue
         return out
+    return raw
+
+
+def _strip_trailing_dash_designator(name, brackets: bool = True) -> str:
+    """Drop every trailing designator ("Raymond Premium T-B",
+    "Raymond Premium T-9/10", "Raymond Premium Phase-2A" -> "Raymond
+    Premium"; "Kalpataru Elitus Tower", "Kalpataru Elitus Tower B",
+    "Kalpataru Elitus Tower 9/10", "Kalpataru Elitus Wing C" -> "Kalpataru
+    Elitus"; "L & T (T-10)" -> "L & T"; "Lodha Nibm-T6 Pent House" -> "Lodha
+    Nibm"). Returns the input when nothing is stripped; never returns an empty
+    string. A BARE trailing unit word is only treated as a designator when a
+    multi-word place name precedes it ("Lodha Woods Club House" keeps "House"
+    — it may BE the name; "Lodha Amara Tower" strips it) and a standalone
+    designator ("Tower B") stays as-is here (callers use
+    :func:`is_designator_only` to detect those).
+
+    The designator is often CHAINED — a tower plus a unit type ("Nibm-T6 Pent
+    House"), a phase plus a wing — so pieces are peeled one after another
+    (at most :data:`_DESIGNATOR_PEEL_LIMIT`), each step using the same rules.
+
+    *brackets* controls whether a designator written inside brackets counts
+    ("L & T (T-10)"). It is on for the name a site is SHOWN and STORED as, and
+    off for MATCHING (:func:`_match_forms`): the catalog legitimately holds
+    "Raheja Solaris (Tower-A)" and "Raheja Solaris (Tower-B)" as two different
+    sites, and a matcher that ignored the bracket would consider a Tower-B
+    document the same place as Tower-A and file it in the wrong folder.
+    """
+    raw = str(name).strip()
+    if not raw:
+        return raw
+    for _ in range(_DESIGNATOR_PEEL_LIMIT):
+        peeled = _peel_one_designator(raw, brackets)
+        if peeled == raw:
+            break
+        raw = peeled
     return raw
 
 
@@ -596,6 +641,12 @@ def is_designator_only(name) -> bool:
         return True
     if _DESIGNATOR_TOKEN_RE.match(normalize_site_name(raw).replace(" ", "")):
         # "T6" / "T 6" / "T-6" — tower 6 and nothing else.
+        return True
+    words = normalize_site_name(raw).split()
+    if words and all(w in _UNIT_WORDS or _DESIGNATOR_TOKEN_RE.match(w)
+                     for w in words):
+        # "Pent House", "T6 Pent House", "Tower 2" — every word is a unit
+        # word or a unit designator, so there is no place name in it.
         return True
     for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
@@ -1772,6 +1823,27 @@ class ConfigManager:
         if legacy in ("high", "max", "medium", "xhigh"):
             return "high" if legacy in ("medium", "xhigh") else legacy
         return OCR_THINKING
+
+    @property
+    def popup_delay_seconds(self) -> float:
+        """Seconds to wait after a new file stops growing before popping up.
+
+        ``popup_delay_seconds`` in config.json (default 1.0, clamped to
+        0.0-10.0). The watcher always waits for the file to be unlocked as
+        well, so this is only the "is it still being written?" window: a
+        browser download reports success early anyway (it writes a temp name
+        and holds the file open), while a scanner that writes straight into
+        the watch folder is the reason this exists at all. LOCAL-ONLY: not a
+        catalog key, so it is neither pulled from nor pushed to GitHub.
+        """
+        try:
+            value = float(self.load().get("popup_delay_seconds",
+                                          DEFAULT_CONFIG["popup_delay_seconds"]))
+        except (TypeError, ValueError):
+            return float(DEFAULT_CONFIG["popup_delay_seconds"])
+        if value != value:  # NaN
+            return float(DEFAULT_CONFIG["popup_delay_seconds"])
+        return max(0.0, min(10.0, value))
 
     @property
     def ocr_reasoning_effort(self) -> str:

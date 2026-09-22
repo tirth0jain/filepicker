@@ -58,8 +58,10 @@ _FORM_H_COMFORT = 790
 # How often the "OCR: reading document…" line refreshes its live counters
 # ("12 files read together") while this file's read is still in flight. Every
 # download is read simultaneously, so the counters show the batch is being
-# read together rather than this one file being stuck "processing".
-_OCR_PROGRESS_MS = 500
+# read together rather than this one file being stuck "processing". 250ms (it
+# was 500ms) so the status, the fill-in and the ↻ Retry button appear as soon
+# as the read lands instead of up to half a second later.
+_OCR_PROGRESS_MS = 250
 
 # When a new popup is checked for actually being on screen (see
 # FilePickerPopup._ensure_popup_visible). Late enough for CustomTkinter's
@@ -103,6 +105,33 @@ def alt_seq_step(pending: str, keysym: str) -> tuple:
 # _wire_dialog_choices). Every question dialog shows its options' letters in
 # the button label, so the keyboard route is discoverable without a manual.
 _DIALOG_SELECT_BORDER = 3
+
+
+def _both_cases(sequence: str) -> tuple:
+    """A letter binding sequence in both spellings ("<Control-s>", "<Control-S>").
+
+    Tk matches a binding sequence by KEYSYM, and Caps Lock changes the keysym
+    of a letter: with Caps Lock on, Ctrl+S arrives as keysym "S" and the plain
+    "<Control-s>" binding silently never fires (the user: "Ignore caps lock on
+    ctrl+ and alt+ shortcuts"). The two keysyms are distinct events, so
+    binding both can never run a handler twice.
+    """
+    text = str(sequence)
+    suffix = ">" if text.endswith(">") else ""   # Tk writes "<Control-s>"
+    core = text[:-1] if suffix else text
+    head, _, tail = core.rpartition("-")
+    if head and len(tail) == 1 and tail.isalpha():
+        return (text, f"{head}-{tail.upper()}{suffix}")
+    return (text,)
+
+
+def _bind_letter_shortcut(widget, sequence: str, handler) -> None:
+    """Bind a letter shortcut so Caps Lock cannot break it (best effort)."""
+    for seq in _both_cases(sequence):
+        try:
+            widget.bind(seq, handler)
+        except Exception:
+            pass
 
 
 def _wire_dialog_choices(dialog, buttons, letters, default_index: int = 0) -> dict:
@@ -166,11 +195,9 @@ def _wire_dialog_choices(dialog, buttons, letters, default_index: int = 0) -> di
     for index, letter in enumerate(letters):
         if not letter or index >= count:
             continue
-        for seq in (f"<Control-{letter.lower()}>", f"<Control-{letter.upper()}>"):
-            try:
-                dialog.bind(seq, lambda _e, i=index: buttons[i].invoke())
-            except Exception:
-                continue
+        _bind_letter_shortcut(
+            dialog, f"<Control-{letter.lower()}>",
+            lambda _e, i=index: buttons[i].invoke())
 
     # The same keys while a button itself holds the focus (Tk buttons consume
     # some of them before the toplevel binding sees them).
@@ -283,7 +310,7 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     # Ctrl shortcuts keep working while this dialog is open (they were dead
     # from an older build because the dialog owned all keyboard input):
     # Ctrl+S = "save", i.e. Replace Old with New; Ctrl+Delete = Skip.
-    dialog.bind("<Control-s>", lambda _e: choose("replace"))
+    _bind_letter_shortcut(dialog, "<Control-s>", lambda _e: choose("replace"))
     dialog.bind("<Control-Delete>", lambda _e: choose("skip"))
     dialog.bind("<Escape>", lambda _e: choose("skip"))
     # Arrow selection + the letters shown on the buttons (Y = replace, N =
@@ -1411,9 +1438,10 @@ class FilePickerPopup:
 
         # Ctrl shortcuts (work from any field): Ctrl+S = Save & Organize,
         # Ctrl+Delete = Skip / Keep Original, Ctrl+P = open/close Preview.
-        self.window.bind("<Control-s>", lambda _e: self._submit())
+        _bind_letter_shortcut(self.window, "<Control-s>", lambda _e: self._submit())
         self.window.bind("<Control-Delete>", lambda _e: self._skip())
-        self.window.bind("<Control-p>", lambda _e: self._toggle_preview())
+        _bind_letter_shortcut(self.window, "<Control-p>",
+                              lambda _e: self._toggle_preview())
 
     # ------------------------------------------------------------------
     # UI construction
@@ -2264,7 +2292,10 @@ class FilePickerPopup:
         has focus — not just the materials area. Alt+RC toggles the
         Received-copy checkbox instead.
         """
-        keysym = getattr(event, "keysym", "") or ""
+        # Case-folded: Caps Lock (and Shift) turn Alt+al into keysym "A", and
+        # the chord must not care — alt_seq_step lower-cases as well, this
+        # makes the guarantee visible at the call site.
+        keysym = (getattr(event, "keysym", "") or "").lower()
         self._alt_seq, matched = alt_seq_step(self._alt_seq, keysym)
         if matched:
             name = self._material_by_code.get(matched)
