@@ -31,6 +31,12 @@
   "company_initials": {
     "Ruby Steel": "RS"
   },
+  "enable_live_config": true,
+  "enable_github_push": true,
+  "auto_start": true,
+  "enable_ocr": true,
+  "ocr_model": "deepseek-v4.1-flash",
+  "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
@@ -413,14 +419,6 @@
     "LODHA -LODHA DEVELOPERS LIMITED": [],
     "LODHA- world One Co operative Housing Society Limited": []
   },
-  "auto_start": true,
-  "enable_live_config": true,
-  "enable_github_push": true,
-  "enable_ocr": true,
-  "preview_open_by_default": true,
-  "block_alt_for_other_apps": true,
-  "ocr_model": "deepseek-v4.1-flash",
-  "ocr_api_base": "https://opencode.ai/zen/go/v1",
   "client_aliases": {
     "Alder Residency Pvt Ltd": "KALPATARU",
     "Arimas Real Estate Private Limited": "KALPATARU",
