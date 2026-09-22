@@ -117,10 +117,11 @@ OCR_THINKING_ESCALATION_EFFORT = "low"
 # see config.ConfigManager.ocr_thinking.
 OCR_REASONING_EFFORT = "low"
 
-# Statuses that mean "this gateway does not know that field": the plan that
-# carried it is dropped and the next one is tried. A gateway that rejects
-# every knob must never be able to break OCR — the ladder always ends with
-# "send nothing".
+# Statuses that specifically mean "this gateway does not know that field".
+# They only change the WORDING of the log: any failure of a rung that carries
+# a thinking field drops that rung and tries the next one, because the ladder
+# always ends with the plain request the app sent before thinking control
+# existed — so no gateway behaviour around these fields can break OCR.
 OCR_EFFORT_REJECT_STATUS = {400, 404, 422}
 
 # Total wall-clock budget for ONE read (seconds), covering every attempt and
@@ -902,11 +903,20 @@ def _request_with_thinking(
                 detail = e.read().decode("utf-8", errors="ignore")[:300]
             except Exception:
                 pass
-            # The gateway does not know this field: rule the rung out for the
-            # whole run and try the next one straight away (no backoff — a
-            # rejected field answers instantly).
-            if plan and e.code in OCR_EFFORT_REJECT_STATUS and index + 1 < len(plans):
-                _reject_plan(plan, f"the gateway answered {e.code}"
+            # ANY failure of a rung that carries a thinking field is treated as
+            # "that field may be the problem": it is ruled out for the whole
+            # run and the next rung is tried straight away, with no backoff.
+            # This is what makes the promise unconditional — the ladder ends
+            # with exactly the plain request the app sent before thinking
+            # control existed, so no gateway behaviour around these fields can
+            # ever break OCR. Retries are spent only on the LAST rung, where
+            # there is no alternative shape left to try, so a genuinely-down
+            # gateway is not hammered four times over.
+            if plan and index + 1 < len(plans):
+                why = ("the gateway does not know the field"
+                       if e.code in OCR_EFFORT_REJECT_STATUS
+                       else "the gateway errored on it")
+                _reject_plan(plan, f"{why} ({e.code})"
                                    + (f": {detail[:120]}" if detail else ""))
                 index += 1
                 continue
@@ -938,6 +948,14 @@ def _request_with_thinking(
             attempts.append((time.monotonic() - attempt_started,
                              type(exc).__name__))
             msg = f"OpenCode Go API call failed: {exc}"
+            # Same rule as an HTTP failure on a field-carrying rung: drop it
+            # and try the next one (the last rung is the plain request), so a
+            # transient connection error cannot cost the read its only chance.
+            if plan and index + 1 < len(plans):
+                _reject_plan(plan, f"the call failed ({type(exc).__name__}: "
+                                   f"{str(exc)[:100]})")
+                index += 1
+                continue
             print(f"[ocr] {msg}")
             report(msg)
             return None, plan, attempts
