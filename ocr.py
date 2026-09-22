@@ -752,7 +752,13 @@ def extract_delivery_note(
     # real reasoning (faint scan, unusual layout) is re-read once WITH graded
     # thinking rather than silently returning nothing. Speed is never bought
     # with accuracy — only the first, fast read is cheap.
-    if data is not None and not any(result.values()) and content.strip():
+    #
+    # Only a read that was asked NOT to think is escalated: re-reading with
+    # "low" after a read that already used graded thinking (the user set
+    # ocr_thinking to low/high/max) would be the same request or a weaker one,
+    # so it could only waste a call.
+    if (data is not None and not any(result.values()) and content.strip()
+            and _asks_for_no_thinking(plan)):
         escalation = [{"reasoning_effort": OCR_THINKING_ESCALATION_EFFORT}, {}]
         index = _pick_plan(escalation)
         print(f"[ocr] {Path(file_path).name}: no fields from the thinking-free "
