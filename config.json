@@ -359,9 +359,6 @@
       "Inorbit Mall"
     ],
     "ALUMAYER INDIA PVT LTD": [],
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": [
-      "Lodha Sital Baug"
-    ],
     "LODHA -LODHA DEVELOPERS LIMITED": [],
     "LODHA- world One Co operative Housing Society Limited": []
   },
@@ -392,6 +389,7 @@
   },
   "removed_clients": [
     "Alder Residency Pvt Ltd",
-    "LODHA"
+    "LODHA",
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD"
   ]
 }
