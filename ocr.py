@@ -1050,7 +1050,29 @@ class OcrPool:
         return bool(self._token)
 
     def _key(self, file_path) -> str:
-        return str(Path(file_path).resolve())
+        """Cache key for *file_path*: the resolved path PLUS the file's identity.
+
+        A path alone is NOT an identity. The scanner drop folder — and any
+        download that re-uses a name — writes the same path again (the user's
+        log has ``dc.pdf``, and the app moves the file away on save, so the
+        next scan creates that exact path anew), and keying the cache by path
+        alone meant the new document was served the PREVIOUS file's read: the
+        popup filled itself with the last file's company/client/site/materials
+        with no API call at all ("it reused fields of last file for a separate
+        file... cached ocr"). Size + mtime make the cache follow the document
+        instead of the name, so a new file at an old path is read again while
+        the same untouched file is still served from cache.
+
+        A file that cannot be stat'ed (already moved away, or deleted while
+        its popup was open) falls back to the plain path, so a lookup still
+        works for a read that already finished.
+        """
+        path = Path(file_path)
+        try:
+            stat = path.stat()
+            return f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+        except OSError:
+            return str(path.resolve())
 
     def get(self, file_path) -> Optional[Dict[str, Optional[str]]]:
         """The cached OCR result for *file_path* (None if not finished yet)."""

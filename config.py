@@ -339,57 +339,68 @@ def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
     return True
 
 
-def _token_cost(a: str, b: str) -> Optional[int]:
+def _token_cost(a: str, b: str) -> Optional[Tuple[int, int]]:
     """How far apart two (already normalised) words are — None when they are
     not the same word at all.
 
-    0 = the same word (numbers never tell places apart), 1 = one letter off.
+    ``(tier, letter_edits)``:
+    * ``(0, 0)`` — the identical word;
+    * ``(1, 0)`` — the same word but for its numbers ("t1" vs "t2", "site1"
+      vs "site"): vendors and OCR write the numeral inconsistently, so it
+      still counts as the same word, just not as close as an identical one —
+      that is what keeps a catalog holding both "Client 1" and "Client 2"
+      from answering "Client 2" with "Client 1";
+    * ``(2, 1)`` — one letter off ("shital" vs "sital").
     Mirrors :func:`_site_tokens_near` exactly, but returns the distance so the
     CLOSEST catalog name can win instead of the first one listed.
     """
     if a == b:
-        return 0
+        return (0, 0)
     if a.isdigit() and b.isdigit():
-        return 0
+        return (1, 0)
     a_letters = re.sub(r"\d", "", a)
     b_letters = re.sub(r"\d", "", b)
     if a_letters and b_letters:
         if a_letters == b_letters:
-            return 0
+            return (1, 0)
         if len(a_letters) >= 2 and len(b_letters) >= 2 \
                 and _levenshtein(a_letters, b_letters) <= 1:
-            return 1
+            return (2, 1)
     if not a or not b or len(a) < 2 or len(b) < 2:
         return None
-    return 1 if _levenshtein(a, b) <= 1 else None
+    return (2, 1) if _levenshtein(a, b) <= 1 else None
 
 
-def _token_match_cost(seq: List[str], sub: List[str]) -> Optional[Tuple[int, int]]:
-    """``(extra words, letter edits)`` for the closest way to read *sub* as
-    *seq*, or None when they are not near-same.
+def _token_match_cost(seq: List[str], sub: List[str]) -> Optional[Tuple[int, int, int]]:
+    """``(extra words, worst tier, letter edits)`` for the closest way to read
+    *sub* as *seq*, or None when they are not near-same.
 
     Same rule as :func:`_token_subsequence_matches` (at most ONE extra word,
     every other token within one letter, in order), but it reports how loose
-    the match is: "lodha wood" is (1, 0) against "lodha wood kandivali" and
-    (1, 1) against "lodha woods club", so the first one is the same place and
-    the second one only looks like it.
+    the match is: "lodha wood" is (1, 1, 0) against "lodha wood kandivali" and
+    (1, 2, 1) against "lodha woods club", so the first one is the same place
+    and the second one only looks like it. The tier comes from
+    :func:`_token_cost`, so a name that matches literally always beats one
+    that only matches because numbers are ignored.
     """
     if len(sub) > len(seq):
         seq, sub = sub, seq
     extra = len(seq) - len(sub)
     if extra > 1:
         return None
-    best: Optional[Tuple[int, int]] = None
+    best: Optional[Tuple[int, int, int]] = None
     for skipped in (range(len(seq)) if extra else [-1]):
-        costs: List[int] = []
+        tiers: List[int] = []
+        edits = 0
         for i, token in enumerate(sub):
             j = i if skipped < 0 or i < skipped else i + 1
             cost = _token_cost(seq[j], token)
             if cost is None:
                 break
-            costs.append(cost)
+            tiers.append(cost[0])
+            edits += cost[1]
         else:
-            candidate = (extra, sum(costs))
+            candidate = (extra, max(tiers), edits)
             if best is None or candidate < best:
                 best = candidate
     return best
@@ -506,20 +517,48 @@ def _is_bare_unit_word(match_text: str) -> bool:
     return match_text.strip().lower() in _UNIT_WORDS
 
 
-def _strip_trailing_dash_designator(name) -> str:
+# A trailing BRACKETED designator: "L & T (T-10)" is "L & T" — a tower/block/
+# wing inside brackets is the same designator as the bare spelling (the user:
+# "'L & T (T-10)' should also be changed to L & T"). Only a bracket whose
+# content is NOTHING BUT a designator is dropped, so real qualifiers survive:
+# "Acme Ozobe(Bellavista)", "L & T (Retail)" and "L & T Powai" are untouched.
+_BRACKETED_TAIL_RE = re.compile(r"\(\s*([^()]*?)\s*\)\s*$")
+
+
+def _strip_trailing_dash_designator(name, brackets: bool = True) -> str:
     """Drop ONE trailing designator ("Raymond Premium T-B",
     "Raymond Premium T-9/10", "Raymond Premium Phase-2A" -> "Raymond
     Premium"; "Kalpataru Elitus Tower", "Kalpataru Elitus Tower B",
     "Kalpataru Elitus Tower 9/10", "Kalpataru Elitus Wing C" -> "Kalpataru
-    Elitus"). Returns the input when nothing is stripped; never returns an
-    empty string. A BARE trailing unit word is only treated as a designator
-    when a multi-word place name precedes it ("Lodha Woods Club House" keeps
-    "House" — it may BE the name; "Lodha Amara Tower" strips it) and a
-    standalone designator ("Tower B") stays as-is here (callers use
-    :func:`is_designator_only` to detect those)."""
+    Elitus"; "L & T (T-10)" -> "L & T"). Returns the input when nothing is
+    stripped; never returns an empty string. A BARE trailing unit word is only
+    treated as a designator when a multi-word place name precedes it ("Lodha
+    Woods Club House" keeps "House" — it may BE the name; "Lodha Amara Tower"
+    strips it) and a standalone designator ("Tower B") stays as-is here
+    (callers use :func:`is_designator_only` to detect those).
+
+    *brackets* controls whether a designator written inside brackets counts
+    ("L & T (T-10)"). It is on for the name a site is SHOWN and STORED as, and
+    off for MATCHING (:func:`_match_forms`): the catalog legitimately holds
+    "Raheja Solaris (Tower-A)" and "Raheja Solaris (Tower-B)" as two different
+    sites, and a matcher that ignored the bracket would consider a Tower-B
+    document the same place as Tower-A and file it in the wrong folder.
+    """
     raw = str(name).strip()
     if not raw:
         return raw
+    # A bracket holding nothing but a designator is peeled off first (twice at
+    # most, so "X (T-10) Tower 2" collapses to "X"): the designator may be
+    # written inside brackets, and the bracket would otherwise hide it from
+    # the rules below (they all anchor at the very end of the string).
+    for _ in range(2 if brackets else 0):
+        m = _BRACKETED_TAIL_RE.search(raw)
+        if not m or not is_designator_only(m.group(1)):
+            break
+        peeled = raw[:m.start()].rstrip(" \t(")
+        if not peeled:
+            break  # the bracket was the whole name — nothing to keep
+        raw = peeled
     # Prefer the match that starts EARLIEST, i.e. the longest designator: in
     # "Kalpataru Elitus Tower 9/10" the unit-word rule sees "Tower 9/10" while
     # the dashed rule would only see the "9/10" tail, and stripping the tail
@@ -574,7 +613,12 @@ def _match_forms(name: str) -> tuple:
     the designator-stripped form — dashed ("Raymond Premium T-B",
     "Lodha Wood-T6" -> "raymond premium"/"lodha wood") or spelled out with a
     unit word ("Kalpataru Elitus Tower B" / "Kalpataru Elitus Wing C" ->
-    "kalpataru elitus"). Returns a tuple of the distinct forms, never empty.
+    "kalpataru elitus"). A designator inside BRACKETS is deliberately NOT
+    stripped here: "Raheja Solaris (Tower-A)" and "Raheja Solaris (Tower-B)"
+    are two different sites, and matching them as one would file a Tower-B
+    note under Tower-A (the popup tries the printed value first and only then
+    the bracket-stripped one — see ``_resolve_site_readonly``). Returns a
+    tuple of the distinct forms, never empty.
     """
     raw = str(name).strip()
     norm = normalize_site_name(raw)
@@ -582,7 +626,8 @@ def _match_forms(name: str) -> tuple:
     stripped = " ".join(_strip_trailing_designator(norm.split()))
     if stripped != norm:
         forms.append(stripped)
-    dashless = normalize_site_name(_strip_trailing_dash_designator(raw))
+    dashless = normalize_site_name(
+        _strip_trailing_dash_designator(raw, brackets=False))
     if dashless and dashless != norm and dashless not in forms:
         forms.append(dashless)
     return tuple(forms)
@@ -614,19 +659,22 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     the name).
 
     When SEVERAL catalog names are near-same, the CLOSEST one wins — fewest
-    extra words first, then fewest one-letter differences — and catalog order
-    only breaks an exact tie. "Lodha Wood" is near both "Lodha Woods Club
-    House" and "LODHA - WOOD-kandivali"; only the second one is the same
-    words with no spelling change, so that is the site the document means
+    extra words first, then an identical spelling over one that only matches
+    because numbers are ignored, then fewest one-letter differences — and
+    catalog order only breaks an exact tie. "Lodha Wood" is near both "Lodha
+    Woods Club House" and "LODHA - WOOD-kandivali"; only the second one is the
+    same words with no spelling change, so that is the site the document means
     (picking the first one listed is how a wrong site ends up in the folder
-    path). Returns the canonical existing spelling.
+    path). The same rule keeps a catalog that holds both "Client 1" and
+    "Client 2" from answering "Client 2" with "Client 1". Returns the
+    canonical existing spelling.
     """
     cand_forms = _match_forms(candidate)
     if not cand_forms or not cand_forms[0]:
         return None
 
     best_name: Optional[str] = None
-    best_cost: Optional[Tuple[int, int]] = None
+    best_cost: Optional[Tuple[int, int, int, int]] = None
     for name in existing_names:
         name_forms = _match_forms(name)
         if not name_forms or not name_forms[0]:
@@ -635,27 +683,34 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
         # forms) — same words with only spacing/punctuation differences,
         # or near-identical word lists. The MATCHING rule is unchanged
         # (_token_subsequence_matches); the cost only ranks the matches.
-        cost: Optional[Tuple[int, int]] = None
-        for a in cand_forms:
-            for b in name_forms:
+        # The last element says how many of the two forms had to be
+        # designator-stripped, so an identical name always beats one that
+        # only matches once a trailing number/designator is dropped
+        # ("Client 2" must not answer with "Client 1").
+        cost: Optional[Tuple[int, int, int, int]] = None
+        for a_index, a in enumerate(cand_forms):
+            for b_index, b in enumerate(name_forms):
+                rank = (0 if a_index == 0 else 1) + (0 if b_index == 0 else 1)
                 if a == b or a.replace(" ", "") == b.replace(" ", ""):
-                    this: Optional[Tuple[int, int]] = (0, 0)
+                    this: Tuple[int, int, int, int] = (0, 0, 0, rank)
                 elif _token_subsequence_matches(a.split(), b.split()):
-                    this = _token_match_cost(a.split(), b.split()) or (9, 9)
+                    extra, tier, edits = _token_match_cost(
+                        a.split(), b.split()) or (9, 9, 9)
+                    this = (extra, tier, edits, rank)
                 else:
                     continue
                 if cost is None or this < cost:
                     cost = this
-                if cost == (0, 0):
+                if cost == (0, 0, 0, 0):
                     break
-            if cost == (0, 0):
+            if cost == (0, 0, 0, 0):
                 break
         if cost is None:
             continue
         if best_cost is None or cost < best_cost:
             best_name, best_cost = str(name), cost
-            if best_cost == (0, 0):
-                break  # an exact match can never be beaten
+            if best_cost == (0, 0, 0, 0):
+                break  # an identical name can never be beaten
     return best_name
 
 

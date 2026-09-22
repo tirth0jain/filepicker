@@ -3240,13 +3240,18 @@ class FilePickerPopup:
     def _resolve_site_readonly(self, client: str, site: str) -> str:
         """Canonicalize *site* WITHOUT touching the config.
 
-        A trailing dashed unit designator is dropped first ("Wrong Site
-        T-9/10" -> "Wrong Site"), then near-same spellings resolve to the
-        existing catalog name so the field shows the canonical site; a
-        genuinely unknown site is returned as typed. NOTHING is written to
-        config.json here — the site is only added when the file is actually
-        SAVED (``_submit``), because OCR can be wrong and a half-filled popup
-        that is skipped must never leave a bogus site behind in the config.
+        The value AS PRINTED is tried against the catalog first, and only when
+        it matches nothing is the trailing unit designator dropped ("Wrong
+        Site T-9/10" -> "Wrong Site", "L & T (T-10)" -> "L & T") and tried
+        again. That order matters: "Raheja Solaris (Tower-A)" and "Raheja
+        Solaris (Tower-B)" are two different catalog sites, so a Tower-B
+        document must resolve to Tower-B, never to the bracket-stripped
+        "Raheja Solaris" (which the near-match would then hand to whichever of
+        the two is listed first). A genuinely unknown site is returned with
+        the designator dropped. NOTHING is written to config.json here — the
+        site is only added when the file is actually SAVED (``_submit``),
+        because OCR can be wrong and a half-filled popup that is skipped must
+        never leave a bogus site behind in the config.
         """
         site = (site or "").strip()
         client = (client or "").strip()
@@ -3263,18 +3268,32 @@ class FilePickerPopup:
                 return ""
         except Exception:
             pass
-        try:
-            site = self.config.site_display_name(site)
-        except Exception:
-            pass
         if not client:
-            return site
+            try:
+                return self.config.site_display_name(site)
+            except Exception:
+                return site
         try:
-            canonical = self.config.find_near_site(self.config.sites_for(client), site)
+            sites = self.config.sites_for(client)
+            canonical = self.config.find_near_site(sites, site)
             if canonical is not None:
                 return str(canonical)
         except Exception as exc:
             print(f"[filepicker] site lookup error: {exc}")
+            return site
+        try:
+            stripped = self.config.site_display_name(site)
+        except Exception:
+            stripped = site
+        if stripped and stripped != site:
+            try:
+                canonical = self.config.find_near_site(
+                    self.config.sites_for(client), stripped)
+                if canonical is not None:
+                    return str(canonical)
+            except Exception as exc:
+                print(f"[filepicker] site lookup error: {exc}")
+            return stripped
         return site
 
     def _ensure_site_in_config(self, client: str, site: str) -> str:

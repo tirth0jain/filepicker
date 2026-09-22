@@ -159,17 +159,34 @@ tower/wing/phase designator — `sital baug` → `Lodha Sital Baug`,
 The designator is recognised in **every** spelling vendors and OCR use,
 including the one where the dash comes first — `Lodha Wood-T6`,
 `Lodha Wood T6`, `Lodha Wood T-6`, `Lodha Wood-T-6` are all `Lodha Wood`
-(that spelling used to keep its T6), while a bare trailing letter is still part
-of the name (`Site A` is never `Site B`) and `Parc-V` stays `Parc-V`. When
-several catalog sites are near-same the **closest** one wins — fewest extra
-words first, then fewest one-letter differences — so `Lodha Wood` resolves to
-`LODHA - WOOD-kandivali` (the same words) and not to `Lodha Woods Club House`
-(one letter *and* one word away), whatever order the catalog happens to be in.
+(that spelling used to keep its T6), and inside brackets — `L & T (T-10)` and
+`L & T (T-A)` are `L & T` — while a bare trailing letter is still part of the
+name (`Site A` is never `Site B`), `Parc-V` stays `Parc-V` and a bracket
+holding a real name is left alone (`Acme Ozobe(Bellavista)`, `L & T (Retail)`).
+A bracketed tower is only dropped when the value as printed matches nothing:
+`Raheja Solaris (Tower-A)` and `Raheja Solaris (Tower-B)` are two different
+sites, so a Tower-B note keeps its B. When several catalog sites are near-same
+the **closest** one wins — fewest extra words first, then an identical name
+over one that only matches because numbers are ignored, then fewest one-letter
+differences — so `Lodha Wood` resolves to `LODHA - WOOD-kandivali` (the same
+words) and not to `Lodha Woods Club House` (one letter *and* one word away),
+whatever order the catalog happens to be in, and a catalog holding both
+`Client 1` and `Client 2` answers `Client 2` with `Client 2`.
 A name that matches nothing stays exactly as printed so you can review it (and
 optionally *Add* it) before saving. The Serial Number is read from the
 **Delivery Note No.** field (e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't
 read it, is back-filled from the file name (`RS-DC-26-27-6.pdf` → `6`). The
 key never lands in `config.json`, so it can't leak to the public repo.
+
+**A new document at an old file name is read again.** The OCR cache is keyed by
+the file *and its content identity* (size + modified time), not by the path
+alone. That matters because a scanner (or a download) re-uses the same name —
+`dc.pdf`, say — once the app has moved the previous file away, and a cache
+keyed by path alone handed the new document the **previous** file's read: the
+popup filled itself with the last file's company, client, site and materials,
+with no API call at all. Now the same untouched file is still served from
+cache (no wasted reads during a batch) while a new file at that path is read
+afresh.
 
 **Nothing you typed is ever overwritten — and `↻ Retry OCR` really retries.**
 The popup remembers which values *it* filled. A new read replaces those (so a
