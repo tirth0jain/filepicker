@@ -20,6 +20,12 @@ startup entry pointing at a path that no longer exists. :func:`ensure` is what
 ``main.py`` calls; :func:`state` explains, in the log, exactly what is in
 place.
 
+One trap is worth naming here because it silently broke auto-start for a user:
+in a Nuitka standalone build ``sys.executable`` is ``<dist folder>\\python.exe``
+— a path that is not in the distribution — so the registered entry started
+nothing. :func:`_frozen_exe` resolves the real ``FilePicker.exe`` instead, the
+same way the updater does.
+
 Usage (from the app)::
 
     python main.py --install-startup   # add to Windows startup
@@ -42,6 +48,10 @@ except ImportError:  # pragma: no cover - exercised on non-Windows
 
 _SHORTCUT_NAME = "FilePicker.lnk"
 
+# The app's own executable. It is NOT ``sys.executable`` in a compiled build
+# — see :func:`_frozen_exe`.
+_APP_EXE_NAME = "FilePicker.exe"
+
 # Per-user Run key: starts the app for this user only (no admin rights) and is
 # what Task Manager's "Startup apps" list shows.
 _RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -56,6 +66,55 @@ def _is_windows() -> bool:
     box inject a fake ``winreg`` and exercise the real code path.
     """
     return winreg is not None
+
+
+def _frozen_exe() -> Optional[Path]:
+    """The app's own ``FilePicker.exe``, or None when running from source.
+
+    ``sys.executable`` CANNOT be trusted for this in a compiled build: Nuitka
+    standalone sets it to ``<distribution folder>\\python.exe`` — the *name* of
+    the interpreter that built the app, joined to the distribution folder at
+    run time — and that file is not part of the build (the release zip holds
+    ``FilePicker.exe`` and no python.exe at all). Registering it meant Windows
+    was told to start a file that does not exist, so nothing happened at
+    login, and because the verification compared the Run key against the same
+    phantom path the automatic repair could never succeed either. The user's
+    log showed exactly that:
+
+        auto-start repair FAILED (target=D:\\...\\FilePicker-0.6.1-...\\python.exe)
+
+    So prefer the real exe: next to the running image, next to this file, and
+    in Nuitka's own containing directory — the same order as
+    ``updater._current_exe``, so the updater and the startup entry can never
+    disagree about which file the app is.
+    """
+    running: Optional[Path] = None
+    try:
+        running = Path(sys.executable)
+        if running.name.lower() == _APP_EXE_NAME.lower():
+            return running
+    except Exception:
+        running = None
+    candidates: list = []
+    if running is not None:
+        candidates.append(running.with_name(_APP_EXE_NAME))
+    try:
+        candidates.append(Path(__file__).resolve().parent / _APP_EXE_NAME)
+    except Exception:
+        pass
+    try:
+        containing = getattr(globals().get("__compiled__"), "containing_dir", None)
+        if containing:
+            candidates.append(Path(containing) / _APP_EXE_NAME)
+    except Exception:
+        pass
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
 
 
 def _startup_dir() -> Optional[Path]:
@@ -81,11 +140,14 @@ def _startup_dir() -> Optional[Path]:
 def _is_frozen() -> bool:
     """True when running from a compiled (Nuitka) binary.
 
-    Mirrors updater._is_frozen: checks the Nuitka markers AND the executable
-    name, so a shortcut always points at FilePicker.exe — never at a
+    Checks the Nuitka markers AND for a real ``FilePicker.exe`` next to the
+    running image, so a shortcut always points at FilePicker.exe — never at a
     ``pythonw.exe main.py`` pair (the regression the updater hit when
-    ``sys.frozen`` was not set).
+    ``sys.frozen`` was not set) and never at the phantom ``python.exe`` a
+    standalone build reports as ``sys.executable``.
     """
+    if _frozen_exe() is not None:
+        return True
     if getattr(sys, "frozen", False):
         return True
     if bool(getattr(sys, "nuitka_standalone", False)):
@@ -93,11 +155,9 @@ def _is_frozen() -> bool:
     if globals().get("__compiled__"):
         return True
     try:
-        if Path(sys.executable).name.lower() == "filepicker.exe":
-            return True
+        return Path(sys.executable).name.lower() == _APP_EXE_NAME.lower()
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _ps_quote(value: str) -> str:
@@ -108,10 +168,16 @@ def _ps_quote(value: str) -> str:
 def _target() -> Tuple[str, str, str]:
     """Return ``(target, args, working_dir)`` for the app.
 
-    - Compiled binary: the .exe itself.
+    - Compiled binary: the real ``FilePicker.exe`` (see :func:`_frozen_exe`).
     - Dev mode: pythonw.exe (no console) with main.py as an argument.
     """
+    exe = _frozen_exe()
+    if exe is not None:
+        return str(exe), "", str(exe.parent)
     if _is_frozen():
+        # Frozen, but the exe is not where we can see it (mid-update swap).
+        # install() refuses to register a target that does not exist, so this
+        # never becomes a startup entry pointing at a dead file.
         exe = Path(sys.executable)
         return str(exe), "", str(exe.parent)
 
@@ -151,7 +217,12 @@ def run_key_command() -> Optional[str]:
 
 
 def install_run_key() -> bool:
-    """Point the per-user Run key at this app. Returns True on success."""
+    """Point the per-user Run key at this app. Returns True on success.
+
+    The value is read back before reporting success: a write that silently did
+    not land (or landed pointing somewhere else) must never be logged as
+    "installed" while Windows still starts nothing at login.
+    """
     if winreg is None or not _is_windows():
         return False
     command = run_command()
@@ -159,10 +230,15 @@ def install_run_key() -> bool:
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0,
                                 winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, command)
-        return True
     except OSError as exc:
         print(f"[startup] could not write the Run key: {exc}")
         return False
+    target, _args, _workdir = _target()
+    if not _run_key_ok(target):
+        print("[startup] the Run key does not point at this app after writing "
+              f"it (found {run_key_command()!r}, wanted {command!r})")
+        return False
+    return True
 
 
 def remove_run_key() -> bool:
@@ -192,6 +268,36 @@ def _powershell_flags() -> dict:
     return flags
 
 
+def _shortcut_problem(lnk: Path) -> str:
+    """Why the Startup shortcut could not be read back, for the log.
+
+    Only called when the shortcut already failed to read, so the extra
+    PowerShell call costs nothing in the normal case — but it turns "the
+    shortcut is unreadable" (what the user's log said, with no reason) into
+    something actionable: PowerShell missing, PowerShell erroring, or a
+    shortcut file that exists but has no target in it.
+    """
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{_ps_quote(str(lnk))}'); "
+        "Write-Output $s.TargetPath; "
+        "Write-Output $s.Arguments"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+            capture_output=True, text=True, timeout=30, **_powershell_flags(),
+        )
+    except Exception as exc:  # OSError, TimeoutExpired, ...
+        return f"PowerShell could not be run: {exc}"
+    if result.returncode != 0:
+        lines = [ln.strip() for ln in (result.stderr or "").splitlines() if ln.strip()]
+        return (f"PowerShell exited {result.returncode}: "
+                f"{lines[-1] if lines else 'no error output'}")
+    return (f"the file has no target in it (PowerShell said "
+            f"{result.stdout.strip()[:120]!r})")
+
+
 def install_shortcut() -> bool:
     """Create the Startup-folder shortcut. Returns True on success."""
     if not _is_windows():
@@ -216,10 +322,19 @@ def install_shortcut() -> bool:
             check=True, capture_output=True, timeout=30,
             **_powershell_flags(),
         )
-        return lnk.exists()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"[startup] could not create the Startup shortcut: {exc}")
         return False
+    if not lnk.exists():
+        print(f"[startup] PowerShell reported no error but {lnk} was not "
+              "created — the Startup folder may not be writable")
+        return False
+    if _read_shortcut(lnk) is None:
+        print(f"[startup] the Startup shortcut {lnk} exists but cannot be "
+              f"read back ({_shortcut_problem(lnk)}) — Windows may ignore it; "
+              "the Run key still starts the app")
+        return False
+    return True
 
 
 def remove_shortcut() -> bool:
@@ -361,8 +476,17 @@ def install() -> bool:
     The Run key is written first because it is the reliable one; the shortcut
     is then added so the user can see and manage the entry themselves. A
     failure of one is logged and does not stop the other.
+
+    A startup entry whose target does not exist is worse than no entry at all:
+    Windows silently starts nothing and every later check still sees a
+    "registered" app. So nothing is written unless the target is really there.
     """
     if not _is_windows():
+        return False
+    target, _args, _workdir = _target()
+    if not _target_exists(target):
+        print("[startup] NOT registering auto-start: "
+              f"{target} does not exist (nothing to start)")
         return False
     run_ok = install_run_key()
     shortcut_ok = install_shortcut()

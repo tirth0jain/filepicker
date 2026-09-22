@@ -156,6 +156,15 @@ rules that are deterministic and testable: case, spacing and punctuation,
 articles, one-letter variants, one extra word (a brand prefix), and a trailing
 tower/wing/phase designator — `sital baug` → `Lodha Sital Baug`,
 `Lodha Kharadi T-2` → `Lodha Kharadi`, `Larsen and Toubro` → `Larsen & Toubro`.
+The designator is recognised in **every** spelling vendors and OCR use,
+including the one where the dash comes first — `Lodha Wood-T6`,
+`Lodha Wood T6`, `Lodha Wood T-6`, `Lodha Wood-T-6` are all `Lodha Wood`
+(that spelling used to keep its T6), while a bare trailing letter is still part
+of the name (`Site A` is never `Site B`) and `Parc-V` stays `Parc-V`. When
+several catalog sites are near-same the **closest** one wins — fewest extra
+words first, then fewest one-letter differences — so `Lodha Wood` resolves to
+`LODHA - WOOD-kandivali` (the same words) and not to `Lodha Woods Club House`
+(one letter *and* one word away), whatever order the catalog happens to be in.
 A name that matches nothing stays exactly as printed so you can review it (and
 optionally *Add* it) before saving. The Serial Number is read from the
 **Delivery Note No.** field (e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't
@@ -264,9 +273,16 @@ a real machine one of them is always unavailable for some reason:
 
 A mechanism only counts when it points at the *currently running* app and that
 file still exists, so an update that replaces the .exe can never leave a
-startup entry pointing at a dead path. If registration fails, the log says so
-explicitly (`[filepicker] auto-start FAILED …`) instead of failing silently.
-Control it from the tray (**Auto-start at login: On/Off**) or:
+startup entry pointing at a dead path. The entry always names
+**`FilePicker.exe` itself**: in a compiled build `sys.executable` is *not* the
+app — Nuitka reports `<install folder>\python.exe`, a file the release does not
+contain — and registering that phantom path is exactly how auto-start ended up
+doing nothing at login while the log still claimed an entry was present. The
+target is resolved the same way the updater resolves it, nothing is ever
+registered for a file that is not there, and both writes are read back before
+they are reported as installed. If registration fails, the log says so
+explicitly, with the reason (`[filepicker] auto-start FAILED …`) instead of
+failing silently. Control it from the tray (**Auto-start at login: On/Off**) or:
 
 - Disable auto-start: set `"auto_start": false` in `config.json` (or use the tray).
 - Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`
@@ -282,8 +298,10 @@ at startup and looking like "auto-start doesn't work".
 
 ## Uninstalling
 
-FilePicker is **portable** — there is no installer and it writes **nothing to
-the Windows registry**. To remove it completely:
+FilePicker is **portable** — there is no installer. It keeps everything in its
+own folder; the only thing it writes elsewhere is the per-user Run key entry
+(and the Startup shortcut) it registers so it can start with Windows, both
+removable from the tray or with `--remove-startup`. To remove it completely:
 
 1. **Remove it from startup** (so it stops launching at login):
    `FilePicker.exe --remove-startup`

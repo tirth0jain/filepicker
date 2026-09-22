@@ -16,7 +16,7 @@ import sys
 import threading
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ocr import (
     LEGACY_OCR_MODELS,
@@ -339,6 +339,62 @@ def _token_subsequence_matches(seq: List[str], sub: List[str]) -> bool:
     return True
 
 
+def _token_cost(a: str, b: str) -> Optional[int]:
+    """How far apart two (already normalised) words are — None when they are
+    not the same word at all.
+
+    0 = the same word (numbers never tell places apart), 1 = one letter off.
+    Mirrors :func:`_site_tokens_near` exactly, but returns the distance so the
+    CLOSEST catalog name can win instead of the first one listed.
+    """
+    if a == b:
+        return 0
+    if a.isdigit() and b.isdigit():
+        return 0
+    a_letters = re.sub(r"\d", "", a)
+    b_letters = re.sub(r"\d", "", b)
+    if a_letters and b_letters:
+        if a_letters == b_letters:
+            return 0
+        if len(a_letters) >= 2 and len(b_letters) >= 2 \
+                and _levenshtein(a_letters, b_letters) <= 1:
+            return 1
+    if not a or not b or len(a) < 2 or len(b) < 2:
+        return None
+    return 1 if _levenshtein(a, b) <= 1 else None
+
+
+def _token_match_cost(seq: List[str], sub: List[str]) -> Optional[Tuple[int, int]]:
+    """``(extra words, letter edits)`` for the closest way to read *sub* as
+    *seq*, or None when they are not near-same.
+
+    Same rule as :func:`_token_subsequence_matches` (at most ONE extra word,
+    every other token within one letter, in order), but it reports how loose
+    the match is: "lodha wood" is (1, 0) against "lodha wood kandivali" and
+    (1, 1) against "lodha woods club", so the first one is the same place and
+    the second one only looks like it.
+    """
+    if len(sub) > len(seq):
+        seq, sub = sub, seq
+    extra = len(seq) - len(sub)
+    if extra > 1:
+        return None
+    best: Optional[Tuple[int, int]] = None
+    for skipped in (range(len(seq)) if extra else [-1]):
+        costs: List[int] = []
+        for i, token in enumerate(sub):
+            j = i if skipped < 0 or i < skipped else i + 1
+            cost = _token_cost(seq[j], token)
+            if cost is None:
+                break
+            costs.append(cost)
+        else:
+            candidate = (extra, sum(costs))
+            if best is None or candidate < best:
+                best = candidate
+    return best
+
+
 # Unit-designator words: a trailing "word + number" pair whose word is one
 # of these is the same place as the name without the pair ("Kalpataru Elitus
 # Tower 2" == "Kalpataru Elitus", "Lodha Regalia Phase 2" == "Lodha Regalia").
@@ -352,9 +408,18 @@ _UNIT_WORDS = {
 }
 
 
+# A trailing "letter + number" TOKEN is a unit designator spelled without a
+# separator: "T6" is Tower 6 exactly like "T-6" and "Tower 6" (the user's
+# document read "Lodha Wood-T6" and the T6 had to go). A digit is required, so
+# a single letter alone ("Site A", "Kalpataru Vivant (T-A)") is NOT a
+# designator and still decides matches.
+_DESIGNATOR_TOKEN_RE = re.compile(r"(?i)^[a-z]\d+[a-z]?$")
+
+
 def _strip_trailing_designator(tokens: List[str]) -> List[str]:
-    """Drop ONE trailing unit designator: a standalone number, or an
-    'unit word + number' pair ('Tower 2', 'Phase 3').
+    """Drop ONE trailing unit designator: a standalone number, a "unit word +
+    number" pair ('Tower 2', 'Phase 3'), or the short spellings of the same
+    thing — "T6" (one token), "T-6"/"T 6" (normalised to "t 6"), "T2A".
 
     "Kalpataru Elitus Tower 2" is the same place as "Kalpataru Elitus" — the
     trailing designator is something vendors and OCR write inconsistently,
@@ -362,14 +427,19 @@ def _strip_trailing_designator(tokens: List[str]) -> List[str]:
     ('Site A', 'Kalpataru Vivant (T-A)') and the strip never reduces a name
     to nothing.
     """
-    if len(tokens) < 2 or not tokens[-1].isdigit():
+    if len(tokens) < 2:
         return tokens
-    out = tokens[:-1]  # a trailing number itself never decides a match
-    # Drop a preceding *unit* word too, but only when the pair is followed
-    # by at least two real words ("Sital Baug 2" keeps "Baug"; "Tower 2"
-    # alone stays intact).
-    if len(out) >= 2 and out[-1].isalpha() and out[-1] in _UNIT_WORDS:
-        out = out[:-1]
+    out = list(tokens)
+    if _DESIGNATOR_TOKEN_RE.match(out[-1]):
+        out = out[:-1]  # "lodha wood t6" -> "lodha wood"
+    elif out[-1].isdigit():
+        out = out[:-1]  # a trailing number itself never decides a match
+        # "t-6"/"t 6" normalise to the two tokens "t 6": the designator letter
+        # goes with the number. A unit WORD ("tower 2") goes the same way, but
+        # only when a real name precedes it ("Sital Baug 2" keeps "Baug").
+        if len(out) >= 2 and (re.fullmatch(r"[a-z]", out[-1])
+                              or out[-1] in _UNIT_WORDS):
+            out = out[:-1]
     return out or tokens
 
 
@@ -382,12 +452,29 @@ def _strip_trailing_designator(tokens: List[str]) -> List[str]:
 # still never decide a match, multi-letter prefixes ("Parc-V", "Phase-A")
 # look like real names, and bracketed forms ("Kalpataru Vivant (T-A)")
 # stay part of the name.
+#
+# The same designator is also written with the SEPARATOR FIRST and the unit
+# letter attached to the number — "Lodha Wood-T6", "Lodha Wood - T6",
+# "Mirabella-T5 & 7" — which is Tower 6/Tower 5 exactly like "T-6"/"Tower 6".
+# That spelling used to slip through, so the T6 stayed in the site name (the
+# user's report: "It didnt remove T6 from <site>-T6"). And with no separator
+# at all, just a space: "Lodha Wood T6". A single letter followed by digits
+# is required in both, so real names that merely end in a dashed word
+# ("Parc-V"), bracketed designators and single letters ("Site A") are still
+# untouched.
 _DASH_DESIGNATOR_RE = re.compile(
-    # The lookbehind keeps the match a COMPLETE token: in "Wing-2/3" the
-    # "2/3" tail must not match on its own (the unit-word rule below handles
-    # the whole "Wing-2/3" token instead). Whitespace around the separator
-    # is allowed ("Tower -C" is written like "Tower-C").
-    r"(?i)(?<![-/])\b[a-z0-9]\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*$"
+    r"(?i)(?:"
+    # 1) the unit letter FIRST: "T-6", "T-9/10", "Wing-2/3". The lookbehind
+    #    keeps the match a COMPLETE token: in "Wing-2/3" the "2/3" tail must
+    #    not match on its own (the unit-word rule below handles the whole
+    #    "Wing-2/3" token instead). Whitespace around the separator is
+    #    allowed ("Tower -C" is written like "Tower-C").
+    r"(?<![-/])\b[a-z0-9]\s*[-/]\s*[0-9a-z]+(?:\s*[/-]\s*[0-9a-z]+)*"
+    # 2) the separator FIRST: "-T6", "-T 6", "-T-6", "-T6/7", "-T5 & 7".
+    r"|[-/]\s*[a-z]\s*(?:[-/]\s*)?\d+[a-z]?(?:\s*[/&-]\s*[0-9a-z]+)*"
+    # 3) no separator, just a space: "Lodha Wood T6", "Lodha Wood T 6".
+    r"|\s+[a-z]\s*\d+[a-z]?"
+    r")$"
 )
 
 # The same shape but spelled with a unit WORD — with or without a separator,
@@ -433,10 +520,16 @@ def _strip_trailing_dash_designator(name) -> str:
     raw = str(name).strip()
     if not raw:
         return raw
+    # Prefer the match that starts EARLIEST, i.e. the longest designator: in
+    # "Kalpataru Elitus Tower 9/10" the unit-word rule sees "Tower 9/10" while
+    # the dashed rule would only see the "9/10" tail, and stripping the tail
+    # alone would leave a dangling "Tower" in the site name.
+    matches = []
     for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
-        if not m:
-            continue
+        if m:
+            matches.append(m)
+    for m in sorted(matches, key=lambda mm: mm.start()):
         out = raw[:m.start()].rstrip(" \t(")
         if not out:
             continue  # nothing but a designator — no place name to keep
@@ -452,15 +545,18 @@ def is_designator_only(name) -> bool:
     """True when *name* is NOTHING but a unit designator.
 
     "Tower-A", "Tower -C", "T-9/10", "Phase-2", "Tower", "Tower B",
-    "Wing C", "Tower 9/10" carry no place name at all — there is no site to
-    save, so OCR values like these must not become a new site (the user
-    picks the real one instead).
+    "Wing C", "Tower 9/10", "T6" carry no place name at all — there is no
+    site to save, so OCR values like these must not become a new site (the
+    user picks the real one instead).
     """
     raw = str(name).strip()
     if not raw:
         return False
     if normalize_site_name(raw) in _UNIT_WORDS:
         # A lone unit word ("Tower", "Wing", "Block") is designator-only.
+        return True
+    if _DESIGNATOR_TOKEN_RE.match(normalize_site_name(raw).replace(" ", "")):
+        # "T6" / "T 6" / "T-6" — tower 6 and nothing else.
         return True
     for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
@@ -474,8 +570,9 @@ def _match_forms(name: str) -> tuple:
 
     A name may compare equal through any of its forms: the plain normalized
     form, the numeric/unit-designator-stripped form ("Kalpataru Elitus
-    Tower 2" -> "kalpataru elitus"), and the designator-stripped form —
-    dashed ("Raymond Premium T-B" -> "raymond premium") or spelled out with a
+    Tower 2" -> "kalpataru elitus", "Lodha Wood T6" -> "lodha wood"), and
+    the designator-stripped form — dashed ("Raymond Premium T-B",
+    "Lodha Wood-T6" -> "raymond premium"/"lodha wood") or spelled out with a
     unit word ("Kalpataru Elitus Tower B" / "Kalpataru Elitus Wing C" ->
     "kalpataru elitus"). Returns a tuple of the distinct forms, never empty.
     """
@@ -503,7 +600,9 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     "Kalpataru Elitus Wing C" / "Block A" / "Tower 9/10" as well (and
     "Lodha Shital Baug Tower 2" matches "Sital Baug" — the brand prefix AND
     the designator are both tolerated; "Raymond Premium T-B" matches
-    "Raymond Premium"). Tolerates one-letter spelling variants per word
+    "Raymond Premium"). The same designator written the other way round is
+    ignored too: "Lodha Wood-T6" / "Lodha Wood T6" / "Lodha Wood T-6" are
+    all "Lodha Wood". Tolerates one-letter spelling variants per word
     ("shital bag" vs "Sital Baug", "Larsen and Toubro" vs "Larsen &
     Toubro") and at most one extra word (brand prefixes like "Lodha").
     Names that differ only in spacing/punctuation ("T-A" vs "TA" vs "T A")
@@ -512,26 +611,52 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     exact-only ("Site A" is never "Site B"), and a BARE trailing unit word
     is only ignored when a real name precedes it ("Lodha Amara Tower" is
     "Lodha Amara", but "Lodha Woods Club House" keeps "House" — it may BE
-    the name). Returns the canonical existing spelling.
+    the name).
+
+    When SEVERAL catalog names are near-same, the CLOSEST one wins — fewest
+    extra words first, then fewest one-letter differences — and catalog order
+    only breaks an exact tie. "Lodha Wood" is near both "Lodha Woods Club
+    House" and "LODHA - WOOD-kandivali"; only the second one is the same
+    words with no spelling change, so that is the site the document means
+    (picking the first one listed is how a wrong site ends up in the folder
+    path). Returns the canonical existing spelling.
     """
     cand_forms = _match_forms(candidate)
     if not cand_forms or not cand_forms[0]:
         return None
 
+    best_name: Optional[str] = None
+    best_cost: Optional[Tuple[int, int]] = None
     for name in existing_names:
         name_forms = _match_forms(name)
         if not name_forms or not name_forms[0]:
             continue
         # Either form pair may match (original, or one of the stripped
         # forms) — same words with only spacing/punctuation differences,
-        # or near-identical word lists.
+        # or near-identical word lists. The MATCHING rule is unchanged
+        # (_token_subsequence_matches); the cost only ranks the matches.
+        cost: Optional[Tuple[int, int]] = None
         for a in cand_forms:
             for b in name_forms:
                 if a == b or a.replace(" ", "") == b.replace(" ", ""):
-                    return str(name)
-                if _token_subsequence_matches(a.split(), b.split()):
-                    return str(name)
-    return None
+                    this: Optional[Tuple[int, int]] = (0, 0)
+                elif _token_subsequence_matches(a.split(), b.split()):
+                    this = _token_match_cost(a.split(), b.split()) or (9, 9)
+                else:
+                    continue
+                if cost is None or this < cost:
+                    cost = this
+                if cost == (0, 0):
+                    break
+            if cost == (0, 0):
+                break
+        if cost is None:
+            continue
+        if best_cost is None or cost < best_cost:
+            best_name, best_cost = str(name), cost
+            if best_cost == (0, 0):
+                break  # an exact match can never be beaten
+    return best_name
 
 
 def find_near_site(existing_sites, candidate) -> Optional[str]:
