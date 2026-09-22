@@ -139,18 +139,43 @@ supplier / buyer / site read from the document — no manual typing.
 The **first** file — the one whose popup opens first — is read on its own, so
 the popup you are looking at gets the whole gateway and fills in fastest. The
 rest of the batch is sent together the moment that read finishes (or after
-20 s if it is slow), so they are still read **simultaneously** (up to 32
+20 s if it is slow), so they are still read **simultaneously** (up to 8
 vision calls at once) while you work through the queue. A popup whose file
 has not been sent yet reads it immediately, so the file on screen never
 waits. While a read is in flight the popup shows
-`OCR: reading document… (N files read together)`. Results are
-applied only if you haven't started typing; names that already exist in the
-catalog are matched case-insensitively (canonical spelling is used), and
-brand-new names stay typed so you can review (and optionally *Add*) them
-before saving. The Serial Number is read from the **Delivery Note No.** field
-(e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't read it, is back-filled from
-the file name (`RS-DC-26-27-6.pdf` → `6`). The key never lands in
-`config.json`, so it can't leak to the public repo.
+`OCR: reading document… (N files read together)`.
+
+**What the model reads, and what the app matches:** the model is asked to
+**copy the printed values** — nothing else. The catalog is deliberately *not*
+part of the prompt (it used to list every known site and client and order the
+model to "output the Known Site name exactly as listed", which turned reading
+one printed line into a fuzzy pick from a long list of near-duplicate names:
+a note whose *Other References* said `Lodha Kharadi T-2` could come back as a
+different real site, `Lodha Sital Baug`). The app resolves names itself, with
+rules that are deterministic and testable: case, spacing and punctuation,
+articles, one-letter variants, one extra word (a brand prefix), and a trailing
+tower/wing/phase designator — `sital baug` → `Lodha Sital Baug`,
+`Lodha Kharadi T-2` → `Lodha Kharadi`, `Larsen and Toubro` → `Larsen & Toubro`.
+A name that matches nothing stays exactly as printed so you can review it (and
+optionally *Add* it) before saving. The Serial Number is read from the
+**Delivery Note No.** field (e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't
+read it, is back-filled from the file name (`RS-DC-26-27-6.pdf` → `6`). The
+key never lands in `config.json`, so it can't leak to the public repo.
+
+**Nothing you typed is ever overwritten — and `↻ Retry OCR` really retries.**
+The popup remembers which values *it* filled. A new read replaces those (so a
+wrong site or material can actually be corrected), while anything you typed,
+picked or toggled by hand is left alone — the status line says which
+(`OCR: done in 2.9s — kept your site`). A retry also reads **with thinking
+on** rather than repeating the identical fast call, because "the first answer
+was wrong" is exactly when a more careful look is wanted. If a retry fails, the
+values the rejected read had filled are cleared instead of staying behind
+looking like your data. The log traces each read to the field it produced:
+
+```
+[ocr] RS-DC-26-27-6.pdf: company='Ruby Steel' client='Cowtown Infotech Services Limited' site='Lodha Kharadi T-2' serial='6' goods='Aluminium Section'
+[filepicker] OCR applied for RS-DC-26-27-6.pdf: site 'Lodha Kharadi T-2' -> 'Lodha Kharadi'; materials ['Aluminium']
+```
 
 **Speed (`ocr_thinking`):** a read is dominated by how long the model
 *thinks* before answering — not by the upload, the image or the prompt.
@@ -179,7 +204,10 @@ slow read. Which rung a read ended up using is in its log line
 re-read **once with thinking on** instead of returning nothing, so speed never
 costs accuracy. Set `"ocr_thinking"` in `config.json` to `"low"`/`"high"`/
 `"max"` to force graded thinking, or to `"default"` to send no thinking field
-at all (the old `ocr_reasoning_effort` key still works). Each read logs every
+at all (the old `ocr_reasoning_effort` key still works). `↻ Retry OCR` always
+reads with thinking on (`"low"`, or your configured level when that is
+already graded), so a hard document can be re-read carefully without making
+every automatic read slow. Each read logs every
 stage — total, render, image size, attempts, mode, tokens and how many of them
 were reasoning:
 
@@ -200,6 +228,9 @@ most ONE material** — the most specific match in that line. A line reading
 `SS Spigot` therefore selects the *fitting* (the mapped word, longer and more
 specific) and **not** Stainless Steel as well; comma-, newline-, semicolon-,
 pipe- or bullet-separated headings each contribute their own single material.
+A new read replaces the materials the *previous* read selected (that is how a
+retry fixes a wrong list); materials you picked or unticked yourself are kept,
+and one you unticked is never put back.
 
 ## Usage
 

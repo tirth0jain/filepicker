@@ -248,17 +248,27 @@ def _read_github_token() -> Optional[str]:
 # kept — "Site A" is NOT "Site B".
 _SITE_ARTICLES = {"a", "an", "the"}
 
+# Connector words that never tell two names apart. "&" is already folded into a
+# space by the normaliser, so without this "Larsen and Toubro" and
+# "Larsen & Toubro" normalise to different token lists ("larsen and toubro" vs
+# "larsen toubro") and never match — the "and"/"&" spelling difference is
+# exactly what the near-match is for (the OCR prompt used to carry the whole
+# client list just to paper over this; the matcher does it itself now).
+# Dropped anywhere in the name, not just at the front.
+_SITE_CONNECTORS = {"and"}
+
 
 def normalize_site_name(name) -> str:
     """Fold a site name into its comparable form.
 
     Lowercases, turns every non-alphanumeric run (punctuation, spacing,
-    brackets, "&") into a single space, and drops a leading article
-    (a/an/the) — so "The LODHA Shital-Baug" and "Lodha shital baug" compare
-    equal, while "Site A" and "Kalpataru Vivant (T-A)" keep their letters.
+    brackets, "&") into a single space, drops a leading article (a/an/the) and
+    the connector "and" — so "The LODHA Shital-Baug", "Lodha shital baug" and
+    "Larsen and Toubro"/"Larsen & Toubro" compare equal, while "Site A" and
+    "Kalpataru Vivant (T-A)" keep their letters.
     """
     text = re.sub(r"[^0-9a-z]+", " ", str(name).lower())
-    tokens = [t for t in text.split() if t]
+    tokens = [t for t in text.split() if t and t not in _SITE_CONNECTORS]
     if tokens and tokens[0] in _SITE_ARTICLES:
         tokens = tokens[1:]
     return " ".join(tokens)
@@ -1503,11 +1513,11 @@ class ConfigManager:
         return find_near_name(existing_names, candidate)
 
     def all_clients(self) -> List[str]:
-        """Every client name (for the OCR known-clients list)."""
+        """Every client name (used by the mapping dialog and the catalog view)."""
         return [str(k) for k in self.clients]
 
     def all_sites(self) -> List[str]:
-        """Every site name across all clients (for the OCR known-sites list)."""
+        """Every site name across all clients (used by the 🗺 Map Site dialog)."""
         out: List[str] = []
         for sites in self._clients_dict().values():
             for s in sites:

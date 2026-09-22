@@ -1102,6 +1102,23 @@ class FilePickerPopup:
         # Received Copy is UNCHECKED by default (unchecked = Submitted).
         self._received_var = tk.BooleanVar(value=False)
         self._selected_materials: List[str] = []
+        # OCR PROVENANCE. What the last OCR application put in each field, and
+        # which materials it selected, so a later read (the ↻ Retry button) may
+        # replace OCR's own guesses — while anything the user typed or toggled
+        # is never touched. Without this a retry could not correct a wrong
+        # read at all: every field was already non-empty, so the "never
+        # clobber" rule (right for the user's edits, wrong for our own earlier
+        # fill) rejected the new answer and the popup kept the wrong values.
+        self._ocr_filled: Dict[str, str] = {}
+        self._ocr_materials: set = set()
+        # Materials the user toggled OFF by hand: OCR must not put them back.
+        self._user_off_materials: set = set()
+        # True while a "↻ Retry OCR" read is in flight (its outcome may clear
+        # the values the rejected read had filled).
+        self._ocr_retrying = False
+        # Names of the fields a read left alone because the user had typed
+        # them (used for the status line: "kept your site").
+        self._ocr_kept_user_edits: List[str] = []
         # Company name placed by OCR that is NOT in the catalog — kept across
         # live-config refreshes until the user picks a menu value.
         self._ocr_company_override: Optional[str] = None
@@ -1836,6 +1853,9 @@ class FilePickerPopup:
             self._materials_map = new_materials
             # Keep only selected materials that still exist
             self._selected_materials = [m for m in self._selected_materials if m in new_materials]
+            self._ocr_materials = {m for m in self._ocr_materials if m in new_materials}
+            self._user_off_materials = {
+                m for m in self._user_off_materials if m in new_materials}
             self._rebuild_material_index()
             self._render_material_chips()
             changed = True
@@ -2060,8 +2080,14 @@ class FilePickerPopup:
     def _toggle_material(self, name: str) -> None:
         if name in self._selected_materials:
             self._selected_materials.remove(name)
+            # A hand toggle makes the material the USER's choice: OCR never
+            # removes it again, and a deselected one is never re-added.
+            self._ocr_materials.discard(name)
+            self._user_off_materials.add(name)
         else:
             self._selected_materials.append(name)
+            self._ocr_materials.discard(name)
+            self._user_off_materials.discard(name)
         self._render_material_chips()
         self._refresh_preview()
 
@@ -2195,19 +2221,27 @@ class FilePickerPopup:
     def _apply_goods_materials(self, goods_text) -> bool:
         """Pre-select the catalog materials the goods description mentions.
 
-        Only ADDS to an untouched selection: when the user already picked
-        materials (or OCR already filled them), nothing is changed, and when
-        the goods text matches nothing at all the selection is left exactly as
-        it is — no material is ever invented, renamed or cleared.
+        Only OCR's OWN previous selection is replaced: the materials the last
+        read added are dropped and the new matches take their place, while
+        every material the user picked (or deselected) by hand survives
+        untouched. That is what makes ↻ Retry able to fix a wrong material
+        list — the old rule ("if anything is already selected, do nothing")
+        made a retry a no-op for materials.
+
+        A goods text that matches nothing at all only clears OCR's own picks
+        (the new read is the truth); the user's selection is left exactly as
+        it is — no material is ever invented or renamed.
         """
-        if self._selected_materials:
-            return False
         matches = self._goods_material_matches(goods_text)
-        if not matches:
+        # The user's materials: everything selected that OCR did not put there.
+        keep = [m for m in self._selected_materials if m not in self._ocr_materials]
+        add = [m for m in matches
+               if m not in keep and m not in self._user_off_materials]
+        new_selection = keep + add
+        self._ocr_materials = set(add)
+        if new_selection == self._selected_materials:
             return False
-        for name in matches:
-            if name not in self._selected_materials:
-                self._selected_materials.append(name)
+        self._selected_materials = new_selection
         try:
             self._render_material_chips()
         except Exception:
@@ -2749,9 +2783,12 @@ class FilePickerPopup:
     def _retry_ocr(self) -> None:
         """Re-run OCR for this file (the "↻ Retry OCR" button).
 
-        The pool forgets the failed (or stale) cached result and makes a
-        fresh vision call; the outcome is applied exactly like the first
-        read (fields the user already filled are never clobbered).
+        The pool forgets the cached result and makes a fresh vision call that
+        THINKS (see ocr.retry_thinking_level): the user pressed this because
+        the first answer was wrong, so repeating the identical fast call would
+        just repeat the same wrong fields. The new outcome REPLACES the values
+        the previous read had filled — fields the user typed or toggled are
+        still never clobbered.
         """
         pool = getattr(self, "ocr_pool", None)
         if pool is None or not pool.available:
@@ -2760,7 +2797,9 @@ class FilePickerPopup:
             self.retry_ocr_btn.configure(state="disabled")
         except Exception:
             pass
-        self._set_ocr_status("OCR: retrying…", _ACCENT)
+        self._ocr_retrying = True
+        self._set_ocr_status(
+            "OCR: retrying — reading it again, more carefully…", _ACCENT)
         self._start_ocr_progress()
 
         def on_done(result) -> None:
@@ -2781,7 +2820,18 @@ class FilePickerPopup:
             except tk.TclError:
                 pass
 
-        pool.retry(self.file_path, on_done)
+        level = None
+        try:
+            from ocr import retry_thinking_level
+            level = retry_thinking_level(
+                getattr(self.config, "ocr_thinking", None))
+        except Exception:
+            level = None
+        try:
+            pool.retry(self.file_path, on_done, thinking=level)
+        except TypeError:
+            # A pool that predates the per-read thinking override.
+            pool.retry(self.file_path, on_done)
 
     def _start_ocr(self) -> None:
         """Consume the background OCR result for this file (if any).
@@ -2792,7 +2842,8 @@ class FilePickerPopup:
         queue. If this one is still in flight we subscribe to its completion
         and keep a live "N files read together" counter on the status line;
         results are applied on the UI thread and never clobber anything the
-        user already typed.
+        user already typed (values a PREVIOUS read filled are replaced — see
+        _ocr_may_replace).
         """
         pool = getattr(self, "ocr_pool", None)
         if pool is None:
@@ -2852,12 +2903,79 @@ class FilePickerPopup:
             return ""
         return f" in {seconds:.1f}s"
 
+    def _ocr_may_replace(self, field: str, current: str) -> bool:
+        """True when OCR may (over)write *field*, which currently shows *current*.
+
+        Empty is ours to fill, and a value an EARLIER OCR read put there is
+        ours to correct — that is what lets the ↻ Retry button fix a wrong
+        read. Anything else is the user's own text and is never touched.
+        """
+        current = (current or "").strip()
+        if not current:
+            return True
+        return current == str(self._ocr_filled.get(field, "") or "").strip()
+
+    def _snapshot_fields(self):
+        """The form's current values (to tell whether a read changed anything)."""
+        return (
+            self._company_var.get().strip(),
+            self.client_dropdown.entry.get().strip(),
+            self.site_dropdown.entry.get().strip(),
+            self._serial_var.get().strip(),
+            tuple(self._selected_materials),
+        )
+
+    def _clear_ocr_values(self, fields=("company", "client", "site", "serial",
+                                        "materials")) -> bool:
+        """Drop everything OCR itself filled in (never the user's own edits).
+
+        Used when a re-read comes back empty or fails: the values the rejected
+        read had filled must not stay in the form looking like the user's data
+        (and must not be saved by accident).
+        """
+        changed = False
+        if "company" in fields and "company" in self._ocr_filled:
+            self._ocr_filled.pop("company", None)
+            self._ocr_company_override = None
+            self._reload_company_options()  # back to the popup's default
+            changed = True
+        if "client" in fields and "client" in self._ocr_filled:
+            self._ocr_filled.pop("client", None)
+            self.client_dropdown.set("")
+            self._client_var.set("")
+            self._populate_sites("")
+            changed = True
+        if "site" in fields and "site" in self._ocr_filled:
+            self._ocr_filled.pop("site", None)
+            self.site_dropdown.set("")
+            changed = True
+        if "serial" in fields and "serial" in self._ocr_filled:
+            self._ocr_filled.pop("serial", None)
+            self._serial_var.set("")
+            changed = True
+        if "materials" in fields and self._ocr_materials:
+            self._selected_materials = [
+                m for m in self._selected_materials
+                if m not in self._ocr_materials
+            ]
+            self._ocr_materials = set()
+            try:
+                self._render_material_chips()
+            except Exception:
+                pass
+            changed = True
+        if changed:
+            self._refresh_preview()
+        return changed
+
     def _apply_ocr_outcome(self, result) -> None:
         """Update the status line + fields once an OCR result is available."""
         # The read is over (success, empty or failure): stop refreshing the
         # "reading document…" counters so they can never overwrite the result.
         self._ocr_poll_done = True
         self._stop_ocr_progress()
+        retrying = bool(getattr(self, "_ocr_retrying", False))
+        self._ocr_retrying = False
         err = None
         if getattr(self, "ocr_pool", None) is not None:
             try:
@@ -2869,9 +2987,29 @@ class FilePickerPopup:
             # Delivery Note number in the file name, so back-fill the serial.
             # When the pool knows WHY it failed (e.g. a 500 gateway error),
             # say so and offer the retry button instead of a bare message.
+            #
+            # A FAILED RETRY additionally drops what the rejected read had
+            # filled (only ever OCR's own values): keeping the wrong fields
+            # would make the retry look like it did nothing.
+            cleared = self._clear_ocr_values() if retrying else False
+            # The file name fallback still applies (it is the download's own
+            # name, not something a read produced) — the serial field is empty
+            # again after a failed retry cleared it.
+            from_name = (not self._serial_var.get().strip()
+                         and self._apply_serial_from_filename())
             if err:
-                self._set_ocr_status(self._short_ocr_error(err), _DANGER)
-            elif self._apply_serial_from_filename():
+                message = self._short_ocr_error(err)
+                if cleared:
+                    message = message.replace(
+                        " — click ↻ Retry OCR",
+                        " — cleared the fields it had filled")
+                self._set_ocr_status(message, _DANGER)
+            elif cleared:
+                self._set_ocr_status(
+                    "OCR: could not read document — cleared the fields it "
+                    "had filled"
+                    + (" (serial from filename)" if from_name else ""), _DANGER)
+            elif from_name:
                 self._set_ocr_status(
                     "OCR: could not read document — serial from filename", _SUCCESS
                 )
@@ -2885,47 +3023,55 @@ class FilePickerPopup:
         if not self._serial_var.get().strip() and self._apply_serial_from_filename():
             changed = True
         took = self._ocr_seconds()
-        self._set_ocr_status(
-            f"OCR: fields filled{took} — check before saving" if changed
-            else f"OCR: done{took} (fields already filled)",
-            _SUCCESS,
-        )
+        if changed:
+            self._set_ocr_status(
+                f"OCR: fields filled{took} — check before saving" if not retrying
+                else f"OCR: re-read{took} — fields updated, check before saving",
+                _SUCCESS,
+            )
+        elif getattr(self, "_ocr_kept_user_edits", None):
+            # The read DID return values, but the fields it would touch hold
+            # the user's own text. Say which ones instead of the old, opaque
+            # "(fields already filled)" that made a retry look broken.
+            self._set_ocr_status(
+                f"OCR: done{took} — kept your "
+                f"{' and '.join(self._ocr_kept_user_edits)}", _SUCCESS)
+        else:
+            self._set_ocr_status(f"OCR: done{took} (same result)", _SUCCESS)
         self._set_ocr_retry_visible(True)
 
     def _apply_ocr_result(self, result: Dict[str, str]) -> bool:
-        """Pre-fill Company/Client/Site/Serial from the OCR table.
+        """Pre-fill Company/Client/Site/Serial/materials from the OCR table.
 
-        Never clobbers fields the user already typed. The Serial field is
-        filled independently of the dropdowns (as long as it is still empty);
-        the Company/Client/Site part is skipped if the user already started
-        filling client or site. Catalog entries are matched case-insensitively
-        so the canonical spelling is used when one exists; unknown names stay
-        typed as-is and flow through the normal Save / Add flows for the user
-        to confirm.
+        Values the USER typed are never clobbered — but values an EARLIER OCR
+        read put in the form are replaced by a later read, so ↻ Retry really
+        corrects a wrong answer instead of silently doing nothing (see
+        _ocr_may_replace). The Serial field is filled independently of the
+        dropdowns; the Company/Client/Site part is skipped when the user has
+        started filling client or site themselves. Catalog entries are matched
+        case-insensitively so the canonical spelling is used when one exists;
+        unknown names stay typed as-is and flow through the normal Save / Add
+        flows for the user to confirm.
         """
-        changed = False
+        before = self._snapshot_fields()
+        log_bits: List[str] = []
 
         # Serial Number (free-text field) — digits only, 1-4 chars, already
         # normalised by the OCR parser.
         serial = (result.get("serial") or "").strip()
-        if serial and not self._serial_var.get().strip():
-            self._serial_var.set(serial)
-            changed = True
+        if self._ocr_may_replace("serial", self._serial_var.get()):
+            if serial:
+                self._serial_var.set(serial)
+                self._ocr_filled["serial"] = serial
+            elif self._ocr_filled.pop("serial", None) is not None:
+                # This read found no serial: drop the one WE filled before.
+                self._serial_var.set("")
 
-        # "Description of Goods" -> catalog materials: pre-select the
-        # materials the delivery actually contains (name or shortcode found in
-        # the transcribed item descriptions). Independent of the client/site
-        # fields, so it runs even when those were already typed; a goods text
-        # that matches nothing leaves the selection untouched (no material is
-        # ever invented).
+        # "Description of Goods" -> catalog materials: this read replaces the
+        # materials the PREVIOUS read selected (the user's own picks and
+        # deselections survive — see _apply_goods_materials).
         if self._apply_goods_materials(result.get("goods")):
-            changed = True
             self._refresh_preview()
-
-        # If the user already started filling client/site, leave the dropdown
-        # fields alone (the serial above is still applied, though).
-        if self.client_dropdown.entry.get().strip() or self.site_dropdown.entry.get().strip():
-            return changed
 
         company = (result.get("company") or "").strip()
         client = (result.get("client") or "").strip()
@@ -2937,14 +3083,33 @@ class FilePickerPopup:
         self._ocr_highlight_terms = [
             v for v in (company, client, site, serial) if v
         ]
+
+        # Fields the user has started filling themselves are left alone (the
+        # serial and the materials above are still applied).
+        self._ocr_kept_user_edits = [
+            name for name, value in (
+                ("client", self.client_dropdown.entry.get()),
+                ("site", self.site_dropdown.entry.get()),
+            ) if value.strip() and not self._ocr_may_replace(name, value)
+        ]
+        if self._ocr_kept_user_edits:
+            log_bits.append(
+                f"kept user {' and '.join(self._ocr_kept_user_edits)}")
+            if self._ocr_materials:
+                log_bits.append(f"materials {sorted(self._ocr_materials)}")
+            self._set_preview_highlights()
+            self._log_ocr_apply(log_bits)
+            return self._snapshot_fields() != before
+
         if not (company or client or site):
-            # Serial-only result: still highlight the serial if possible.
-            if serial and self._preview is not None:
-                try:
-                    self._preview.set_highlight_terms(self._ocr_highlight_terms)
-                except Exception:
-                    pass
-            return changed
+            # Serial/materials-only result: the dropdown values an earlier read
+            # filled are no longer supported by this read, so drop OUR values.
+            self._clear_ocr_values(("company", "client", "site"))
+            if self._ocr_materials:
+                log_bits.append(f"materials {sorted(self._ocr_materials)}")
+            self._set_preview_highlights()
+            self._log_ocr_apply(log_bits)
+            return self._snapshot_fields() != before
 
         # Name MAPPING (the 🗺 Map buttons): a name the user mapped to
         # another one is switched HERE, before any canonicalization, so OCR's
@@ -2964,10 +3129,15 @@ class FilePickerPopup:
         if company:
             canonical = self._ci_canonical(self.config.companies, company)
             self._ocr_company_override = company if not canonical else None
-            self._company_var.set(canonical if canonical else company)
+            company_value = canonical if canonical else company
+            self._company_var.set(company_value)
+            self._ocr_filled["company"] = company_value
+        elif self._ocr_filled.pop("company", None) is not None:
+            self._reload_company_options()
 
         # Client + Site (searchable dropdowns): same canonical lookup;
         # unknown names stay typed and can be added at Save time.
+        client_value = ""
         if client:
             # Near-match, same rule as sites: "Larsen and Toubro" resolves
             # to the catalog's "Larsen & Toubro", never a duplicate.
@@ -2978,16 +3148,28 @@ class FilePickerPopup:
             self.client_dropdown.set(client_value)
             self._client_var.set(client_value)
             self._populate_sites(client_value)
+            self._ocr_filled["client"] = client_value
+            if client_value != client:
+                log_bits.append(f"client {client!r} -> {client_value!r}")
+        elif self._ocr_filled.pop("client", None) is not None:
+            self.client_dropdown.set("")
+            self._client_var.set("")
+            self._populate_sites("")
         if site:
-            # Site: resolve near-same spellings to the catalog name (the AI
-            # may still return "sital baug" when the config has "Sital Baug").
-            # NOTHING is written to config.json here: a brand-new site is
-            # added only when the file is actually SAVED (_submit), so wrong
-            # OCR on a popup that gets skipped never pollutes the config.
+            # Site: resolve near-same spellings to the catalog name. NOTHING is
+            # written to config.json here: a brand-new site is added only when
+            # the file is actually SAVED (_submit), so wrong OCR on a popup
+            # that gets skipped never pollutes the config.
+            raw_site = site
             effective_client = self._client_var.get().strip()
             if effective_client:
                 site = self._resolve_site_readonly(effective_client, site)
             self.site_dropdown.set(site)
+            self._ocr_filled["site"] = site
+            if site != raw_site:
+                log_bits.append(f"site {raw_site!r} -> {site!r}")
+        elif self._ocr_filled.pop("site", None) is not None:
+            self.site_dropdown.set("")
 
         # Also mark the values FINALLY shown in the fields (post-mapping and
         # post-near-match) — the preview searches BOTH spellings, so the
@@ -2998,15 +3180,34 @@ class FilePickerPopup:
             if v and v not in self._ocr_highlight_terms:
                 self._ocr_highlight_terms.append(v)
 
+        if self._ocr_materials:
+            log_bits.append(f"materials {sorted(self._ocr_materials)}")
+        self._set_preview_highlights()
         self._refresh_preview()
-        # Yellow-highlight the OCR-found values in the open preview (the
-        # viewer re-renders the current page with cheap text-search boxes).
-        if self._preview is not None:
-            try:
-                self._preview.set_highlight_terms(self._ocr_highlight_terms)
-            except Exception:
-                pass
-        return True
+        self._log_ocr_apply(log_bits)
+        return self._snapshot_fields() != before
+
+    def _set_preview_highlights(self) -> None:
+        """Yellow-highlight the OCR-found values in the open preview."""
+        if self._preview is None or not self._ocr_highlight_terms:
+            return
+        try:
+            self._preview.set_highlight_terms(self._ocr_highlight_terms)
+        except Exception:
+            pass
+
+    def _log_ocr_apply(self, bits: List[str]) -> None:
+        """Log what the app DID with the read (the OCR log line prints what the
+        model returned): catalog mapping, near-match, materials, user edits
+        kept. A wrong field can then be traced to the read or to the matching
+        without guessing."""
+        if not bits:
+            return
+        try:
+            print(f"[filepicker] OCR applied for {self.file_path.name}: "
+                  + "; ".join(bits))
+        except Exception:
+            pass
 
     def _apply_serial_from_filename(self) -> bool:
         """Fill the serial field from the download file name (fallback).

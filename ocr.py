@@ -112,6 +112,14 @@ OCR_THINKING_VERIFY_TOKENS = 16
 # nothing (accuracy is never traded away for speed).
 OCR_THINKING_ESCALATION_EFFORT = "low"
 
+# Thinking level used by the popup's "↻ Retry OCR" button. A retry is a
+# deliberate "look again, more carefully" — the user pressed it because the
+# first answer was wrong — so it is NOT the same request again: an automatic
+# read stays thinking-free (fast), while a retry thinks. With `ocr_thinking`
+# already set to a graded level the retry keeps that level instead (see
+# retry_thinking_level).
+OCR_RETRY_THINKING = "low"
+
 # Legacy knob (config.json "ocr_reasoning_effort", local-only): kept so old
 # configs and callers still resolve. The default now maps to thinking OFF —
 # see config.ConfigManager.ocr_thinking.
@@ -302,23 +310,38 @@ def _reasoning_tokens(data: dict) -> int:
 # in 0.6.4: read from the "Delivery Note No." field, digits only, 1-4 digits.
 # Site made strictly "Other References"-only in 0.6.6: the model must never
 # substitute a "Reference No." / "Ref No." value for the missing site.)
+#
+# 0.6.39: the catalog is NOT sent to the model any more. Until 0.6.38 the
+# prompt carried every known site (~106 names, near-duplicates across clients)
+# and client (~199) and ordered the model to "output the Known Site name
+# EXACTLY as listed above". That turned reading one printed line into a
+# fuzzy-selection over a long list, and a wrong pick from that list is
+# indistinguishable from a misread: a document whose "Other References" said
+# "Lodha Kharadi T-2" came back as a DIFFERENT real site, "Lodha Sital Baug"
+# (a name the old prompt even used as its example). The app's own matcher
+# already resolves the document's spelling to the catalog (case, spacing,
+# articles, one-letter variants, one extra word, trailing tower/wing/phase
+# designators — see config.find_near_name), so the list bought nothing and
+# risked exactly this. The model now copies what is printed; the app maps it.
 OCR_PROMPT = """You are given a delivery note document. Extract the following information and present it in a table format:
 
 1. Company (Supplier) - the company supplying the goods (e.g., Ruby Steel)
-2. Client (Buyer) - the company being supplied to (e.g., Larsen and Toubro, Honest Shelters Pvt Ltd)
-3. Site - ONLY the value of the field literally labelled "Other References" (e.g., Kalpataru Vivant (T-A), Palais Royal (Amenity), Lodha Regalia Tower 2)
+2. Client (Buyer) - the company being supplied to, as printed in the "Buyer (Bill to)" or "Consignee (Ship to)" block
+3. Site - ONLY the value of the field literally labelled "Other References" (usually a project or site name, sometimes with a tower/wing/phase written with it)
 4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
-5. Description of Goods - ONLY the BOLD heading words of each item in the goods/items table (the material name printed in bold, e.g. "MS Angle", "SS Sheet", "Aluminium Composite Panel") — NOT the smaller normal-weight description lines written below each heading
+5. Description of Goods - ONLY the BOLD heading words of each item in the goods/items table (the short material name printed in bold at the head of the row) — NOT the smaller normal-weight description lines written below each heading
 
 Rules:
+- COPY WHAT IS PRINTED. Every value is the text printed on THIS document: the same words, the same spelling, the same tower/wing/phase suffix. Never correct a spelling, translate, expand an abbreviation, tidy up a name, or replace a name with a similar one you have seen on another document or know from elsewhere. A value that looks wrong is still copied as printed — the app matches names against its own catalog itself.
 - Company is the supplier (from the "From" / "RUBY STEEL" section)
 - Client is the buyer/consignee (from "Buyer (Bill to)" or "Consignee (Ship to)" section)
 - Site MUST come ONLY from the field literally labelled "Other References". NEVER use "Reference No.", "Ref No.", "SR. No.", "Bill No.", "Invoice No.", "Delivery Note No.", "PO No." or any other field for Site
+- Site is that field's WHOLE value, exactly as printed, including any tower/wing/unit part written with it: if it reads "X T-2", copy "X T-2" — never shorten it to "X", and never replace X with the name of another site. The same for a spelled-out designator ("X Tower 2" stays "X Tower 2")
 - If the document has no "Other References" field, leave the Site cell EMPTY (do not substitute any other value)
 - Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
 - If the Delivery Note No. is not present, leave Serial Number empty
-- Description of Goods: transcribe ONLY the BOLD heading of each item row (the material name printed in bold). IGNORE the smaller normal-weight description lines written BELOW each heading. If no text in the table is bold, transcribe only the FIRST line of each item (the heading), never the sub-lines below. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
-- Case insensitive, convert to Title Case (Description of Goods keeps the document's own wording)
+- Description of Goods: transcribe ONLY the BOLD heading of each item row (the short material name printed in bold). IGNORE the smaller normal-weight description lines written BELOW each heading. If no text in the table is bold, transcribe only the FIRST line of each item (the heading), never the sub-lines below. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
+- Capitalisation may be normalised to Title Case (Description of Goods keeps the document's own wording); nothing else about a value may change
 
 Output format:
 
@@ -330,79 +353,11 @@ Output format:
 | Serial Number (Delivery Note No.) | [Number] |
 | Description of Goods | [Bold item headings, comma separated] |"""
 
-# Known-Sites section appended to the base prompt (see build_ocr_prompt).
-# The model gets the current site catalog so a document that writes a site
-# slightly differently ("sital baug") is resolved to the existing name
-# ("Sital Baug") instead of becoming a duplicate site in the config.
-_KNOWN_SITES_SECTION = """
-
-Known Sites (the current site list from the app's config):
-{sites}
-
-Site matching rule (IMPORTANT): the "Other References" value in the document is
-usually one of the Known Sites above written slightly differently — different
-letters, spacing, punctuation, or with/without articles ("a"/"an"/"the"), or an
-extra word like a brand name ("Lodha Shital Baug" vs "sital baug"). When the
-value is the same place as one of the Known Sites, output the Known Site name
-EXACTLY as listed above instead of the document's spelling. Only output a name
-NOT on the list when it clearly matches no Known Site (e.g. a brand-new site).
-
-A trailing unit designator — one word followed by a number ("Tower 2",
-"Phase 3", "Unit 4") — is the same place as the site without it: "Kalpataru
-Elitus Tower 2" is "Kalpataru Elitus". The same goes for EVERY spelling of
-that designator: a standalone dashed pair ("T-B" = Tower B, "T-2" = Tower 2,
-"T-9/10" = Towers 9 & 10), a unit word with a letter ("Tower B", "Wing C",
-"Block A", "Phase 2A") and a unit word with a range ("Tower 9/10"):
-"Raymond Premium T-B", "Raymond Premium Tower B" and "Raymond Premium
-Tower 9/10" are all "Raymond Premium"; "Kalpataru Elitus Wing C" is
-"Kalpataru Elitus". When the value differs from a Known Site only by such a
-designator, output the Known Site name WITHOUT the designator (e.g. output
-"Kalpataru Elitus", not "Kalpataru Elitus Tower B" or "Kalpataru Elitus
-Tower 9/10"; output "Raymond Premium", never "Raymond Premium T-B"). If the
-"Other References" value alone is nothing but a designator ("Tower B",
-"Wing C", "T-9/10"), leave the Site cell EMPTY. Do NOT strip the designator
-from a site name that does not otherwise match a Known Site (a brand-new
-site keeps its full name)."""
-
-# Known-Clients section (same idea as Known Sites: the model resolves a client
-# written slightly differently to the existing catalog name so one place never
-# becomes many clients).
-_KNOWN_CLIENTS_SECTION = """
-
-Known Clients (the current client list from the app's config):
-{clients}
-
-Client matching rule (IMPORTANT): the Client (Buyer/Consignee) value in the
-document is usually one of the Known Clients above written slightly differently
-— different letters, spacing, punctuation, with/without articles
-("a"/"an"/"the"), numbers, or an extra word ("Larsen and Toubro" vs
-"Larsen & Toubro"). When the value is the same place as one of the Known
-Clients, output the Known Client name EXACTLY as listed above instead of the
-document's spelling. Only output a name NOT on the list when it clearly matches
-no Known Client (e.g. a brand-new client)."""
-
-
-def build_ocr_prompt(known_sites=None, known_clients=None) -> str:
-    """The OCR prompt, with the current known site/client names appended.
-
-    ``known_sites`` / ``known_clients`` are the lists of names already in the
-    config. When both are empty/None the bare :data:`OCR_PROMPT` is returned
-    so the CLI and the default code path are unchanged.
-    """
-    if not known_sites and not known_clients:
-        return OCR_PROMPT
-    parts = [OCR_PROMPT]
-    sites = [str(s).strip() for s in known_sites or [] if str(s).strip()]
-    if sites:
-        parts.append(_KNOWN_SITES_SECTION.format(
-            sites="\n".join(f"- {s}" for s in sites)))
-    clients = [str(c).strip() for c in known_clients or [] if str(c).strip()]
-    if clients:
-        parts.append(_KNOWN_CLIENTS_SECTION.format(
-            clients="\n".join(f"- {c}" for c in clients)))
-    if len(parts) == 1:
-        return OCR_PROMPT
-    return "".join(parts)
+# The catalog is deliberately NOT part of the prompt any more (see the note on
+# OCR_PROMPT): the model copies the printed value and the app resolves it. The
+# near-match rules that used to be spelled out to the model live in
+# config.find_near_name / ConfigManager.site_display_name, where they are
+# deterministic and testable.
 
 # Labels the model is asked to emit, mapped to our result keys. Matching is
 # case-insensitive and tolerant of extra whitespace/backticks around the row.
@@ -663,8 +618,6 @@ def extract_delivery_note(
     prompt: str = OCR_PROMPT,
     max_tokens: int = OCR_MAX_TOKENS,
     timeout: float = OCR_TIMEOUT,
-    known_sites: Optional[List[str]] = None,
-    known_clients: Optional[List[str]] = None,
     on_error: Optional[Callable[[str], None]] = None,
     reasoning_effort: Optional[str] = None,
     thinking: Optional[str] = None,
@@ -676,9 +629,9 @@ def extract_delivery_note(
     are excluded); the popup matches it against the material catalog to
     pre-select the materials the delivery contains.
 
-    When ``known_sites`` / ``known_clients`` are given (names already in the
-    config), the prompt is rebuilt with them so the model resolves near-same
-    site/client spellings to the existing names.
+    The model is asked to COPY the printed values (no catalog is sent to it —
+    see :data:`OCR_PROMPT`); resolving a site/client to the app's catalog is
+    the popup's job (config.find_near_name), which is deterministic.
 
     ``thinking`` is how hard the model may think before answering — one of
     :data:`OCR_THINKING_LEVELS`, default :data:`OCR_THINKING` ("off", the
@@ -698,9 +651,6 @@ def extract_delivery_note(
     Never raises: network/render/model errors are logged and return None so
     the popup can simply skip auto-fill (or offer a retry).
     """
-    if known_sites is not None or known_clients is not None:
-        prompt = build_ocr_prompt(known_sites, known_clients)
-
     # Rendering is timed separately: it happens BEFORE the request, so a slow
     # render used to be invisible in the "read in Xs" line (the number the
     # user sees) and made OCR look mysteriously slow.
@@ -803,6 +753,26 @@ def _thinking_level(value) -> str:
     if level in OCR_THINKING_LEVELS:
         return level
     return OCR_THINKING
+
+
+def retry_thinking_level(configured) -> str:
+    """The thinking level for a "↻ Retry OCR" read.
+
+    A retry is the user saying "that answer was wrong, look again" — so it
+    must NOT be the same request again (the old button re-ran an identical
+    call, which is why a retry so often produced the same wrong fields). With
+    automatic reads thinking-free (fast), a retry thinks: :data:`OCR_RETRY_THINKING`.
+
+    A config already asking for graded thinking keeps its own level (there is
+    nothing stronger to add), and the plain "default" level is kept too — it
+    already lets the model think.
+    """
+    level = _thinking_level(configured)
+    if level in ("off", "low"):
+        # "off" is the fast automatic level, so the retry adds the thinking;
+        # "low" is already the retry level.
+        return OCR_RETRY_THINKING
+    return level
 
 
 def _asks_for_no_thinking(plan: Dict[str, Any]) -> bool:
@@ -1036,8 +1006,6 @@ class OcrPool:
         model: str = OCR_MODEL,
         api_base: str = OCR_API_BASE,
         max_concurrent: int = MAX_CONCURRENT_OCR,
-        known_sites_provider: Optional[Callable[[], List[str]]] = None,
-        known_clients_provider: Optional[Callable[[], List[str]]] = None,
         reasoning_effort: Optional[str] = None,
         thinking: Optional[str] = None,
     ) -> None:
@@ -1048,13 +1016,10 @@ class OcrPool:
         # How hard the model may think per read (see OCR_THINKING). "off" is
         # the default because thinking is what made a read take 30s+; the
         # ladder in extract_delivery_note degrades gracefully if the gateway
-        # refuses it. `reasoning_effort` is the legacy spelling.
+        # refuses it. `reasoning_effort` is the legacy spelling. A single
+        # submission may override it (the popup's retry reads carefully — see
+        # retry_thinking_level).
         self._thinking = thinking if thinking is not None else reasoning_effort
-        # Called per file (just before the vision call) to fetch the current
-        # site/client catalog, so names added mid-batch are known to later
-        # reads.
-        self._known_sites_provider = known_sites_provider
-        self._known_clients_provider = known_clients_provider
         self._queue: "queue.Queue" = queue.Queue()
         self._lock = threading.Lock()
         self._results: Dict[str, Optional[Dict[str, Optional[str]]]] = {}
@@ -1134,7 +1099,8 @@ class OcrPool:
         with self._lock:
             return self._durations.get(self._key(file_path))
 
-    def retry(self, file_path, on_done: Optional[Callable] = None) -> bool:
+    def retry(self, file_path, on_done: Optional[Callable] = None,
+              thinking: Optional[str] = None) -> bool:
         """Forget any cached result/error for *file_path* and re-run OCR.
 
         Used by the popup's "↻ Retry OCR" button: the stale cache entry (a
@@ -1143,6 +1109,9 @@ class OcrPool:
         replaces it when done. Queueing semantics are identical to
         :meth:`submit`: an already-running file just gets another waiter.
         Returns True when a new call was queued.
+
+        *thinking* overrides the pool's level for THIS read only — the retry
+        is a deliberate second look and thinks (see retry_thinking_level).
         """
         if not self.available:
             if on_done is not None:
@@ -1163,16 +1132,20 @@ class OcrPool:
             if on_done is not None:
                 self._waiters.setdefault(key, []).append(on_done)
             self._submitted_at[key] = time.monotonic()
-            self._queue.put((Path(file_path), key))
+            self._queue.put((Path(file_path), key, thinking))
             self._ensure_worker()
             return True
 
-    def submit(self, file_path, on_done: Optional[Callable] = None) -> bool:
+    def submit(self, file_path, on_done: Optional[Callable] = None,
+               thinking: Optional[str] = None) -> bool:
         """Queue OCR for *file_path* (no-op when already queued or finished).
 
         If the result is already cached, *on_done* fires immediately on the
         calling thread. Otherwise it fires (once, from a worker thread) when
         the OCR call completes. Returns True when the file was newly queued.
+
+        *thinking* overrides the pool's level for this read only (see
+        :meth:`retry`); None means the pool's configured level.
         """
         if not self.available:
             if on_done is not None:
@@ -1197,7 +1170,7 @@ class OcrPool:
                 if on_done is not None:
                     self._waiters.setdefault(key, []).append(on_done)
                 self._submitted_at[key] = time.monotonic()
-                self._queue.put((Path(file_path), key))
+                self._queue.put((Path(file_path), key, thinking))
                 self._ensure_worker()
                 return True
         if done and on_done is not None:
@@ -1234,29 +1207,17 @@ class OcrPool:
             if item is self._STOP:
                 self._queue.task_done()
                 return
-            path, key = item
+            path, key, thinking = item
             try:
-                self._work(path, key)
+                self._work(path, key, thinking)
             except Exception as exc:
                 print(f"[ocr] worker error for {path}: {exc}")
             finally:
                 self._queue.task_done()
 
-    def _work(self, file_path: Path, key: str) -> None:
-        known_sites = None
-        if self._known_sites_provider is not None:
-            try:
-                known_sites = self._known_sites_provider()
-            except Exception as exc:
-                print(f"[ocr] known-sites fetch error: {exc}")
-                known_sites = None
-        known_clients = None
-        if self._known_clients_provider is not None:
-            try:
-                known_clients = self._known_clients_provider()
-            except Exception as exc:
-                print(f"[ocr] known-clients fetch error: {exc}")
-                known_clients = None
+    def _work(self, file_path: Path, key: str,
+              thinking: Optional[str] = None) -> None:
+        level = thinking if thinking is not None else self._thinking
         try:
             # How long this file sat in the queue before a worker picked it up.
             # With a batch larger than the concurrency ceiling this can be the
@@ -1271,9 +1232,8 @@ class OcrPool:
             started = time.monotonic()
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
-                api_base=self._api_base, known_sites=known_sites,
-                known_clients=known_clients, on_error=errors.append,
-                thinking=self._thinking,
+                api_base=self._api_base, on_error=errors.append,
+                thinking=level,
             )
             elapsed = time.monotonic() - started
         except Exception as exc:  # belt & braces: extract never raises

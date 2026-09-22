@@ -742,12 +742,6 @@ class FilePickerController:
                     # ocr.OCR_THINKING); "off" is the default, and the read
                     # degrades down a ladder if the gateway refuses the field.
                     thinking=self.config.ocr_thinking,
-                    # The current site + client catalog is sent with every read so the
-                    # AI resolves near-same spellings ("sital baug",
-                    # "Larsen and Toubro") to the existing names instead of
-                    # inventing duplicates.
-                    known_sites_provider=self.config.all_sites,
-                    known_clients_provider=self.config.all_clients,
                 )
                 if self._ocr_pool.available:
                     self._set_status(
