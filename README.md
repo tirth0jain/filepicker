@@ -127,8 +127,9 @@ supplier / buyer / site read from the document — no manual typing.
 
    `ocr_thinking` is the speed knob (`"off"` is the default and the fastest —
    see [Speed](#ocr-setup-deepseek-v41-flash) below; `"low"`/`"high"`/`"max"`
-   force graded thinking, `"default"` sends nothing). `enable_ocr` is a
-   **local-only** flag: it is never synced from the GitHub
+   force graded thinking, `"default"` sends nothing). It is **local-only**,
+   like `ocr_model` and `ocr_api_base`: never synced from GitHub, never pushed
+   back. `enable_ocr` is a **local-only** flag: it is never synced from the GitHub
    config and never pushed back, because OCR needs this machine's own key.
    The model/endpoint defaults above can be overridden per machine — a value
    that is only an *old default* of the app (e.g.
