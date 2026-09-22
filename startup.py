@@ -58,8 +58,16 @@ def _is_windows() -> bool:
     return winreg is not None
 
 
-def _startup_dir() -> Path:
-    appdata = os.environ.get("APPDATA", "")
+def _startup_dir() -> Optional[Path]:
+    """The user's Startup folder, or None when there is no user profile.
+
+    Never returns a relative path: with ``%APPDATA%`` unset, joining onto an
+    empty string would silently write ``FilePicker.lnk`` into the working
+    directory instead of the Startup folder.
+    """
+    appdata = os.environ.get("APPDATA", "").strip()
+    if not appdata:
+        return None
     return (
         Path(appdata)
         / "Microsoft"
@@ -188,7 +196,11 @@ def install_shortcut() -> bool:
     """Create the Startup-folder shortcut. Returns True on success."""
     if not _is_windows():
         return False
-    lnk = _startup_dir() / _SHORTCUT_NAME
+    folder = _startup_dir()
+    if folder is None:
+        print("[startup] no %APPDATA% — skipping the Startup shortcut")
+        return False
+    lnk = folder / _SHORTCUT_NAME
     target, args, workdir = _target()
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
@@ -212,7 +224,10 @@ def install_shortcut() -> bool:
 
 def remove_shortcut() -> bool:
     """Remove the Startup-folder shortcut (True when it is gone)."""
-    lnk = _startup_dir() / _SHORTCUT_NAME
+    folder = _startup_dir()
+    if folder is None:
+        return True
+    lnk = folder / _SHORTCUT_NAME
     try:
         if lnk.exists():
             lnk.unlink()
@@ -246,7 +261,10 @@ def _read_shortcut(lnk: Path) -> Optional[Tuple[str, str]]:
 
 def shortcut_target() -> Optional[str]:
     """The target of the Startup shortcut (None when there is no shortcut)."""
-    lnk = _startup_dir() / _SHORTCUT_NAME
+    folder = _startup_dir()
+    if folder is None:
+        return None
+    lnk = folder / _SHORTCUT_NAME
     try:
         if not lnk.exists():
             return None
@@ -300,8 +318,11 @@ def is_installed() -> bool:
     """True when either startup mechanism is present (even if stale)."""
     if run_key_command():
         return True
+    folder = _startup_dir()
+    if folder is None:
+        return False
     try:
-        return (_startup_dir() / _SHORTCUT_NAME).exists()
+        return (folder / _SHORTCUT_NAME).exists()
     except OSError:
         return False
 
