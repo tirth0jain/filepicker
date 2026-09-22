@@ -31,12 +31,29 @@ class TrayIcon:
     """Owns the pystray icon and forwards menu actions to callbacks."""
 
     def __init__(self, on_check_update, on_quit, on_force_sync=None,
-                 on_force_push=None) -> None:
+                 on_force_push=None, on_toggle_startup=None,
+                 startup_enabled=None) -> None:
         self._on_check_update = on_check_update
         self._on_quit = on_quit
         self._on_force_sync = on_force_sync
         self._on_force_push = on_force_push
+        self._on_toggle_startup = on_toggle_startup
+        self._startup_enabled = startup_enabled
         self._icon = None
+
+    def _startup_label(self, _item=None) -> str:
+        """Menu label that always shows the live auto-start state.
+
+        pystray re-evaluates a callable label every time the menu opens, so
+        the entry can never claim "On" while the Windows entry is missing.
+        """
+        enabled = False
+        if self._startup_enabled is not None:
+            try:
+                enabled = bool(self._startup_enabled())
+            except Exception:
+                enabled = False
+        return f"Auto-start at login: {'On' if enabled else 'Off'}"
 
     def start(self) -> None:
         try:
@@ -45,16 +62,18 @@ class TrayIcon:
         except ImportError:
             print("[filepicker] pystray not installed; tray icon disabled.")
             return
+        items = [
+            MenuItem("Check for updates", self._check_update),
+            MenuItem(self._startup_label, self._toggle_startup),
+            MenuItem("Force sync from repo (overwrite local)", self._force_sync),
+            MenuItem("Push local config to GitHub (replace remote)", self._force_push),
+            MenuItem("Quit", self._quit),
+        ]
         self._icon = pystray.Icon(
             "FilePicker",
             icon=_build_icon_image(),
             title="FilePicker",
-            menu=Menu(
-                MenuItem("Check for updates", self._check_update),
-                MenuItem("Force sync from repo (overwrite local)", self._force_sync),
-                MenuItem("Push local config to GitHub (replace remote)", self._force_push),
-                MenuItem("Quit", self._quit),
-            ),
+            menu=Menu(*items),
         )
         threading.Thread(
             target=self._icon.run, name="filepicker-tray", daemon=True
@@ -77,6 +96,10 @@ class TrayIcon:
     def _force_push(self, _icon, _item) -> None:
         if self._on_force_push is not None:
             self._on_force_push()
+
+    def _toggle_startup(self, _icon, _item) -> None:
+        if self._on_toggle_startup is not None:
+            self._on_toggle_startup()
 
     def _quit(self, _icon, _item) -> None:
         self._on_quit()

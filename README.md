@@ -121,11 +121,14 @@ supplier / buyer / site read from the document — no manual typing.
      "enable_ocr": true,
      "ocr_model": "deepseek-v4.1-flash",
      "ocr_api_base": "https://opencode.ai/zen/go/v1",
-     "ocr_reasoning_effort": "low"
+     "ocr_thinking": "off"
    }
    ```
 
-   `enable_ocr` is a **local-only** flag: it is never synced from the GitHub
+   `ocr_thinking` is the speed knob (`"off"` is the default and the fastest —
+   see [Speed](#ocr-setup-deepseek-v41-flash) below; `"low"`/`"high"`/`"max"`
+   force graded thinking, `"default"` sends nothing). `enable_ocr` is a
+   **local-only** flag: it is never synced from the GitHub
    config and never pushed back, because OCR needs this machine's own key.
    The model/endpoint defaults above can be overridden per machine — a value
    that is only an *old default* of the app (e.g.
@@ -148,18 +151,41 @@ before saving. The Serial Number is read from the **Delivery Note No.** field
 the file name (`RS-DC-26-27-6.pdf` → `6`). The key never lands in
 `config.json`, so it can't leak to the public repo.
 
-**Speed (`ocr_reasoning_effort`):** a read is dominated by how long the model
-*thinks* before answering, not by the upload or the prompt — the default
-effort spent thousands of reasoning tokens copying out a five-row table,
-which is where the 10+ seconds per file went. Every read now asks for
-`"reasoning_effort": "low"`, which cuts that to a fraction while keeping the
-extraction accurate. Set it to `medium`/`high` in `config.json` if a hard
-document ever comes back wrong, or to `""` to send nothing and let the model
-use its own default (slow). If the gateway ever rejects the field the app
-drops it automatically and keeps working. Each read logs its seconds
-(`[ocr] RS-DC-26-27-6.pdf: read in 3.4s, 412 tokens, reasoning_effort=low`)
-and the popup shows them too: `OCR: fields filled in 3.4s — check before
-saving`.
+**Speed (`ocr_thinking`):** a read is dominated by how long the model
+*thinks* before answering — not by the upload, the image or the prompt.
+Thinking mode is **on by default** on the DeepSeek API (effort `high`), and
+`reasoning_effort` only *grades* it down: a delivery note that needs five
+fields copied out was spending thousands of reasoning tokens on a chain of
+thought first, which is where the 10-60 seconds per file went (and why reads
+were so variable). OCR is transcription, not reasoning, so every read now asks
+for thinking to be **off**:
+
+1. `"reasoning_effort": "none"` — verified against the OpenCode Go gateway;
+2. `{"thinking": {"type": "disabled"}}` — DeepSeek's documented toggle;
+3. `"reasoning_effort": "low"` — graded thinking (the old default);
+4. nothing at all — the model's own default (the slow one).
+
+The app walks that ladder, and — crucially — does **not** trust a `200 OK`: if
+the reply still contains reasoning tokens, that rung is dropped for the rest of
+the run. So an endpoint that refuses a field costs one extra round trip, never
+a broken or a slow read. A thinking-free read that cannot produce the table is
+re-read **once with thinking on** instead of returning nothing, so speed never
+costs accuracy. Set `"ocr_thinking"` in `config.json` to `"low"`/`"high"`/
+`"max"` to force graded thinking, or to `"default"` to send no thinking field
+at all (the old `ocr_reasoning_effort` key still works). Each read logs every
+stage — total, render, image size, attempts, mode, tokens and how many of them
+were reasoning:
+
+```
+[ocr] RS-DC-26-27-6.pdf: read in 3.1s, render 0.2s, image 0.36MB, mode=reasoning_effort=none, 214 tokens
+```
+
+The popup shows the seconds too, counting up live while it waits
+(`OCR: reading document… 12s`) and reporting the total when the fields land
+(`OCR: fields filled in 3.1s — check before saving`). A read is also bounded:
+45s per attempt, 100s for the whole read including retries, `Retry-After` is
+honoured (capped at 15s), and an attempt that already took 20s+ is never
+retried — so a stalled gateway can no longer hold a popup for minutes.
 
 **Materials from the goods table:** the OCR transcribes the bold item
 headings of the "Description of Goods" table, and **each heading selects at
@@ -187,14 +213,34 @@ asking for your **watch folder** (where downloads land) and **root folder**
 (where files get organised), pre-filled with the defaults from `config.json`
 so you can just press **Save & Start** to accept them (or Browse to change).
 
-**Auto-start at Windows login:** the app **auto-registers itself on first run**
-— it creates a Startup-folder shortcut automatically (via PowerShell, no extra
-dependencies), so it launches at every login with no manual step. To control it:
+**Auto-start at Windows login:** the app **registers itself at every launch**
+and repairs a missing or stale entry — two independent mechanisms, because on
+a real machine one of them is always unavailable for some reason:
 
-- Disable auto-start: set `"auto_start": false` in `config.json`.
-- Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`.
+- the per-user **Run key**
+  (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) — written with
+  `winreg`, so it needs no PowerShell, no COM and no child process. This is the
+  primary one;
+- the classic **Startup-folder shortcut** (`shell:startup`), which you can see
+  and delete yourself.
+
+A mechanism only counts when it points at the *currently running* app and that
+file still exists, so an update that replaces the .exe can never leave a
+startup entry pointing at a dead path. If registration fails, the log says so
+explicitly (`[filepicker] auto-start FAILED …`) instead of failing silently.
+Control it from the tray (**Auto-start at login: On/Off**) or:
+
+- Disable auto-start: set `"auto_start": false` in `config.json` (or use the tray).
+- Manual control: `FilePicker.exe --install-startup` / `FilePicker.exe --remove-startup`
+  / `FilePicker.exe --check-startup`.
 - Manual alternative: press `Win+R`, type `shell:startup`, and drop a shortcut
   to `FilePicker.exe` in the folder that opens.
+
+At login the app also **waits for the watch folder** (usually a mapped network
+drive like `Z:\Unsorted`) to become available: Windows starts auto-start
+programs *before* it reconnects mapped drives, so it retries for up to 30
+minutes and starts watching the moment the drive appears — instead of crashing
+at startup and looking like "auto-start doesn't work".
 
 ## Uninstalling
 
@@ -320,10 +366,10 @@ filepicker/
 ├── filename.py      # filename formatting & collision resolution
 ├── organizer.py     # directory routing & file distribution
 ├── updater.py       # GitHub Releases auto-update (check + atomic swap)
-├── tray.py          # system tray icon + "Check for updates" / Quit menu
-├── startup.py       # Windows auto-start (Startup-folder shortcut)
+├── tray.py          # system tray icon + auto-start / updates / Quit menu
+├── startup.py       # Windows auto-start (Run key + Startup shortcut)
 ├── setup.py         # one-time first-run setup dialog (watch/root folders)
-├── version.py       # app version (0.1.2)
+├── version.py       # app version
 ├── build.py         # Nuitka build script
 ├── build.bat        # Windows build shortcut
 ├── config.json      # persistent configuration

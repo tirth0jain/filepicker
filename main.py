@@ -44,6 +44,19 @@ from watcher import DownloadWatcher
 # files are sent anyway.
 _OCR_FIRST_HEAD_START = 20.0
 
+# Auto-start registration attempts at launch (see _ensure_startup): at login
+# the user profile and the registry can still be settling, and a transient
+# failure there would silently mean "never starts with Windows" until the next
+# manual launch.
+_STARTUP_ATTEMPTS = 3
+_STARTUP_RETRY_DELAY = 5.0
+
+# How long to wait for the watch folder (a mapped network drive) to appear
+# before giving up: 180 x 10s = 30 minutes, which comfortably covers a drive
+# that reconnects a while after login (or after a VPN comes up).
+_WATCH_DIR_ATTEMPTS = 180
+_WATCH_DIR_RETRY_DELAY = 10.0
+
 
 def _setup_file_logging() -> None:
     """Mirror all prints to FilePicker.log next to the exe (visible even with --windows-console-mode=disable)."""
@@ -154,6 +167,7 @@ class FilePickerController:
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
         self._ocr_pool = None  # OcrPool — reads every download at once (see _OCR_MAX)
+        self._watcher = None     # DownloadWatcher, started once the folder exists
         self._file_order: list = []  # completed files in arrival order
         self._popups_shown = 0       # popups displayed so far (1-based next)
         self._ocr_submitted = 0      # how many of _file_order were OCR-submitted
@@ -267,6 +281,8 @@ class FilePickerController:
                 self._force_sync_now()
             elif cmd == "push_config":
                 self._push_config_now()
+            elif cmd == "toggle_startup":
+                self._toggle_auto_start()
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -720,10 +736,12 @@ class FilePickerController:
                     token=self.config.opencode_token,
                     model=self.config.ocr_model,
                     api_base=self.config.ocr_api_base,
-                    # How hard the model may think before answering: the
-                    # default effort is what made one read take 10+ seconds
-                    # (see ocr.OCR_REASONING_EFFORT). "" sends no effort field.
-                    reasoning_effort=self.config.ocr_reasoning_effort,
+                    # How hard the model may think before answering. Thinking
+                    # is ON by default on the DeepSeek API and its chain of
+                    # thought is what made a read take 30s+ (see
+                    # ocr.OCR_THINKING); "off" is the default, and the read
+                    # degrades down a ladder if the gateway refuses the field.
+                    thinking=self.config.ocr_thinking,
                     # The current site + client catalog is sent with every read so the
                     # AI resolves near-same spellings ("sital baug",
                     # "Larsen and Toubro") to the existing names instead of
@@ -739,7 +757,7 @@ class FilePickerController:
                     self._set_status("OCR enabled but no API key found")
                 print(f"[filepicker] OCR pool ready (model={self.config.ocr_model}, "
                       f"concurrent={_OCR_MAX}, "
-                      f"reasoning_effort={self.config.ocr_reasoning_effort or 'default'}, "
+                      f"thinking={self.config.ocr_thinking}, "
                       f"token={'yes' if self._ocr_pool.available else 'MISSING'})")
             except Exception as exc:
                 print(f"[filepicker] OCR pool init error: {exc}")
@@ -751,12 +769,8 @@ class FilePickerController:
                   "in config.json (set it to true to auto-fill delivery notes)")
 
         watch_dir = self.config.watch_directory
-        watcher = DownloadWatcher(
-            watch_directory=watch_dir,
-            on_completed=self._on_file_completed,
-        )
-        watcher.start()
-        self._set_status(f"Watching {watch_dir} for completed downloads…")
+        self._watcher = None
+        self._start_watcher_when_ready(watch_dir)
 
         self._root.after(100, self._poll_popups)
         self._schedule_update_checks()
@@ -768,13 +782,65 @@ class FilePickerController:
         try:
             self._root.mainloop()
         finally:
-            watcher.stop()
+            watcher = self._watcher
+            if watcher is not None:
+                watcher.stop()
             self._stop_tray()
             if self._ocr_pool is not None:
                 try:
                     self._ocr_pool.shutdown()
                 except Exception:
                     pass
+
+    def _start_watcher_when_ready(self, watch_dir: str) -> None:
+        """Start the folder watcher as soon as the watch folder exists.
+
+        The watch folder is normally a mapped network drive (``Z:\\Unsorted``)
+        and Windows launches auto-start programs BEFORE it reconnects mapped
+        drives. The old code called ``mkdir()`` on that path during startup, so
+        at login it raised FileNotFoundError, the controller died on the spot
+        and the app never came up — which looks exactly like "auto-start does
+        not work", while starting it by hand (drive already connected) worked
+        perfectly. The watcher is therefore started from a background thread
+        that waits for the folder, so the app always comes up and starts
+        watching the moment the drive appears.
+        """
+        def _worker() -> None:
+            logged = 0
+            for attempt in range(1, _WATCH_DIR_ATTEMPTS + 1):
+                try:
+                    Path(watch_dir).mkdir(parents=True, exist_ok=True)
+                    watcher = DownloadWatcher(
+                        watch_directory=watch_dir,
+                        on_completed=self._on_file_completed,
+                    )
+                    watcher.start()
+                except Exception as exc:
+                    # Only the first few failures and then an occasional
+                    # reminder: a drive that is slow to mount must not fill
+                    # the log with the same line every 10 seconds.
+                    if logged < 3 or attempt % 30 == 0:
+                        print(f"[filepicker] watch folder {watch_dir} is not "
+                              f"available yet ({exc}) — retrying "
+                              f"({attempt}/{_WATCH_DIR_ATTEMPTS})")
+                        logged += 1
+                    time.sleep(_WATCH_DIR_RETRY_DELAY)
+                    continue
+                self._watcher = watcher
+                self._set_status(
+                    f"Watching {watch_dir} for completed downloads…")
+                print(f"[filepicker] watching {watch_dir} for completed "
+                      f"downloads (attempt {attempt})")
+                return
+            print(f"[filepicker] gave up waiting for {watch_dir} after "
+                  f"{_WATCH_DIR_ATTEMPTS * _WATCH_DIR_RETRY_DELAY / 60:.0f} "
+                  f"minutes — check that the drive is connected, then restart "
+                  f"FilePicker")
+            self._set_status(f"Watch folder {watch_dir} is unavailable — "
+                             f"restart FilePicker once the drive is connected")
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="filepicker-watch-start").start()
 
     # ------------------------------------------------------------------
     # Tray icon + manual update
@@ -787,10 +853,19 @@ class FilePickerController:
                 on_quit=self._tray_quit,
                 on_force_sync=self._tray_force_sync,
                 on_force_push=self._tray_force_push,
+                on_toggle_startup=self._tray_toggle_startup,
+                startup_enabled=self._auto_start_enabled,
             )
             self._tray.start()
         except Exception as exc:
             print(f"[filepicker] tray start error: {exc}")
+
+    def _auto_start_enabled(self) -> bool:
+        """Whether auto-start is switched on (tray menu label; never raises)."""
+        try:
+            return bool(self.config.auto_start)
+        except Exception:
+            return False
 
     def _stop_tray(self) -> None:
         if self._tray is not None:
@@ -810,6 +885,34 @@ class FilePickerController:
     def _tray_force_push(self) -> None:
         # Called from the pystray thread; marshal onto the Tk main thread.
         self._ui_commands.put("push_config")
+
+    def _tray_toggle_startup(self) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put("toggle_startup")
+
+    def _toggle_auto_start(self) -> None:
+        """Tray → turn "launch at Windows login" on or off.
+
+        Writes the choice to config.json and immediately installs/removes the
+        Windows entries, so the tray label (which reads the live state) is
+        never out of step with reality.
+        """
+        try:
+            import startup
+        except Exception as exc:
+            self._set_status(f"Auto-start unavailable: {exc}")
+            return
+        wanted = not self.config.auto_start
+        self.config.set_auto_start(wanted)
+        if wanted:
+            ok = startup.install() and startup.verify()
+            self._set_status(
+                "Auto-start at login: ON" if ok
+                else "Auto-start could NOT be enabled — see the log")
+        else:
+            startup.remove()
+            self._set_status("Auto-start at login: OFF")
+        print(f"[filepicker] auto-start toggled to {wanted} ({startup.state()})")
 
     def _tray_quit(self) -> None:
         self._ui_commands.put("quit")
@@ -1021,25 +1124,37 @@ def main() -> None:
             print(f"[filepicker] first-run setup error: {exc}")
 
     # Verify auto-start will actually work at next login (unless disabled in
-    # config.json): the Startup shortcut must exist, point at the currently
-    # running app, and its target must still exist — otherwise reinstall it.
-    # Runs in a background thread so it never delays startup.
+    # config.json): the per-user Run key (primary) and/or the Startup-folder
+    # shortcut must exist, point at the currently running app, and their
+    # target must still exist — otherwise reinstall. Retried a few times
+    # because at login the user profile is still settling. Runs in a
+    # background thread so it never delays startup, and logs the state before
+    # AND after so "it does not start with Windows" is answerable from
+    # FilePicker.log alone.
     if config.auto_start:
         try:
-            from startup import ensure, verify
+            import startup
 
             def _ensure_startup() -> None:
-                if verify():
-                    print("[filepicker] Auto-start verified.")
-                    return
-                print("[filepicker] Auto-start shortcut missing or stale; reinstalling…")
-                ok = ensure()
-                print("[filepicker] Auto-start repaired." if ok
-                      else "[filepicker] Auto-start repair FAILED.")
+                print(f"[filepicker] auto-start check: {startup.state()}")
+                for attempt in range(1, _STARTUP_ATTEMPTS + 1):
+                    if startup.ensure():
+                        print("[filepicker] auto-start OK — FilePicker will "
+                              "launch at Windows login")
+                        return
+                    if attempt < _STARTUP_ATTEMPTS:
+                        time.sleep(_STARTUP_RETRY_DELAY)
+                print("[filepicker] auto-start FAILED — FilePicker will NOT "
+                      "launch at login. Use the tray menu (Auto-start at "
+                      "login) or run: FilePicker.exe --install-startup")
 
-            threading.Thread(target=_ensure_startup, daemon=True).start()
+            threading.Thread(target=_ensure_startup, daemon=True,
+                             name="filepicker-startup").start()
         except Exception as exc:
             print(f"[filepicker] auto-start setup failed: {exc}")
+    else:
+        print("[filepicker] auto-start is switched off in config.json "
+              '("auto_start": false)')
 
     # Config changes made from a popup (new sites/clients/...) are pushed to
     # GitHub ONLY after a file is actually saved (see _organize) or via the

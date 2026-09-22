@@ -22,7 +22,7 @@ from ocr import (
     LEGACY_OCR_MODELS,
     OCR_API_BASE,
     OCR_MODEL,
-    OCR_REASONING_EFFORT,
+    OCR_THINKING,
 )
 
 # Remote live config — single source of truth for clients/sites.
@@ -124,13 +124,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # whose config.json pinned the previous name.
     "ocr_model": OCR_MODEL,
     "ocr_api_base": OCR_API_BASE,
-    # How hard the OCR model may think before answering (low/medium/high/max,
-    # or "" to send nothing). "low" is the default because the reasoning — not
-    # the image or the prompt — is what made a single read take 10+ seconds;
-    # the gateway answers 400 for a value it does not know and the app then
-    # falls back to the model's own effort automatically. LOCAL-ONLY, like the
-    # model and the endpoint.
-    "ocr_reasoning_effort": OCR_REASONING_EFFORT,
+    # How hard the OCR model may think before answering: "off" (default, by
+    # far the fastest), "low"/"high"/"max" for graded thinking, or "default"
+    # to send no thinking field at all and take the model's own default
+    # (which is "high" — the slow one). Thinking mode is ON by default on the
+    # DeepSeek API, and that chain of thought — not the image or the prompt —
+    # is what made a single read take 30s+; OCR only copies fields off a
+    # document, so it does not need to reason. The app walks a ladder
+    # (reasoning_effort "none" -> thinking disabled -> graded effort -> model
+    # default) and remembers which rung the gateway honours, so an endpoint
+    # that refuses a field costs one extra round trip, never a broken read.
+    # LOCAL-ONLY, like the model and the endpoint.
+    "ocr_thinking": OCR_THINKING,
 }
 
 
@@ -1552,20 +1557,36 @@ class ConfigManager:
         return str(self.load().get("ocr_api_base", OCR_API_BASE))
 
     @property
-    def ocr_reasoning_effort(self) -> str:
-        """How hard the OCR model may think before answering.
+    def ocr_thinking(self) -> str:
+        """How hard the OCR model may think before answering (the fast knob).
 
-        One of ``low``/``medium``/``high``/``max`` (see
-        :data:`ocr.OCR_REASONING_EFFORT`) — or ``""`` to send no effort field
-        at all and let the model use its own default. This is the main
-        latency knob for a read: the default effort spends thousands of
-        reasoning tokens on a delivery note that only needs a small table
-        copied out. LOCAL-ONLY, like ``ocr_model``: never synced or pushed.
+        One of :data:`ocr.OCR_THINKING_LEVELS`: ``"off"`` (the default — no
+        chain of thought at all, which is what makes a read take ~3s instead
+        of 10-60s), ``"low"``/``"high"``/``"max"`` for graded thinking, or
+        ``"default"`` to send nothing and accept the model's own default
+        (``high``, the slow one). LOCAL-ONLY, like ``ocr_model``: never synced
+        or pushed.
+
+        The legacy ``ocr_reasoning_effort`` key is still honoured when it asks
+        for graded thinking explicitly (``high``/``max``/``medium``); its old
+        default ``"low"`` now resolves to the new default, because "low" was
+        what 0.6.33 shipped rather than a user choice — and it did not make
+        reads fast, since ``low`` still thinks (DeepSeek maps ``medium`` up to
+        ``high`` and only ``none`` stops the chain of thought).
         """
-        value = self.load().get("ocr_reasoning_effort", OCR_REASONING_EFFORT)
-        if value is None:
-            return OCR_REASONING_EFFORT
-        return str(value).strip()
+        data = self.load()
+        value = data.get("ocr_thinking")
+        if value is not None and str(value).strip():
+            return str(value).strip().lower()
+        legacy = str(data.get("ocr_reasoning_effort") or "").strip().lower()
+        if legacy in ("high", "max", "medium", "xhigh"):
+            return "high" if legacy in ("medium", "xhigh") else legacy
+        return OCR_THINKING
+
+    @property
+    def ocr_reasoning_effort(self) -> str:
+        """Deprecated spelling of :attr:`ocr_thinking` (kept for old callers)."""
+        return self.ocr_thinking
 
     @property
     def opencode_token(self) -> Optional[str]:
@@ -1613,6 +1634,16 @@ class ConfigManager:
     def set_root_directory(self, value: str) -> None:
         with self._lock:
             self.load()["root_directory"] = value
+            self.save()
+
+    def set_auto_start(self, value: bool) -> None:
+        """Turn "launch at Windows login" on/off (tray menu) and persist it.
+
+        Written to the local config.json so the choice survives restarts; the
+        startup helper installs/removes the actual Windows entries.
+        """
+        with self._lock:
+            self.load()["auto_start"] = bool(value)
             self.save()
 
     def add_company(self, company: str) -> None:

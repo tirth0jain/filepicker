@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -2642,12 +2643,13 @@ class FilePickerPopup:
             return False
 
     def _ocr_reading_text(self) -> str:
-        """The "reading document…" line, with live batch counters.
+        """The "reading document…" line, with live counters and elapsed time.
 
         Every download is read simultaneously (the pool is submitted for the
         whole batch the moment the files land), so the counters tell the user
         that the OTHER files are being read too — this line is not a stuck
-        "processing" for this one file.
+        "processing" for this one file. The seconds tick up as well, so a slow
+        read is visibly progressing instead of looking frozen.
         """
         pool = getattr(self, "ocr_pool", None)
         running = queued = 0
@@ -2657,16 +2659,27 @@ class FilePickerPopup:
                 running, queued = progress()
             except Exception:
                 running = queued = 0
+        waited = ""
+        started = getattr(self, "_ocr_wait_started", None)
+        if started is not None:
+            try:
+                secs = time.monotonic() - started
+            except Exception:
+                secs = 0.0
+            if secs >= 2.0:
+                waited = f" {secs:.0f}s"
         if queued:
-            return f"OCR: reading document… ({running} reading, {queued} queued)"
+            return (f"OCR: reading document…{waited} "
+                    f"({running} reading, {queued} queued)")
         if running > 1:
-            return f"OCR: reading document… ({running} files read together)"
-        return "OCR: reading document…"
+            return f"OCR: reading document…{waited} ({running} files read together)"
+        return f"OCR: reading document…{waited}"
 
     def _start_ocr_progress(self) -> None:
         """Refresh the status line every :data:`_OCR_PROGRESS_MS` while reading."""
         self._stop_ocr_progress()
         self._ocr_poll_done = False
+        self._ocr_wait_started = time.monotonic()
         try:
             self._ocr_progress_after = self.window.after(
                 _OCR_PROGRESS_MS, self._tick_ocr_progress)
