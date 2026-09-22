@@ -161,15 +161,21 @@ thought first, which is where the 10-60 seconds per file went (and why reads
 were so variable). OCR is transcription, not reasoning, so every read now asks
 for thinking to be **off**:
 
-1. `"reasoning_effort": "none"` — verified against the OpenCode Go gateway;
-2. `{"thinking": {"type": "disabled"}}` — DeepSeek's documented toggle;
+1. `"reasoning_effort": "none"` — verified live against the OpenCode Go
+   gateway by another client ([opencode#27555](https://github.com/anomalyco/opencode/issues/27555));
+2. `{"thinking": {"type": "disabled"}}` — DeepSeek's documented OpenAI-format
+   toggle ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/));
 3. `"reasoning_effort": "low"` — graded thinking (the old default);
 4. nothing at all — the model's own default (the slow one).
 
 The app walks that ladder, and — crucially — does **not** trust a `200 OK`: if
 the reply still contains reasoning tokens, that rung is dropped for the rest of
-the run. So an endpoint that refuses a field costs one extra round trip, never
-a broken or a slow read. A thinking-free read that cannot produce the table is
+the run. Any failure of a rung that carries a thinking field (4xx, 5xx, even a
+connection error) drops it and tries the next one, so the ladder always ends
+with exactly the request the app sent before thinking control existed: an
+endpoint that refuses a field costs one extra round trip, never a broken or a
+slow read. Which rung a read ended up using is in its log line
+(`mode=…`). A thinking-free read that cannot produce the table is
 re-read **once with thinking on** instead of returning nothing, so speed never
 costs accuracy. Set `"ocr_thinking"` in `config.json` to `"low"`/`"high"`/
 `"max"` to force graded thinking, or to `"default"` to send no thinking field
