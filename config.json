@@ -264,13 +264,6 @@
     "WADHWA GROUP HOLDING PVT LTD": [],
     "WADHWA RESIDENCY PVT LTD": [],
     "WEST PIONEES PROPERTIES (INDIA) PVT LTD": [],
-    "Larsen & Toubro Limited": [
-      "Navi Mumbai International Airport",
-      "Nmial Dapoli",
-      "Elixir Reserve",
-      "L & T Powai",
-      "L & T (Retail)"
-    ],
     "DLF Limited": [
       "DLF - GOA",
       "DLF Dahlias"
@@ -361,7 +354,14 @@
     ],
     "ALUMAYER INDIA PVT LTD": [],
     "LODHA -LODHA DEVELOPERS LIMITED": [],
-    "LODHA- world One Co operative Housing Society Limited": []
+    "LODHA- world One Co operative Housing Society Limited": [],
+    "Larsen and Toubro Limited - Realty Division": [
+      "Navi Mumbai International Airport",
+      "Nmial Dapoli",
+      "Elixir Reserve",
+      "L & T Powai",
+      "L & T (Retail)"
+    ]
   },
   "client_aliases": {
     "Alder Residency Pvt Ltd": "KALPATARU",
@@ -371,7 +371,8 @@
     "LODHA -LODHA DEVELOPERS LIMITED": "Cowtown Infotech Services Limited",
     "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited",
     "ALUMAYER INDIA PVT LTD": "Cowtown Infotech Services Limited",
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited"
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited",
+    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -391,6 +392,7 @@
   "removed_clients": [
     "Alder Residency Pvt Ltd",
     "LODHA",
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD"
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
+    "Larsen & Toubro Limited"
   ]
 }
