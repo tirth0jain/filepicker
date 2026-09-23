@@ -63,7 +63,6 @@
     "DECOR HOME INDIA PVT LTD": [],
     "Depa India Private Limited": [],
     "DHRUVA WOOLLEN MILLS PVT LTD": [],
-    "DLF LTD": [],
     "DREAMAX DEVELOPERS PRIVATE LIMITED": [],
     "DUVILLE ESTATES PVT LTD": [],
     "ESKAY CONSTRUCTION": [],
@@ -119,9 +118,6 @@
     "KUMAR VIBE PROPERTIES PRIVATE LIMITED": [],
     "KYTA PRODUCTION PVT LTD": [],
     "LARKINS REALTORS": [],
-    "LARSEN & TOUBRO LTD": [
-      "Elixir Reserve"
-    ],
     "LODHA-BRICKMART CONSTRUCTIONS and DEVELOPERS PVT LTD": [],
     "LODHA-G Corp Homes Pvt. Ltd-banglore": [],
     "LODHA-KOTHARI AUTOPARTS MANUFACTURERS PVT LTD": [],
@@ -362,9 +358,6 @@
     "SWAYAM REALTORS AND TRADERS LLP": [
       "Monte South -TB"
     ],
-    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": [
-      "Monte South"
-    ],
     "Larsen & Toubro Limited": [
       "Navi Mumbai International Airport",
       "Nmial Dapoli",
@@ -382,9 +375,10 @@
     "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited",
     "ALUMAYER INDIA PVT LTD": "Cowtown Infotech Services Limited",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited",
-    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division",
     "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": "SWAYAM REALTORS AND TRADERS LLP",
-    "Larsen and Toubro Limited - Realty Division": "Larsen & Toubro Limited"
+    "Larsen and Toubro Limited - Realty Division": "Larsen & Toubro Limited",
+    "DLF LTD": "DLF Limited",
+    "LARSEN & TOUBRO LTD": "Larsen & Toubro Limited"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -406,6 +400,9 @@
     "Alder Residency Pvt Ltd",
     "LODHA",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
-    "Larsen and Toubro Limited - Realty Division"
+    "Larsen and Toubro Limited - Realty Division",
+    "DLF LTD",
+    "LARSEN & TOUBRO LTD",
+    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH"
   ]
 }
