@@ -65,16 +65,31 @@ _WATCH_DIR_RETRY_DELAY = 10.0
 
 
 def _setup_file_logging() -> None:
-    """Mirror all prints to FilePicker.log next to the exe (visible even with --windows-console-mode=disable)."""
+    """Mirror all prints to FilePicker.log next to the exe (visible even with --windows-console-mode=disable).
+
+    On a SHARED install (everybody runs the exe from the server folder) the log
+    goes to this person's own ``%LOCALAPPDATA%\\FilePicker`` instead: one log
+    file on the share would interleave every machine's lines, and writing into
+    the shared folder is one more thing that can fail on a read-only share.
+    """
     try:
-        if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)) or Path(sys.executable).name.lower() == "filepicker.exe":
-            log_path = Path(sys.executable).parent / "FilePicker.log"
+        from localsettings import app_directory, install_is_shared, log_path
+
+        app_dir = app_directory()
+        shared = install_is_shared(app_dir)
+        if shared:
+            log_file = log_path()
+        elif (getattr(sys, "frozen", False)
+                or bool(getattr(sys, "nuitka_standalone", False))
+                or Path(sys.executable).name.lower() == "filepicker.exe"):
+            log_file = Path(sys.executable).parent / "FilePicker.log"
         else:
-            log_path = Path(__file__).resolve().parent / "FilePicker.log"
+            log_file = Path(__file__).resolve().parent / "FilePicker.log"
         import logging
 
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
-            filename=str(log_path),
+            filename=str(log_file),
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
             filemode="a",
@@ -93,7 +108,8 @@ def _setup_file_logging() -> None:
 
         sys.stdout = _Writer(logging.INFO)  # type: ignore
         sys.stderr = _Writer(logging.ERROR)  # type: ignore
-        print(f"[filepicker] logging to {log_path} v{VERSION} frozen={getattr(sys,'frozen',False)} pid={os.getpid()}")
+        print(f"[filepicker] logging to {log_file} v{VERSION} "
+              f"shared={shared} frozen={getattr(sys,'frozen',False)} pid={os.getpid()}")
     except Exception as exc:
         try:
             print(f"[filepicker] log setup failed: {exc}")
@@ -153,6 +169,19 @@ def show_update_notice(root, notice: str) -> None:
     win.focus_force()
 
 
+def _config_is_shared(config) -> bool:
+    """True when *config* says this copy runs from a shared server folder.
+
+    Never raises: the update guards call it from paths that are also exercised
+    with a minimal controller/config double, and "not shared" is the safe answer
+    there (it keeps the pre-existing single-machine behaviour).
+    """
+    try:
+        return bool(config.shared_install)
+    except Exception:
+        return False
+
+
 class FilePickerController:
     """Owns the hidden root window, the watcher and the popup flow."""
 
@@ -180,6 +209,17 @@ class FilePickerController:
         self._ocr_lock = threading.Lock()  # guards _ocr_submitted (watcher + UI threads)
         self._ocr_released = False   # True once the rest of the batch may be sent
         self._ocr_head_timer = None  # safety valve for a slow first read
+        # --- Shared install (everybody runs this exe from one server folder) --
+        # The folder THIS copy watches (per person), the registry that says what
+        # colleagues watch (so a file that landed in a colleague's folder never
+        # pops up here), and a generation counter so switching the folder from
+        # the tray cannot leave the previous watcher thread running.
+        from localsettings import UserRegistry
+        self._registry = UserRegistry()
+        self._watch_dir = self.config.watch_directory
+        self._watch_generation = 0
+        self._foreign_logged: set = set()  # owners already reported (log once)
+        self._same_folder_warned: set = set()
 
     # ------------------------------------------------------------------
     def _build_root(self) -> None:
@@ -262,6 +302,8 @@ class FilePickerController:
 
     def _on_file_completed(self, path: Path) -> None:
         """Called from the watcher's worker thread when a file settles."""
+        if self._belongs_to_a_colleague(path):
+            return
         self._popup_queue.put(path)
         self._file_order.append(Path(path))
         # OCR starts the moment the file lands: the FIRST file — the one whose
@@ -272,6 +314,39 @@ class FilePickerController:
             self._submit_ocr_all()
         except Exception as exc:
             print(f"[filepicker] background OCR submit error: {exc}")
+
+    def _belongs_to_a_colleague(self, path: Path) -> bool:
+        """True when *path* landed inside a colleague's own watch folder.
+
+        On a shared install every running copy publishes the folder it watches
+        (localsettings.UserRegistry), so a copy that watches a WIDER folder —
+        the shared default, a parent folder — can tell that a file inside a
+        colleague's narrower folder is theirs. Their popup opens; this one does
+        not, which is what makes "the popup only opens on the person who dropped
+        the file" hold even before everybody has set their own folder.
+
+        Always False on a normal single-machine install (no registry, no
+        colleagues, nothing to guard against).
+        """
+        if not _config_is_shared(getattr(self, "config", None)):
+            return False
+        try:
+            from localsettings import foreign_owner
+            owner = foreign_owner(path, self._watch_dir, self._registry.entries())
+        except Exception as exc:
+            print(f"[filepicker] watch-owner check failed: {exc}")
+            return False
+        if owner is None:
+            return False
+        key = str(owner.get("_key") or owner.get("watch_directory"))
+        if key not in self._foreign_logged:
+            self._foreign_logged.add(key)
+            who = owner.get("user") or "a colleague"
+            where = owner.get("machine") or "another PC"
+            print(f"[filepicker] ignoring {path.name}: it landed in {who}'s "
+                  f"watch folder on {where} ({owner.get('watch_directory')}) — "
+                  f"their popup will handle it")
+        return True
 
     def _poll_popups(self) -> None:
         """Main-thread polling loop that shows one popup at a time."""
@@ -289,6 +364,8 @@ class FilePickerController:
                 self._push_config_now()
             elif cmd == "toggle_startup":
                 self._toggle_auto_start()
+            elif cmd == "change_watch":
+                self._change_watch_folder()
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -640,6 +717,13 @@ class FilePickerController:
         """Perform the actual swap + relaunch after the user confirms."""
         self._update_dialog_open = False
         self._pending_update = None
+        if _config_is_shared(getattr(self, "config", None)):
+            # Belt and braces: nothing may replace the exe everybody runs from
+            # the server folder (see _schedule_update_checks / _check_update_now).
+            print("[filepicker] refusing to self-update a shared install — "
+                  "replace the server copy instead")
+            self._set_status("Shared install — update the server copy")
+            return
         try:
             from updater import install_update
             print(f"[filepicker] idle; installing update {update['version']}…")
@@ -807,10 +891,23 @@ class FilePickerController:
         perfectly. The watcher is therefore started from a background thread
         that waits for the folder, so the app always comes up and starts
         watching the moment the drive appears.
+
+        On a shared install the folder is also published to the colleague
+        registry (and the current one retired) BEFORE the watcher starts, so the
+        ownership guard is in place before the first file can arrive. The
+        generation counter makes a folder switch from the tray safe: a worker
+        that was waiting for the old folder stops instead of starting a second
+        watcher.
         """
+        self._watch_dir = str(watch_dir)
+        generation = self._watch_generation
+        self._publish_watch_folder(watch_dir)
+
         def _worker() -> None:
             logged = 0
             for attempt in range(1, _WATCH_DIR_ATTEMPTS + 1):
+                if generation != self._watch_generation:
+                    return  # the folder was changed from the tray meanwhile
                 try:
                     Path(watch_dir).mkdir(parents=True, exist_ok=True)
                     watcher = DownloadWatcher(
@@ -834,6 +931,14 @@ class FilePickerController:
                         logged += 1
                     time.sleep(_WATCH_DIR_RETRY_DELAY)
                     continue
+                if generation != self._watch_generation:
+                    # Superseded while the folder was being mounted: drop this
+                    # watcher instead of leaving two of them running.
+                    try:
+                        watcher.stop()
+                    except Exception:
+                        pass
+                    return
                 self._watcher = watcher
                 self._set_status(
                     f"Watching {watch_dir} for completed downloads…")
@@ -851,6 +956,83 @@ class FilePickerController:
                          name="filepicker-watch-start").start()
 
     # ------------------------------------------------------------------
+    # Per-person watch folder (shared install)
+    # ------------------------------------------------------------------
+    def _publish_watch_folder(self, watch_dir: str) -> None:
+        """Tell colleagues which folder this copy watches (shared install only).
+
+        Also warns (once per colleague) when somebody else watches exactly the
+        same folder: two copies watching one folder means both pop up for every
+        file, which is precisely what a shared install is meant to avoid.
+        """
+        if not _config_is_shared(getattr(self, "config", None)):
+            return
+        try:
+            self._registry.publish(watch_dir, self.config.root_directory, VERSION)
+            entries = self._registry.entries()
+            from localsettings import same_folder_users
+            for entry in same_folder_users(watch_dir, entries):
+                key = str(entry.get("_key") or entry.get("watch_directory"))
+                if key in self._same_folder_warned:
+                    continue
+                self._same_folder_warned.add(key)
+                who = entry.get("user") or "a colleague"
+                where = entry.get("machine") or "another PC"
+                print(f"[filepicker] WARNING: {who} on {where} watches the SAME "
+                      f"folder ({watch_dir}) — you will both get a popup for "
+                      f"every file there. Use the tray's 'Change watch folder…' "
+                      f"to give each person their own folder.")
+                self._set_status(
+                    f"Note: {who} also watches {watch_dir} — set your own "
+                    f"folder from the tray")
+        except Exception as exc:
+            print(f"[filepicker] could not publish this watch folder: {exc}")
+
+    def _restart_watcher(self, watch_dir: str) -> None:
+        """Point the watcher at a different folder (tray → Change watch folder)."""
+        self._watch_generation += 1
+        watcher = self._watcher
+        self._watcher = None
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except Exception as exc:
+                print(f"[filepicker] could not stop the old watcher: {exc}")
+        print(f"[filepicker] watch folder changed to {watch_dir}")
+        self._start_watcher_when_ready(watch_dir)
+
+    def _change_watch_folder(self) -> None:
+        """Tray → "Change watch folder…" (per person on a shared install).
+
+        The chosen folder is remembered for this Windows account only, so
+        colleagues running the same exe from the same server folder keep theirs.
+        """
+        try:
+            from setup import choose_watch_folder
+        except Exception as exc:
+            self._set_status(f"Watch-folder dialog unavailable: {exc}")
+            return
+        current = self.config.watch_directory
+        chosen = choose_watch_folder(
+            initial=current,
+            heading="Where do YOUR files land?",
+            note=("Pick the folder this PC's scanned or downloaded files land in.\n"
+                  "The popup will then open on this PC only — colleagues running "
+                  "FilePicker from the same folder keep their own."),
+            button="Save & watch this folder",
+        )
+        if not chosen or chosen == current:
+            return
+        self.config.set_watch_directory(chosen)
+        self._restart_watcher(chosen)
+        self._set_status(f"Watching {chosen} from now on")
+
+    def _watch_label(self) -> str:
+        """Tray label showing the folder this copy watches (live)."""
+        folder = self._watch_dir or self.config.watch_directory or "not set"
+        return f"Watching: {folder}"
+
+    # ------------------------------------------------------------------
     # Tray icon + manual update
     # ------------------------------------------------------------------
     def _start_tray(self) -> None:
@@ -862,7 +1044,10 @@ class FilePickerController:
                 on_force_sync=self._tray_force_sync,
                 on_force_push=self._tray_force_push,
                 on_toggle_startup=self._tray_toggle_startup,
+                on_change_watch=self._tray_change_watch,
                 startup_enabled=self._auto_start_enabled,
+                watch_label=self._watch_label,
+                shared_install=_config_is_shared(getattr(self, "config", None)),
             )
             self._tray.start()
         except Exception as exc:
@@ -897,6 +1082,10 @@ class FilePickerController:
     def _tray_toggle_startup(self) -> None:
         # Called from the pystray thread; marshal onto the Tk main thread.
         self._ui_commands.put("toggle_startup")
+
+    def _tray_change_watch(self) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put("change_watch")
 
     def _toggle_auto_start(self) -> None:
         """Tray → turn "launch at Windows login" on or off.
@@ -1015,12 +1204,25 @@ class FilePickerController:
 
         A manual check always tries immediately: it clears any install-failure
         backoff for the version it finds, so the user is never told to wait.
+        On a SHARED install it only *reports*: replacing the exe everybody runs
+        from the server folder is the admin's job, done when nobody is running
+        it — never a self-update in the middle of somebody's working day.
         """
         try:
             from updater import check_for_update, download_update
             update = check_for_update(strict=False)
             if not update:
                 self._set_status("Already up to date.")
+                return
+            if _config_is_shared(getattr(self, "config", None)):
+                self._set_status(
+                    f"Update {update['version']} available — this is a shared "
+                    f"install: update the server copy")
+                print(f"[filepicker] shared install: update {update['version']} "
+                      f"available but NOT installed here — replace the files in "
+                      f"{self.config.path.parent} when nobody is running "
+                      f"FilePicker")
+                self._show_shared_update_notice(update)
                 return
             self._update_retries.pop(update["version"], None)
             staged = download_update(update)
@@ -1033,6 +1235,28 @@ class FilePickerController:
         except Exception as exc:
             print(f"[filepicker] manual update error: {exc}")
 
+    def _show_shared_update_notice(self, update: dict) -> None:
+        """Tell the user (once per click) that the server copy needs updating."""
+        def show() -> None:
+            try:
+                import tkinter.messagebox as mb
+                mb.showinfo(
+                    "FilePicker — Shared install",
+                    f"Version {update['version']} is available.\n\n"
+                    "This copy runs from a shared folder, so it will NOT update "
+                    "itself (other people are using the same files).\n\n"
+                    "Ask whoever looks after the server folder to replace the "
+                    "FilePicker files there — best when nobody is running it.",
+                    parent=self._root,
+                )
+            except Exception:
+                pass
+
+        try:
+            self._root.after(0, show)
+        except Exception:
+            pass
+
     def _schedule_update_checks(self) -> None:
         """Check for updates periodically, without blocking the UI.
 
@@ -1040,7 +1264,16 @@ class FilePickerController:
         popup loop never stalls. Only when a genuinely newer build is found do
         we stage it and (once idle) show the updating dialog — never when the
         app is already on the latest version.
+
+        On a SHARED install the automatic check is skipped entirely: the exe in
+        the server folder is shared by everybody, so updating it is a deliberate
+        admin action (the tray's manual check reports the available version).
         """
+        if _config_is_shared(getattr(self, "config", None)):
+            print("[filepicker] shared install — automatic updates are OFF; "
+                  "update the server copy to move everybody to a new version "
+                  "(the tray's 'Check for updates' reports what is available)")
+            return
         try:
             from updater import CHECK_INTERVAL, check_for_update, download_update
 
@@ -1090,6 +1323,75 @@ class FilePickerController:
         )
 
 
+def _ensure_personal_watch_folder(config: ConfigManager) -> None:
+    """Give THIS person their own watch folder on a SHARED install.
+
+    Everybody running the exe from the server folder shares one config.json, so
+    it can only hold ONE watch folder — which would make every copy pop up for
+    every file. The folder therefore comes from, in order:
+
+    1. this person's own settings file (chosen once, remembered per Windows
+       account, and changeable any time from the tray);
+    2. a folder the admin pre-assigned in the shared config.json's
+       ``watch_directories`` map (no dialog at all — best for a rollout);
+    3. a one-time question on this machine, pre-filled with the shared default.
+
+    Cancelling keeps the shared default (the ownership guard in the controller
+    still keeps colleagues' files out of this copy's popups).
+    """
+    try:
+        from localsettings import assigned_watch_folder, current_machine, current_user
+        from setup import choose_watch_folder
+    except Exception as exc:
+        print(f"[filepicker] watch-folder setup unavailable: {exc}")
+        return
+
+    mine = config.local_override("watch_directory")
+    if mine:
+        print(f"[filepicker] shared install — your watch folder: {mine}")
+        return
+
+    assigned = assigned_watch_folder(config.watch_directories)
+    if assigned:
+        config.set_watch_directory(assigned)
+        print(f"[filepicker] shared install — watch folder assigned to "
+              f"{current_user()}@{current_machine()} in config.json: {assigned}")
+        return
+
+    shared_default = str(config.load().get("watch_directory", "") or "")
+    # Asked and declined once already for this same shared default? Do not nag
+    # at every login — the tray's "Change watch folder…" is always there. A
+    # *changed* shared default asks again (it is a different question).
+    if config.local_setting("watch_folder_declined_for") == shared_default:
+        print(f"[filepicker] shared install — keeping the shared default "
+              f"{shared_default or '(none)'} (you declined the folder question; "
+              f"tray → 'Change watch folder…' to set your own)")
+        return
+    print(f"[filepicker] shared install — asking {current_user()}@"
+          f"{current_machine()} for their own watch folder "
+          f"(shared default: {shared_default or 'none'})")
+    chosen = choose_watch_folder(
+        initial=shared_default,
+        heading="Where do YOUR files land?",
+        note=("FilePicker is running from a shared folder, so every person has "
+              "their own watch folder.\nPick the folder YOUR scanned or "
+              "downloaded files land in — the popup then opens on this PC only, "
+              "never on a colleague's."),
+        button="Save & start watching",
+    )
+    if chosen:
+        config.set_watch_directory(chosen)
+        config.set_local_setting("watch_folder_declined_for", None)
+        print(f"[filepicker] shared install — watch folder set to {chosen} "
+              f"(remembered for {current_user()}@{current_machine()})")
+    else:
+        config.set_local_setting("watch_folder_declined_for", shared_default)
+        print("[filepicker] shared install — no folder chosen; using the shared "
+              f"default {shared_default or '(none)'}. Files dropped inside a "
+              "colleague's own folder are ignored here; set your own folder any "
+              "time from the tray's 'Change watch folder…'")
+
+
 def main() -> None:
     # Handle one-shot CLI flags before file logging so console output is visible
     # (file logging redirects stdout to FilePicker.log).
@@ -1130,6 +1432,14 @@ def main() -> None:
             run_first_time_setup(config)
         except Exception as exc:
             print(f"[filepicker] first-run setup error: {exc}")
+
+    # Shared install (everybody runs this exe from the server folder): each
+    # person needs their OWN watch folder, or every copy pops up for every file.
+    if config.shared_install:
+        try:
+            _ensure_personal_watch_folder(config)
+        except Exception as exc:
+            print(f"[filepicker] per-person watch folder setup error: {exc}")
 
     # Verify auto-start will actually work at next login (unless disabled in
     # config.json): the per-user Run key (primary) and/or the Startup-folder

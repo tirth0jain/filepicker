@@ -123,6 +123,85 @@ New companies, clients, sites, materials and doc types added from the UI are
 saved back to this file automatically. The first entry in `companies` is the
 default shown in the popup's Company dropdown.
 
+## One install on a server folder — a watch folder per person
+
+Several people can run **one** FilePicker folder kept on a server share
+(`\\SERVER\FilePicker`, or a mapped drive such as `Z:\FilePicker`): everybody
+double-clicks the same `FilePicker.exe`, shares one catalog, and still gets
+their **own** watch folder — so the popup opens on the person who dropped the
+file and on nobody else.
+
+### Setting it up
+
+1. **Copy the whole FilePicker folder to the share** — `FilePicker.exe` plus
+   everything next to it, `config.json`, `github_token.txt`,
+   `opencode_token.txt`.
+2. **Tell FilePicker it is a shared install** — in that `config.json`:
+
+   ```json
+   { "shared_install": true }
+   ```
+
+   (Running the exe straight off a network path is detected automatically;
+   set the flag explicitly for a share Windows does not report as remote.)
+3. **Optional — assign the folders from the config** so nobody is asked:
+
+   ```json
+   {
+     "watch_directories": {
+       "manish": "Z:/Manish-D/1 SCANNER/…/tally-dc-source",
+       "nitin@PC-02": "Z:/Nitin-D/1 SCANNER/…/tally-dc-source"
+     }
+   }
+   ```
+
+   Keys may be the Windows account (`manish`), `account@pc` or `PC-02\manish`.
+4. **Each person just runs `FilePicker.exe` from the share.** The first launch
+   asks *"Where do YOUR files land?"* and remembers the answer **for that
+   Windows account only** — in `%LOCALAPPDATA%\FilePicker\settings.json` on
+   their own PC, never in the shared file. Later changes: tray →
+   **Change watch folder…** (the tray also always shows `Watching: <folder>`).
+
+### What is shared and what is per person
+
+| Shared (`config.json` on the server) | Per person (`%LOCALAPPDATA%\FilePicker\settings.json`) |
+|---|---|
+| clients, sites, mappings, materials, doc types, companies | watch folder, sorted root folder |
+| the default watch folder for anyone without their own | popup delay, OCR on/off + model + endpoint |
+| the optional `watch_directories` assignment | auto-start at login (a per-PC Windows entry) |
+
+### Why the popup only opens for the person who dropped the file
+
+* Each copy watches **its own folder**, and the watcher does not descend into
+  subfolders — a colleague's folder is never even looked at.
+* Every copy publishes its folder into `<share>/users/<account>@<pc>.json`
+  (one file per person, so nothing needs locking). A copy still sitting on a
+  wider folder — the shared default, a parent — skips a file that landed inside
+  a colleague's own folder and says so in its log: *their* popup handles it.
+* Two copies on the **same** folder are detected and reported (both would pop
+  up for every file there) — the fix is one `Change watch folder…` click.
+
+### Catalog edits, sync and updates
+
+* Catalog edits are written to the shared `config.json`, so the next popup on
+  every machine has them; no GitHub round trip is involved
+  (`enable_live_config` / `enable_github_push` are off by default on a shared
+  install — the file on the server *is* the live config. To turn GitHub sync
+  back on for one person, put `"enable_live_config": true` in *their*
+  `%LOCALAPPDATA%\FilePicker\settings.json`.)
+* Two people saving at the same moment cannot lose each other's work: the write
+  takes a short lock next to `config.json` and **union-merges** the catalog
+  (nothing is lost; deletions still delete through `removed_clients`).
+* A shared install **never updates itself** — replacing the exe everybody is
+  running from is the admin's job. Tray → *Check for updates* reports what is
+  available; install it by replacing the files in the share when nobody is
+  running FilePicker.
+* Logs go to each person's own `%LOCALAPPDATA%\FilePicker\FilePicker.log`
+  instead of one interleaved file on the share.
+
+Everybody needs read **and write** access to the share: `config.json` is
+written whenever somebody adds a site, client or mapping.
+
 ## OCR setup (DeepSeek V4.1 Flash)
 
 When enabled, every new download opens the popup already pre-filled with the

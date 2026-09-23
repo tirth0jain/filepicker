@@ -32,6 +32,101 @@ def _browse() -> Optional[str]:
     return filedialog.askdirectory()
 
 
+def choose_watch_folder(initial: str = "",
+                        heading: str = "Choose your watch folder",
+                        note: str = "",
+                        button: str = "Save") -> Optional[str]:
+    """Ask for ONE folder: where this person's files land.
+
+    Used on a shared install (everybody runs the exe from the same server
+    folder), where the watch folder must differ per person — so it cannot live
+    in the shared config.json. The answer is remembered in this Windows
+    account's own settings file (see localsettings.py) and is what makes the
+    popup open on the person who dropped the file and nobody else.
+
+    Returns the chosen path, or None when the dialog was cancelled (the caller
+    then keeps the current folder).
+    """
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+
+    root = ctk.CTk()
+    root.title(f"FilePicker v{VERSION} — Watch Folder")
+    root.geometry("560x300")
+    root.configure(fg_color=_BG)
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+
+    chosen = {"value": None}
+    folder_var = tk.StringVar(value=initial)
+
+    ctk.CTkLabel(
+        root, text=heading,
+        font=ctk.CTkFont(size=18, weight="bold"), text_color=_TEXT,
+    ).pack(anchor="w", padx=24, pady=(24, 4))
+    if note:
+        ctk.CTkLabel(
+            root, text=note, font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+            justify="left", wraplength=500,
+        ).pack(anchor="w", padx=24, pady=(0, 14))
+    else:
+        ctk.CTkLabel(
+            root, text="This folder is remembered for your Windows account only.",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED,
+        ).pack(anchor="w", padx=24, pady=(0, 14))
+
+    row = ctk.CTkFrame(root, fg_color="transparent")
+    row.pack(fill="x", padx=24, pady=(0, 4))
+    entry = ctk.CTkEntry(
+        row, textvariable=folder_var, fg_color=_BG_FIELD,
+        border_color=_BG_FIELD, text_color=_TEXT,
+    )
+    entry.pack(side="left", fill="x", expand=True)
+    ctk.CTkButton(
+        row, text="Browse", width=80, height=30,
+        fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT,
+        command=lambda: folder_var.set(_browse() or folder_var.get()),
+    ).pack(side="left", padx=(8, 0))
+
+    ctk.CTkLabel(
+        root,
+        text="Tip: the folder your scanner (or browser) writes into — e.g. "
+             "Z:\\Your-Name\\…\\tally-dc-source",
+        font=ctk.CTkFont(size=11), text_color=_TEXT_MUTED,
+    ).pack(anchor="w", padx=24, pady=(8, 0))
+
+    btn_row = ctk.CTkFrame(root, fg_color="transparent")
+    btn_row.pack(fill="x", padx=24, pady=(24, 18))
+
+    def save() -> None:
+        value = folder_var.get().strip()
+        if value:
+            chosen["value"] = value
+        root.destroy()
+
+    ctk.CTkButton(
+        btn_row, text=button, command=save, height=40,
+        fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
+        font=ctk.CTkFont(size=14, weight="bold"), text_color="#ffffff",
+    ).pack(side="left", expand=True, fill="x", padx=(0, 8))
+    ctk.CTkButton(
+        btn_row, text="Cancel", command=root.destroy, height=40,
+        fg_color=_BG_FIELD, hover_color="#33334a", text_color=_TEXT_MUTED,
+    ).pack(side="left", expand=True, fill="x")
+
+    entry.focus_set()
+    root.bind("<Return>", lambda _e: save())
+    root.bind("<Escape>", lambda _e: root.destroy())
+    root.grab_set()
+    root.lift()
+    try:
+        root.focus_force()
+    except Exception:
+        pass
+    root.mainloop()
+    return chosen["value"]
+
+
 def run_first_time_setup(config: ConfigManager) -> None:
     """Show a modal first-run dialog for watch/root directories.
 

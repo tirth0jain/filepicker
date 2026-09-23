@@ -32,13 +32,17 @@ class TrayIcon:
 
     def __init__(self, on_check_update, on_quit, on_force_sync=None,
                  on_force_push=None, on_toggle_startup=None,
-                 startup_enabled=None) -> None:
+                 on_change_watch=None, startup_enabled=None,
+                 watch_label=None, shared_install=False) -> None:
         self._on_check_update = on_check_update
         self._on_quit = on_quit
         self._on_force_sync = on_force_sync
         self._on_force_push = on_force_push
         self._on_toggle_startup = on_toggle_startup
+        self._on_change_watch = on_change_watch
         self._startup_enabled = startup_enabled
+        self._watch_label = watch_label
+        self._shared_install = bool(shared_install)
         self._icon = None
 
     def _startup_label(self, _item=None) -> str:
@@ -55,6 +59,16 @@ class TrayIcon:
                 enabled = False
         return f"Auto-start at login: {'On' if enabled else 'Off'}"
 
+    def _watch_text(self, _item=None) -> str:
+        """Menu label showing the folder THIS copy watches (live)."""
+        folder = ""
+        if self._watch_label is not None:
+            try:
+                folder = str(self._watch_label())
+            except Exception:
+                folder = ""
+        return f"Watching: {folder}" if folder else "Watching: (not set)"
+
     def start(self) -> None:
         try:
             import pystray
@@ -63,12 +77,25 @@ class TrayIcon:
             print("[filepicker] pystray not installed; tray icon disabled.")
             return
         items = [
+            # Which folder this person watches — always visible, because on a
+            # shared install "why did/didn't I get a popup?" is answered here.
+            MenuItem(self._watch_text, None, enabled=False),
+            MenuItem("Change watch folder…", self._change_watch),
             MenuItem("Check for updates", self._check_update),
             MenuItem(self._startup_label, self._toggle_startup),
-            MenuItem("Force sync from repo (overwrite local)", self._force_sync),
-            MenuItem("Push local config to GitHub (replace remote)", self._force_push),
-            MenuItem("Quit", self._quit),
         ]
+        if self._shared_install:
+            # The shared config.json IS the live config, so the GitHub actions
+            # are meaningless here (and a stray push once replaced the real
+            # catalog with a test one).
+            items.append(MenuItem("Config: shared folder (GitHub sync off)",
+                                  None, enabled=False))
+        else:
+            items.append(MenuItem("Force sync from repo (overwrite local)",
+                                  self._force_sync))
+            items.append(MenuItem("Push local config to GitHub (replace remote)",
+                                  self._force_push))
+        items.append(MenuItem("Quit", self._quit))
         self._icon = pystray.Icon(
             "FilePicker",
             icon=_build_icon_image(),
@@ -100,6 +127,10 @@ class TrayIcon:
     def _toggle_startup(self, _icon, _item) -> None:
         if self._on_toggle_startup is not None:
             self._on_toggle_startup()
+
+    def _change_watch(self, _icon, _item) -> None:
+        if self._on_change_watch is not None:
+            self._on_change_watch()
 
     def _quit(self, _icon, _item) -> None:
         self._on_quit()

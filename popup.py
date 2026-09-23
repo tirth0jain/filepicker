@@ -2051,9 +2051,14 @@ class FilePickerPopup:
         return changed
 
     def _start_config_poll(self) -> None:
-        """Schedule the ONE live-config pull for when this popup opens."""
+        """Schedule the ONE live-config pull for when this popup opens.
+
+        A shared install has no GitHub pull (enable_live_config is off there by
+        design) but still needs the one look at the shared file, so that is
+        scheduled too.
+        """
         self._config_poll_after = None
-        if not self.config.enable_live_config:
+        if not self.config.enable_live_config and not self.config.shared_install:
             return
         # A single fetch shortly after open so the popup never shows stale
         # data — deliberately NOT re-armed: the config must not be pulled
@@ -2074,7 +2079,28 @@ class FilePickerPopup:
             self._config_poll_after = None
 
     def _poll_config(self) -> None:
-        """One background fetch → apply → refresh (never blocks the UI)."""
+        """One background fetch → apply → refresh (never blocks the UI).
+
+        On a SHARED install there is nothing to fetch: the config.json in the
+        server folder everybody runs from IS the live config. The file is just
+        re-read, so a client/site a colleague added a minute ago is in this
+        popup's dropdowns too.
+        """
+        if self.config.shared_install:
+            def work_shared() -> None:
+                try:
+                    if self.config.refresh_from_shared_file():
+                        try:
+                            self.window.after(0, self.refresh_from_config)
+                        except tk.TclError:
+                            pass
+                except Exception as exc:
+                    print(f"[filepicker] shared config reload error: {exc}")
+
+            threading.Thread(target=work_shared,
+                             name="filepicker-popup-shared-config",
+                             daemon=True).start()
+            return
         if not self.config.enable_live_config:
             return
 
@@ -3359,9 +3385,17 @@ class FilePickerPopup:
         # the mapped one".)
         mapped_client = self.config.resolve_client(client)
         if mapped_client:
+            # A 🗺 Map the user set: the source name never reaches the fields.
+            # Logged, because otherwise the applied line would show neither the
+            # near-match nor the mapping and the change would be invisible in
+            # the log (the read line only prints what the model returned).
+            if mapped_client != client:
+                log_bits.append(f"client {client!r} mapped to {mapped_client!r}")
             client = mapped_client
         mapped_site = self.config.resolve_site(site)
         if mapped_site:
+            if mapped_site != site:
+                log_bits.append(f"site {site!r} mapped to {mapped_site!r}")
             site = mapped_site
 
         # Company (CTkOptionMenu): canonical catalog spelling when a

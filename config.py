@@ -14,15 +14,57 @@ import os
 import re
 import sys
 import threading
+import time
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from localsettings import (
+    LocalSettings,
+    app_directory,
+    install_is_shared,
+    is_network_path,
+)
 from ocr import (
     LEGACY_OCR_MODELS,
     OCR_API_BASE,
     OCR_MODEL,
     OCR_THINKING,
+)
+
+# Keys that describe the PERSON or the MACHINE rather than the shared catalog.
+# On a SHARED install (everybody runs the exe from the same server folder) the
+# shared config.json can only hold one value for each of these, so a person's
+# own value lives in their per-user settings file and overrides the shared one
+# (see localsettings.py). On a normal single-machine install nothing changes:
+# the value is read from and written to config.json exactly as before.
+MACHINE_KEYS = (
+    "watch_directory",
+    "root_directory",
+    "auto_start",
+    "enable_ocr",
+    "ocr_model",
+    "ocr_api_base",
+    "ocr_thinking",
+    "popup_delay_seconds",
+    "enable_live_config",
+    "enable_github_push",
+)
+
+# Catalog keys — the ones a shared config.json must never lose, and the ones a
+# union merge (instead of a blind overwrite) protects when two people edit the
+# shared file at the same time.
+CATALOG_KEYS = (
+    "companies",
+    "company_initials",
+    "clients",
+    "materials",
+    "doc_types",
+    "client_aliases",
+    "site_aliases",
+    "material_aliases",
+    "removed_clients",
 )
 
 # Remote live config — single source of truth for clients/sites.
@@ -144,6 +186,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # open (or writes in slow bursts), lower it for the snappiest popups.
     # LOCAL-ONLY, like the OCR keys.
     "popup_delay_seconds": 1.0,
+    # --- Shared install (several people, one server folder) ----------------
+    # "shared_install": true makes this folder a shared install: everybody runs
+    # the same exe from it, config.json is the shared catalog (no GitHub round
+    # trip), each person's own watch/root folder comes from their per-user
+    # settings file instead (see localsettings.py), and the app does not update
+    # itself in place — the admin updates the server copy.
+    #
+    # The key is deliberately NOT part of DEFAULT_CONFIG: a fresh config.json
+    # must never carry an explicit "false" that would override the automatic
+    # detection when the folder is later moved to a server share. Running the
+    # exe from a network path is detected by itself; the flag is only needed
+    # for a share Windows does not report as remote.
+    #
+    # Optional: pre-assign each person's watch folder here so nobody has to
+    # choose one. Keys may be the Windows account ("manish"), account@pc
+    # ("manish@pc-02") or "pc-02\\manish"; anyone not listed is asked once, on
+    # their own machine, and their answer is remembered locally.
+    "watch_directories": {},
 }
 
 
@@ -153,11 +213,10 @@ def default_config_path() -> Path:
     When frozen (Nuitka standalone) the modules live inside the app folder, but
     ``__file__`` can point at a temporary/embedded location; the config file
     must always be found next to the running executable so the user's data is
-    read (and new files are created there).
+    read (and new files are created there). On a shared install that same file
+    is the catalog everybody sees.
     """
-    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
-        return Path(sys.executable).resolve().parent / "config.json"
-    return Path(__file__).resolve().parent / "config.json"
+    return app_directory() / "config.json"
 
 
 def default_token_path() -> Path:
@@ -167,9 +226,7 @@ def default_token_path() -> Path:
     be pushed to the public repo when the config is synced. Store it in
     `github_token.txt` next to the exe (or set env FILEPICKER_GITHUB_TOKEN).
     """
-    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
-        return Path(sys.executable).resolve().parent / "github_token.txt"
-    return Path(__file__).resolve().parent / "github_token.txt"
+    return app_directory() / "github_token.txt"
 
 
 def default_opencode_token_path() -> Path:
@@ -181,9 +238,7 @@ def default_opencode_token_path() -> Path:
     NEVER stored in config.json — otherwise it would be pushed to the public
     repo when the config is synced.
     """
-    if getattr(sys, "frozen", False) or bool(getattr(sys, "nuitka_standalone", False)):
-        return Path(sys.executable).resolve().parent / "opencode_token.txt"
-    return Path(__file__).resolve().parent / "opencode_token.txt"
+    return app_directory() / "opencode_token.txt"
 
 
 def _read_opencode_token() -> Optional[str]:
@@ -919,14 +974,72 @@ def _peel_to_name(candidate, clean_name) -> bool:
     return True
 
 
+# How long a copy waits for another copy's write into the shared config.json,
+# and when a lock file left behind by a crash is considered stale.
+_SHARED_LOCK_TIMEOUT = 5.0
+_SHARED_LOCK_STALE = 30.0
+
+
+@contextmanager
+def _shared_write_lock(path: Path, timeout: float = _SHARED_LOCK_TIMEOUT):
+    """Serialise writes into a shared config.json (best effort).
+
+    Two copies running from the same server folder can save at the same moment.
+    A lock file next to config.json makes them take turns, so the read-merge-
+    write in :meth:`ConfigManager.save` always sees the colleague's completed
+    write instead of a half-applied one. Creating the file with ``O_EXCL`` is
+    atomic (SMB included). A lock older than 30s is treated as stale — a crash
+    left it behind — and broken. If the lock still cannot be taken in time the
+    save goes ahead: a slightly racy write beats refusing the user's edit.
+    """
+    lock = path.with_name(path.name + ".lock")
+    deadline = time.monotonic() + timeout
+    fd: Optional[int] = None
+    while fd is None:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > _SHARED_LOCK_STALE:
+                    lock.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                print("[config] shared config.json is locked by another copy "
+                      "— saving without the lock")
+                break
+            time.sleep(0.05)
+        except OSError:
+            # No permission to create the lock (read-only folder, odd share):
+            # let the write itself report the real error.
+            break
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                lock.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 class ConfigManager:
     """Thread-safe wrapper around the persistent config.json file.
 
     Reads the file lazily, caches the parsed structure in memory, and writes
-    every mutation back to disk so the config is always up to date.
+    every mutation back to disk so the config is always up to date. On a shared
+    install (see :attr:`shared_install`) the same file is read and written by
+    every person's copy, so writes are locked and union-merged.
     """
 
-    def __init__(self, path: Optional[Path] = None) -> None:
+    def __init__(self, path: Optional[Path] = None,
+                 local: Optional[LocalSettings] = None,
+                 shared: Optional[bool] = None) -> None:
         self.path = Path(path) if path else default_config_path()
         self._lock = threading.RLock()
         self._data: Dict[str, Any] = deepcopy(DEFAULT_CONFIG)
@@ -940,6 +1053,122 @@ class ConfigManager:
         # a file is actually saved (flush_pending_push) or when the user
         # force-pushes from the tray — never while a popup is still open.
         self._pending_push_reasons: List[str] = []
+        # Per-person settings (watch folder, OCR keys, ...) that override this
+        # shared file on a server install — see localsettings.py.
+        self._local = local if local is not None else LocalSettings()
+        # Shared-install state. ``shared`` forces it (tests / explicit callers);
+        # otherwise it is decided once from FILEPICKER_SHARED, config.json's
+        # "shared_install" flag and the app folder being a network path.
+        self._network_shared = is_network_path(self.path.parent)
+        self._shared: Optional[bool] = shared
+        self._shared_forced = shared is not None
+        # The catalog exactly as this copy last read or wrote it: what tells a
+        # shared install whether the file on disk moved on without us (a
+        # colleague's save), which is what triggers the union merge.
+        self._saved_catalog: Dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Shared install
+    # ------------------------------------------------------------------
+    @property
+    def shared_install(self) -> bool:
+        """True when everybody runs this copy from the same server folder.
+
+        Then config.json is the shared catalog (there is no need for the GitHub
+        round trip), the machine-specific keys come from this person's own
+        settings file, writes into the shared file are union-merged instead of
+        overwriting a colleague's simultaneous edit, and the app does not
+        replace its own exe in a folder other people are running from.
+        """
+        if self._shared is None:
+            flag = None
+            if self._loaded:
+                raw = self._data.get("shared_install")
+                if isinstance(raw, bool):
+                    flag = raw
+            self._shared = install_is_shared(
+                self.path.parent, flag,
+                config_path=self.path if flag is None else None,
+            )
+        return self._shared
+
+    def local_override(self, key: str) -> Any:
+        """This person's own value for a machine key, else None.
+
+        ``None`` on a normal install (there is nothing to override), which is
+        what keeps the single-machine behaviour byte-for-byte identical.
+        """
+        if not self.shared_install:
+            return None
+        return self._local.get(key)
+
+    def local_setting(self, key: str, default: Any = None) -> Any:
+        """Any per-person setting, whatever the install mode.
+
+        Used for bookkeeping the app keeps about this person rather than a
+        config value — e.g. "they declined the watch-folder question, so do not
+        ask again on this machine".
+        """
+        return self._local.get(key, default)
+
+    def _machine_value(self, key: str, default: Any = None) -> Any:
+        """A machine key: this person's override first, else the shared file."""
+        override = self.local_override(key)
+        if override is not None:
+            return override
+        return self.load().get(key, default)
+
+    def _set_machine_value(self, key: str, value: Any) -> None:
+        """Write a machine key where it belongs: per person, or config.json."""
+        with self._lock:
+            if self.shared_install:
+                self._local.set(key, value)
+                return
+            self.load()[key] = value
+            self.save()
+
+    def _catalog_snapshot(self) -> Dict[str, Any]:
+        """The catalog keys as this copy last read or wrote them."""
+        return deepcopy({key: self._data.get(key) for key in CATALOG_KEYS})
+
+    def refresh_from_shared_file(self) -> bool:
+        """Re-read the shared config.json when a colleague changed it.
+
+        On a server install the file IS the live config (no GitHub poll), so a
+        site/client a colleague added a moment ago must reach this machine's
+        next popup. Local, un-pushed catalog additions are union-merged in, so a
+        reload can never drop something this machine just added.
+
+        Returns True when the in-memory catalog changed.
+        """
+        if not self.shared_install or not self._loaded:
+            return False
+        with self._lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as fh:
+                    disk = json.load(fh)
+            except (OSError, json.JSONDecodeError, ValueError):
+                return False
+            if not isinstance(disk, dict):
+                return False
+            if {k: disk.get(k) for k in CATALOG_KEYS} == self._saved_catalog:
+                return False  # nothing new since this copy last looked
+            before = self._catalog_snapshot()
+            merged = self._merge_for_push(disk, self._data)
+            for key in CATALOG_KEYS:
+                if key in merged:
+                    self._data[key] = merged[key]
+            for key, value in disk.items():
+                if key not in CATALOG_KEYS and key not in MACHINE_KEYS:
+                    self._data.setdefault(key, value)
+            self._saved_catalog = self._catalog_snapshot()
+            self._last_write_mtime = self._file_mtime(self.path)
+            self._write_mtime_marker(self._last_write_mtime)
+            changed = before != self._saved_catalog
+            if changed:
+                print("[config] shared config.json changed by another machine "
+                      "— catalog reloaded")
+            return changed
 
     # ------------------------------------------------------------------
     # Loading
@@ -957,6 +1186,7 @@ class ConfigManager:
             # No config yet: seed the file from DEFAULT_CONFIG (first run) so
             # the user has a file to edit, then treat that file as the source.
             self._data = deepcopy(DEFAULT_CONFIG)
+            self._saved_catalog = self._catalog_snapshot()
             self.save()
             return
         try:
@@ -972,6 +1202,11 @@ class ConfigManager:
             # Upgrade values that an older build wrote as its then-current
             # default (currently only the OCR model) — see the method.
             self._migrate_old_defaults()
+            # The file itself can declare the install shared; re-decide now
+            # that its flag is known (never when the caller forced the mode).
+            if not self._shared_forced:
+                self._shared = None
+            self._saved_catalog = self._catalog_snapshot()
             # Baseline: the mtime of the app's last write (persisted), so a
             # hand edit made while the app was closed is still detected and
             # never clobbered by the auto-sync. Falls back to the current
@@ -1112,7 +1347,18 @@ class ConfigManager:
 
     @property
     def enable_live_config(self) -> bool:
-        """Whether to poll GitHub for live config. Local-only flag, never overwritten by remote."""
+        """Whether to poll GitHub for live config.
+
+        On a SHARED install the config.json everybody runs from already IS the
+        live config, so the GitHub round trip is off by default — a poll would
+        only fight the shared file (and re-introduce the "somebody pushed a
+        stale catalog" failure). A per-person override can still turn it on.
+        """
+        override = self.local_override("enable_live_config")
+        if override is not None:
+            return bool(override)
+        if self.shared_install:
+            return False
         return bool(self.load().get("enable_live_config", True))
 
     def sync_from_github(self, timeout: float = 5.0) -> bool:
@@ -1232,7 +1478,17 @@ class ConfigManager:
         Requires a PAT in `github_token.txt` or env FILEPICKER_GITHUB_TOKEN.
         If the key is missing (old installs) it defaults to *enabled* when a
         token is present, so placing the token file is enough.
+
+        On a SHARED install the shared config.json is the catalog everybody
+        reads, so pushing to GitHub is pointless (and was what once replaced
+        the real catalog with a test one) — off unless a per-person override
+        turns it back on.
         """
+        override = self.local_override("enable_github_push")
+        if override is not None:
+            return bool(override)
+        if self.shared_install:
+            return False
         val = self.load().get("enable_github_push", None)
         if val is None:
             # Old config without the flag — enable automatically when token exists
@@ -1686,32 +1942,100 @@ class ConfigManager:
     # Persistence
     # ------------------------------------------------------------------
     def save(self) -> None:
-        """Write the current in-memory config to disk atomically."""
+        """Write the current in-memory config to disk atomically.
+
+        On a SHARED install the file may have been written by a colleague since
+        this copy last read it; the write is then union-merged (and serialised
+        with a lock file) so two people adding a client/site at the same moment
+        never lose each other's change.
+        """
         with self._lock:
             # Persist the old-default upgrade (e.g. the OCR model) with the
             # next normal write instead of writing during load.
             self._migrate_old_defaults()
-            tmp = self.path.with_suffix(".json.tmp")
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(self._data, fh, indent=2, ensure_ascii=False)
-                os.replace(tmp, self.path)
-                self._last_write_mtime = self._file_mtime(self.path)
-                self._write_mtime_marker(self._last_write_mtime)
-            except OSError as exc:
-                print(f"[config] Could not write {self.path}: {exc}")
+            if self.shared_install:
+                with _shared_write_lock(self.path):
+                    self._merge_external_changes()
+                    self._write_file()
+                return
+            self._write_file()
+
+    def _write_file(self) -> None:
+        """The actual atomic write (unique temp name: several copies may write)."""
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._data, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.path)
+            self._last_write_mtime = self._file_mtime(self.path)
+            self._write_mtime_marker(self._last_write_mtime)
+            self._saved_catalog = self._catalog_snapshot()
+        except OSError as exc:
+            print(f"[config] Could not write {self.path}: {exc}")
+
+    def _merge_external_changes(self) -> None:
+        """Union-merge the shared file when another copy wrote it first.
+
+        Last-writer-wins is fine for one machine, but with everybody running the
+        same server folder it silently drops the colleague's new client/site.
+        The catalog keys are therefore union-merged (same rules as the GitHub
+        push: nothing is lost, tombstones still delete) and every other key is
+        taken from the file, which is the shared source of truth.
+
+        The comparison is against the catalog THIS copy last read or wrote, not
+        against a timestamp: on a server folder two saves can land inside the
+        same second, and the 1s mtime epsilon used for hand-edit detection would
+        miss exactly the case this exists for.
+        """
+        if not self.path.exists():
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                disk = json.load(fh)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(disk, dict):
+            return
+        if {k: disk.get(k) for k in CATALOG_KEYS} == self._saved_catalog:
+            return  # the file still holds what this copy last saw
+        merged = self._merge_for_push(disk, self._data)
+        new_data = dict(disk)
+        for key in CATALOG_KEYS:
+            if key in merged:
+                new_data[key] = merged[key]
+        for key, value in self._data.items():
+            if key not in new_data:
+                new_data[key] = value
+        self._data = new_data
+        print("[config] shared config.json was written by another copy — "
+              "union-merged before saving")
 
     # ------------------------------------------------------------------
     # Typed accessors
     # ------------------------------------------------------------------
     @property
     def watch_directory(self) -> str:
-        return str(self.load().get("watch_directory", ""))
+        """Where THIS person's downloads land (per-user on a shared install)."""
+        return str(self._machine_value("watch_directory", ""))
 
     @property
     def root_directory(self) -> str:
-        return str(self.load().get("root_directory", ""))
+        """Where THIS person's sorted tree lives (per-user on a shared install)."""
+        return str(self._machine_value("root_directory", ""))
+
+    @property
+    def watch_directories(self) -> Dict[str, str]:
+        """Optional admin pre-assignment of watch folders, per person.
+
+        ``{"manish": "Z:/Unsorted/Manish", "nitin@pc-02": "Z:/Unsorted/Nitin"}``
+        — see :func:`localsettings.assigned_watch_folder` for the key forms.
+        """
+        mapping = self.load().get("watch_directories", {})
+        if not isinstance(mapping, dict):
+            return {}
+        return {str(k): str(v) for k, v in mapping.items()
+                if isinstance(v, str) and v.strip()}
 
     @property
     def doc_types(self) -> List[str]:
@@ -1913,8 +2237,14 @@ class ConfigManager:
 
     @property
     def auto_start(self) -> bool:
-        """Whether the app should register itself to launch at Windows login."""
-        return bool(self.load().get("auto_start", True))
+        """Whether the app should register itself to launch at Windows login.
+
+        Per machine on a shared install: the Windows entry is written into each
+        person's own profile, so one person turning it on must not decide it for
+        everybody (the shared config.json keeps the default).
+        """
+        value = self._machine_value("auto_start", True)
+        return bool(value)
 
     @property
     def enable_ocr(self) -> bool:
@@ -1922,9 +2252,10 @@ class ConfigManager:
 
         Reads the LOCAL config only — like watch_directory/root_directory,
         this flag is never merged from the GitHub config nor pushed back, so
-        one machine can enable OCR without forcing it on all installs.
+        one machine can enable OCR without forcing it on all installs. On a
+        shared install it is per person (the API key and the model are, too).
         """
-        return bool(self.load().get("enable_ocr", False))
+        return bool(self._machine_value("enable_ocr", False))
 
     @property
     def ocr_model(self) -> str:
@@ -1936,7 +2267,7 @@ class ConfigManager:
         without the user editing anything. Any other value is a deliberate
         per-machine override and is returned as-is.
         """
-        model = str(self.load().get("ocr_model", OCR_MODEL)).strip()
+        model = str(self._machine_value("ocr_model", OCR_MODEL)).strip()
         if not model or model in LEGACY_OCR_MODELS:
             return OCR_MODEL
         return model
@@ -1944,7 +2275,7 @@ class ConfigManager:
     @property
     def ocr_api_base(self) -> str:
         """The OpenAI-compatible endpoint base used for OCR."""
-        return str(self.load().get("ocr_api_base", OCR_API_BASE))
+        return str(self._machine_value("ocr_api_base", OCR_API_BASE))
 
     @property
     def ocr_thinking(self) -> str:
@@ -1965,6 +2296,9 @@ class ConfigManager:
         ``high`` and only ``none`` stops the chain of thought).
         """
         data = self.load()
+        override = self.local_override("ocr_thinking")
+        if override is not None:
+            return str(override).strip().lower()
         value = data.get("ocr_thinking")
         if value is not None and str(value).strip():
             return str(value).strip().lower()
@@ -1986,8 +2320,8 @@ class ConfigManager:
         catalog key, so it is neither pulled from nor pushed to GitHub.
         """
         try:
-            value = float(self.load().get("popup_delay_seconds",
-                                          DEFAULT_CONFIG["popup_delay_seconds"]))
+            value = float(self._machine_value(
+                "popup_delay_seconds", DEFAULT_CONFIG["popup_delay_seconds"]))
         except (TypeError, ValueError):
             return float(DEFAULT_CONFIG["popup_delay_seconds"])
         if value != value:  # NaN
@@ -2038,24 +2372,29 @@ class ConfigManager:
     # Mutators (each persists to disk)
     # ------------------------------------------------------------------
     def set_watch_directory(self, value: str) -> None:
-        with self._lock:
-            self.load()["watch_directory"] = value
-            self.save()
+        """Set where THIS person's downloads land (per-user on a shared install)."""
+        self._set_machine_value("watch_directory", value)
 
     def set_root_directory(self, value: str) -> None:
-        with self._lock:
-            self.load()["root_directory"] = value
-            self.save()
+        self._set_machine_value("root_directory", value)
+
+    def set_local_setting(self, key: str, value: Any) -> None:
+        """Write a per-person setting, whatever the install mode.
+
+        Used by the watch-folder chooser: the answer is remembered for this
+        Windows account even on a normal install, so a later switch to the
+        shared server folder keeps it.
+        """
+        self._local.set(key, value)
 
     def set_auto_start(self, value: bool) -> None:
         """Turn "launch at Windows login" on/off (tray menu) and persist it.
 
-        Written to the local config.json so the choice survives restarts; the
-        startup helper installs/removes the actual Windows entries.
+        Written to the local config.json (per person on a shared install) so the
+        choice survives restarts; the startup helper installs/removes the actual
+        Windows entries on this machine.
         """
-        with self._lock:
-            self.load()["auto_start"] = bool(value)
-            self.save()
+        self._set_machine_value("auto_start", bool(value))
 
     def add_company(self, company: str) -> None:
         changed = False

@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 venv/
 config.json.tmp
+config.json.lock
+config.json.*.tmp
+# Colleague registry of a shared install (users/<account>@<pc>.json).
+users/
 github_token.txt
 .github_token
 *_token.txt
