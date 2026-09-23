@@ -235,9 +235,6 @@
     "SURESHWARI ENTERPRISES": [],
     "SURYA HI-TECH SERVICES PRIVATE LIMITED": [],
     "SWAN ENERGY LTD.,": [],
-    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": [
-      "Monte South"
-    ],
     "SYMPHONY INTERIORS TURNKEY SOLUTIONS PVT LTD": [],
     "TATA HOUSING DEVELOPMENT CO. LTD": [],
     "THE FITOUT HUB LLP": [],
@@ -376,7 +373,8 @@
     "LODHA- world One Co operative Housing Society Limited": "Cowtown Infotech Services Limited",
     "ALUMAYER INDIA PVT LTD": "Cowtown Infotech Services Limited",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited",
-    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division"
+    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division",
+    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": "SWAYAM REALTORS AND TRADERS LLP"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -397,6 +395,7 @@
     "Alder Residency Pvt Ltd",
     "LODHA",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
-    "Larsen & Toubro Limited"
+    "Larsen & Toubro Limited",
+    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH"
   ]
 }
