@@ -428,7 +428,21 @@ _UNIT_WORDS = {
     # Nibm" (the user's report). Both spellings, because the value may be
     # written "Pent House" or "Penthouse".
     "pent", "penthouse",
+    # A FACILITY inside a project is a designator too: "Lodha Palava-Fire
+    # Station" is "Lodha Palava" (the user's report — the app matched the
+    # stray catalog entry "Lodha Palava -Fire Station" instead of reading the
+    # site as "Lodha Palava"). Both words, because the peel works one word at
+    # a time ("Station", then "Fire").
+    "fire", "station",
 }
+
+# The facility words above, on their own. A catalog entry that carries one of
+# these in its trailing designator is a STRAY an older build saved and is
+# resolved to its clean name (see find_near_site); the older unit words
+# (tower/wing/phase/pent house...) keep the behaviour they have always had,
+# because catalog entries like "Kalpataru Vivant Tower" or "Lodha Woods Club
+# House" are names the user has been filing under for years.
+_FACILITY_WORDS = {"fire", "station"}
 
 
 # A trailing "letter + number" TOKEN is a unit designator spelled without a
@@ -541,6 +555,40 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"[0-9a-z]+", str(text).lower()))
 
 
+def _one_edit_apart(a: str, b: str) -> bool:
+    """True when *a* and *b* differ by at most one insertion/deletion/typo."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    i = 0
+    while i < len(short) and short[i] == long[i]:
+        i += 1
+    return short[i:] == long[i + 1:]
+
+
+# Unit words are often MISSPELLED by OCR ("stattion" for "station") or written
+# in the plural ("Towers"). A trailing word that is one edit away from a unit
+# word of at least 5 letters is still a designator — the peel below uses this
+# only when no exact designator matched, and only for the LAST word of a name
+# that still keeps a real place name after the peel. Short unit words (fire,
+# pod, flat, shop, zone, unit, wing, pent) are excluded: at 3-4 letters a
+# one-edit neighbour is too easy to hit by accident.
+_UNIT_WORD_MIN_FUZZY = 5
+
+
+def _close_unit_word(token: str) -> bool:
+    """True when *token* looks like a misspelled/plural unit word."""
+    word = str(token).strip().lower()
+    if len(word) < _UNIT_WORD_MIN_FUZZY or word in _UNIT_WORDS:
+        return False
+    return any(len(unit) >= _UNIT_WORD_MIN_FUZZY and _one_edit_apart(word, unit)
+               for unit in _UNIT_WORDS)
+
+
 # A trailing BRACKETED designator: "L & T (T-10)" is "L & T" — a tower/block/
 # wing inside brackets is the same designator as the bare spelling (the user:
 # "'L & T (T-10)' should also be changed to L & T"). Only a bracket whose
@@ -554,6 +602,11 @@ _BRACKETED_TAIL_RE = re.compile(r"\(\s*([^()]*?)\s*\)\s*$")
 # value from being chipped away to nothing.
 _DESIGNATOR_PEEL_LIMIT = 4
 
+# What a peel trims off the name it keeps: whitespace, an opening bracket and
+# the separator the designator was attached with — "Lodha Palava -Fire" must
+# become "Lodha Palava", not "Lodha Palava -".
+_PEEL_TRIM = " \t(/-"
+
 
 def _peel_one_designator(raw: str, brackets: bool = True) -> str:
     """Drop ONE trailing designator (a bracketed one included).
@@ -564,7 +617,7 @@ def _peel_one_designator(raw: str, brackets: bool = True) -> str:
     if brackets:
         m = _BRACKETED_TAIL_RE.search(raw)
         if m and is_designator_only(m.group(1)):
-            peeled = raw[:m.start()].rstrip(" \t(")
+            peeled = raw[:m.start()].rstrip(_PEEL_TRIM)
             if peeled:
                 return peeled
             # A bracket that was the whole name leaves nothing to keep; fall
@@ -579,7 +632,7 @@ def _peel_one_designator(raw: str, brackets: bool = True) -> str:
         if m:
             matches.append(m)
     for m in sorted(matches, key=lambda mm: mm.start()):
-        out = raw[:m.start()].rstrip(" \t(")
+        out = raw[:m.start()].rstrip(_PEEL_TRIM)
         if not out:
             continue  # nothing but a designator — no place name to keep
         if _is_bare_unit_word(m.group(0)) and _word_count(out) < 2:
@@ -587,6 +640,15 @@ def _peel_one_designator(raw: str, brackets: bool = True) -> str:
             # BE part of the name; only strip when a real name precedes it.
             continue
         return out
+    # Nothing matched exactly: a trailing unit word that OCR misspelled or
+    # pluralised ("Lodha Palava-Fire Stattion", "Lodha Amara Towers") is still
+    # a designator. Same guard as above — a real multi-word place name must
+    # remain in front of it.
+    tokens = raw.split()
+    if len(tokens) >= 2 and _close_unit_word(tokens[-1]):
+        out = " ".join(tokens[:-1]).rstrip(_PEEL_TRIM)
+        if out and _word_count(out) >= 2:
+            return out
     return raw
 
 
@@ -650,7 +712,7 @@ def is_designator_only(name) -> bool:
         return True
     for rx in (_DASH_DESIGNATOR_RE, _UNIT_WORD_DESIGNATOR_RE):
         m = rx.search(raw)
-        if m and not raw[:m.start()].strip(" \t("):
+        if m and not raw[:m.start()].strip(_PEEL_TRIM):
             return True
     return False
 
@@ -765,9 +827,96 @@ def find_near_name(existing_names, candidate) -> Optional[str]:
     return best_name
 
 
-def find_near_site(existing_sites, candidate) -> Optional[str]:
-    """Compatibility alias of :func:`find_near_name` for site name lists."""
-    return find_near_name(existing_sites, candidate)
+def find_near_site(existing_sites, candidate, prefer_clean: bool = True) -> Optional[str]:
+    """The existing site that is the same place as *candidate*, else None.
+
+    Same rules as :func:`find_near_name` (see there), plus ONE rule that only
+    makes sense for sites: when the catalog entry that matches is itself
+    spelled with a trailing unit designator and the candidate reduces to that
+    entry's CLEAN name, the clean spelling is returned instead of the stored
+    one.
+
+    The catalog still holds strays an older build saved with a designator
+    ("Lodha Palava -Fire Station", "Lodha Nibm -T6 Pent"). A designator is not
+    part of a site name (the same rule that keeps it out of new sites — see
+    :meth:`ConfigManager.add_site`), so a document that says "Lodha Palava
+    -Fire Station" must not be answered with the stray spelling: the site is
+    "Lodha Palava" (the user's report: "It read lodha palava-fire stattion as
+    the same when it should have been lodha palava only"). The stray entry is
+    left untouched — callers that store a site add the clean spelling as its
+    own catalog entry, and an identical catalog entry always wins over a
+    stray anyway.
+
+    Pass ``prefer_clean=False`` for the plain near-match contract (the result
+    is then always one of ``existing_sites``).
+    """
+    hit = find_near_name(existing_sites, candidate)
+    if hit is None or not prefer_clean:
+        return hit
+    clean_hit = clean_site_name(hit)
+    if clean_hit == str(hit).strip():
+        return hit  # the catalog spelling is already the clean one
+    # Only a FACILITY tail ("-Fire Station") makes the stored spelling a
+    # stray: the older unit words are left exactly as they were, so a site
+    # filed under "Kalpataru Vivant Tower" or "Lodha Woods Club House" keeps
+    # its name (and its folder).
+    if not _facility_tail(str(hit), clean_hit):
+        return hit
+    # The stored name carries a facility. Substitute its clean form only when
+    # the candidate is the same place — i.e. it reduces to that very clean
+    # name, typos/designators in its tail included.
+    if _peel_to_name(candidate, clean_hit):
+        return clean_hit
+    return hit
+
+
+def _facility_tail(stored, clean) -> bool:
+    """True when the words *stored* adds to *clean* include a facility word.
+
+    "Lodha Palava -Fire Station" vs "Lodha Palava" -> the tail is
+    ("fire", "station") -> True. "Kalpataru Vivant Tower" vs "Kalpataru
+    Vivant" -> ("tower") -> False.
+    """
+    stored_words = normalize_site_name(stored).split()
+    clean_words = normalize_site_name(clean).split()
+    if len(stored_words) <= len(clean_words):
+        return False
+    return any(word in _FACILITY_WORDS
+               for word in stored_words[len(clean_words):])
+
+
+def clean_site_name(name) -> str:
+    """*name* without a trailing unit designator written OUTSIDE brackets.
+
+    "Lodha Palava -Fire Station" -> "Lodha Palava", "Lodha Wood-T6" ->
+    "Lodha Wood". Bracketed designators are kept ("Raheja Solaris (Tower-A)"
+    is a different site from "(Tower-B)" — see :func:`_strip_trailing_dash_designator`).
+    """
+    return _strip_trailing_dash_designator(name, brackets=False)
+
+
+def _peel_to_name(candidate, clean_name) -> bool:
+    """True when *candidate* is *clean_name* plus a trailing designator.
+
+    "lodha palava-fire stattion" -> "Lodha Palava": the words of *clean_name*
+    must open the candidate, and everything after them must be designator-ish
+    — a number, a "T6"-style token, a unit word, or a near-miss of one
+    ("stattion"). Case/spacing/punctuation and a leading article are ignored,
+    exactly like :func:`normalize_site_name`.
+    """
+    words = normalize_site_name(clean_name).split()
+    cand = normalize_site_name(candidate).split()
+    if not words or len(cand) < len(words):
+        return False
+    for want, got in zip(words, cand):
+        if want != got and not _one_edit_apart(want, got):
+            return False
+    for token in cand[len(words):]:
+        if (token.isdigit() or _DESIGNATOR_TOKEN_RE.match(token)
+                or token in _UNIT_WORDS or _close_unit_word(token)):
+            continue
+        return False
+    return True
 
 
 class ConfigManager:
@@ -1965,7 +2114,12 @@ class ConfigManager:
         name — the existing canonical spelling, or the newly added name.
         """
         site = site.strip()
+        client = (client or "").strip()
         if not site:
+            return ""
+        if not client:
+            # A site belongs to a client: never create an empty-named client
+            # key (the popup asks for the Client before it offers Add Site).
             return ""
         if is_designator_only(site):
             # "Tower B", "Wing C", "T-9/10" — a bare unit designator carries
@@ -1993,19 +2147,28 @@ class ConfigManager:
                     removed[:] = [r for r in removed
                                   if str(r).strip().lower() != str(key).lower()]
             sites = clients.setdefault(key, [])
-            canonical = find_near_name(list(sites), site)
-            if canonical is not None:
+            # Clean-preferring match: the catalog may hold only a
+            # designator-suffixed STRAY for this place ("Lodha Palava -Fire
+            # Station"). find_near_site then answers with the CLEAN name,
+            # which is not a catalog entry yet — store it as one below.
+            canonical = find_near_site(list(sites), site)
+            if canonical is not None and any(
+                    str(s).strip().lower() == str(canonical).strip().lower()
+                    for s in sites):
                 if canonical != site:
                     print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
                 return canonical
-            # A trailing unit designator ("Raymond Premium T-B" = Tower B,
-            # "Kalpataru Elitus Tower B", "X Wing C") never becomes part of a
-            # NEW site name — the designator is not the place, so the stored
-            # site is "Raymond Premium" ("T-B is for Tower B so it shouldn't
-            # be putting T-B in Site").
-            effective = _strip_trailing_dash_designator(site)
+            if canonical is not None:
+                effective = str(canonical)
+            else:
+                # A trailing unit designator ("Raymond Premium T-B" = Tower B,
+                # "Kalpataru Elitus Tower B", "X Wing C") never becomes part of
+                # a NEW site name — the designator is not the place, so the
+                # stored site is "Raymond Premium" ("T-B is for Tower B so it
+                # shouldn't be putting T-B in Site").
+                effective = _strip_trailing_dash_designator(site)
             if effective != site:
-                canonical = find_near_name(list(sites), effective)
+                canonical = find_near_site(list(sites), effective)
                 if canonical is not None:
                     if canonical != site:
                         print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")

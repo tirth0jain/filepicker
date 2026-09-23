@@ -36,6 +36,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from version import VERSION
+# Financial-year normalisation is shared with the filename builder, so
+# the value read off the document and the value written into the file
+# name can never disagree about what "25-26" means.
+from filename import fy_from_text as _fy_from_text
 
 # OpenCode Go catalog endpoint (OpenAI-compatible). Both the OpenCode Go
 # subscription and the zen catalog share one key; the Go catalog is served
@@ -329,7 +333,8 @@ OCR_PROMPT = """You are given a delivery note document. Extract the following in
 2. Client (Buyer) - the company being supplied to, as printed in the "Buyer (Bill to)" or "Consignee (Ship to)" block
 3. Site - ONLY the value of the field literally labelled "Other References" (usually a project or site name, sometimes with a tower/wing/phase written with it)
 4. Serial Number - the number in the "Delivery Note No." field (e.g., "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
-5. Description of Goods - ONLY the BOLD heading words of each item in the goods/items table (the short material name printed in bold at the head of the row) — NOT the smaller normal-weight description lines written below each heading
+5. Financial Year - the two-digit year pair in the SAME "Delivery Note No." value (e.g., "RS/DC/25-26/123" -> 25-26, "RS/DC/26-27/6" -> 26-27). Two digits, a hyphen, two digits — never a full year
+6. Description of Goods - ONLY the BOLD heading words of each item in the goods/items table (the short material name printed in bold at the head of the row) — NOT the smaller normal-weight description lines written below each heading
 
 Rules:
 - COPY WHAT IS PRINTED. Every value is the text printed on THIS document: the same words, the same spelling, the same tower/wing/phase suffix. Never correct a spelling, translate, expand an abbreviation, tidy up a name, or replace a name with a similar one you have seen on another document or know from elsewhere. A value that looks wrong is still copied as printed — the app matches names against its own catalog itself.
@@ -339,7 +344,8 @@ Rules:
 - Site is that field's WHOLE value, exactly as printed, including any tower/wing/unit part written with it: if it reads "X T-2", copy "X T-2" — never shorten it to "X", and never replace X with the name of another site. The same for a spelled-out designator ("X Tower 2" stays "X Tower 2")
 - If the document has no "Other References" field, leave the Site cell EMPTY (do not substitute any other value)
 - Serial Number is the numeric part of the "Delivery Note No." value: digits only, 1-4 digits, usually the part after the last "/" (e.g. "RS/DC/26-27/6" -> 6, "RS/DC/26-27/55" -> 55)
-- If the Delivery Note No. is not present, leave Serial Number empty
+- Financial Year is the year pair inside the SAME "Delivery Note No." value, copied as two two-digit years joined by a hyphen ("25-26", "26-27"). It is NOT the current year and NOT a guess: if the value has no year pair, leave Financial Year empty
+- If the Delivery Note No. is not present, leave Serial Number AND Financial Year empty
 - Description of Goods: transcribe ONLY the BOLD heading of each item row (the short material name printed in bold). IGNORE the smaller normal-weight description lines written BELOW each heading. If no text in the table is bold, transcribe only the FIRST line of each item (the heading), never the sub-lines below. Do NOT invent, translate, correct or summarise item names. If there is no goods table/column, leave it EMPTY
 - Capitalisation may be normalised to Title Case (Description of Goods keeps the document's own wording); nothing else about a value may change
 
@@ -351,6 +357,7 @@ Output format:
 | Client (Buyer) | [Name] |
 | Site (Other References) | [Name] |
 | Serial Number (Delivery Note No.) | [Number] |
+| Financial Year (Delivery Note No.) | [YY-YY] |
 | Description of Goods | [Bold item headings, comma separated] |"""
 
 # The catalog is deliberately NOT part of the prompt any more (see the note on
@@ -365,6 +372,12 @@ _ROW_PATTERNS = {
     "company": re.compile(r"Company\s*\(Supplier\)", re.IGNORECASE),
     "client": re.compile(r"Client\s*\(Buyer\)", re.IGNORECASE),
     "site": re.compile(r"Site\s*\(Other\s*References\)", re.IGNORECASE),
+    "fy": re.compile(
+        # "Financial Year (Delivery Note No.)" / "Financial Year" / "FY"
+        r"(?:Financial\s*Year|FY)"
+        r"\s*(?:\(\s*(?:Delivery\s*Note|Invoice|Bill)[^)]*\))?",
+        re.IGNORECASE,
+    ),
     "serial": re.compile(
         # "Serial Number (Delivery Note No.)" / "Serial Number" /
         # "Delivery Note No." / "Delivery Note Number" / "Serial No."
@@ -537,6 +550,31 @@ def serial_from_filename(file_name) -> Optional[str]:
     return nums[-1] if nums else None
 
 
+def fy_from_reference(value) -> Optional[str]:
+    """The financial year inside a "Delivery Note No."-style value.
+
+    "RS/DC/25-26/123" -> "25-26" (the year the DOCUMENT belongs to, which is
+    what the filename needs — not the current year). Returns None when the
+    value holds no consecutive year pair.
+    """
+    return _fy_from_text(value)
+
+
+def fy_from_filename(file_name) -> Optional[str]:
+    """Best-effort financial year taken from the download file name.
+
+    Most delivery notes carry their "Delivery Note No." in the file name
+    ("RS-DC-25-26-7.pdf" -> "25-26"), so this fills the popup's Financial
+    Year when the OCR read returned none. Returns None when the name has no
+    year pair.
+    """
+    try:
+        stem = Path(str(file_name)).stem
+    except Exception:
+        return None
+    return _fy_from_text(stem)
+
+
 def _looks_like_reference(value: str) -> bool:
     """True when *value* looks like a reference/order number, not a site name.
 
@@ -573,7 +611,7 @@ def parse_table_response(content: str) -> Dict[str, Optional[str]]:
     """
     result: Dict[str, Optional[str]] = {
         "company": None, "client": None, "site": None, "serial": None,
-        "goods": None,
+        "fy": None, "goods": None,
     }
     if not content:
         return result
@@ -599,6 +637,11 @@ def parse_table_response(content: str) -> Dict[str, Optional[str]]:
             if value:
                 if key == "serial":
                     value = _clean_serial(value)
+                elif key == "fy":
+                    # The model may answer with a full year ("2025-26") or the
+                    # whole reference ("RS/DC/25-26/123") — keep only the year
+                    # pair, and drop anything that is not one.
+                    value = fy_from_reference(value) or ""
                 elif key == "site":
                     # Site is "Other References"-only; anything that looks like
                     # a reference number instead is treated as absent so the

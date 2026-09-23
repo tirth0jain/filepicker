@@ -438,6 +438,9 @@ class FilePickerController:
             materials=payload["materials"],
             materials_map=self.config.materials,
             serial=payload["serial"],
+            # Financial year read from the document's Delivery Note No. and
+            # editable in the popup (None -> today's year).
+            fy=payload.get("fy"),
             status=payload["status"],
             root=Path(self.config.root_directory),
             initials_map=self.config.company_initials,

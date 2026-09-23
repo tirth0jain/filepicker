@@ -44,12 +44,90 @@ def financial_year(now: Optional[datetime.date] = None) -> str:
 
     - If current month >= April: ``YY-(YY+1)``
     - If current month < April: ``(YY-1)-YY``
+
+    This is only the DEFAULT for a popup: the financial year that belongs in
+    the filename is the one printed in the document's "Delivery Note No."
+    ("RS/DC/25-26/123" -> "25-26"), which is read by OCR and passed to
+    :func:`build_filename` as ``fy``. See :func:`normalize_fy`.
     """
     today = now or datetime.date.today()
     year = today.year % 100
     if today.month >= 4:
         return f"{year:02d}-{(year + 1) % 100:02d}"
     return f"{(year - 1) % 100:02d}-{year:02d}"
+
+
+# A financial year as people write it: "25-26", "2025-26", "25/26", "2025/2026".
+_FY_RE = re.compile(r"^\s*(\d{2}|\d{4})\s*[-/]\s*(\d{2}|\d{4})\s*$")
+# The same pair inside a longer reference: "RS/DC/25-26/123", "RS-DC-25-26-7",
+# "2026-27-0144", "2025-2026". Either side may be written as a full year; the
+# lookarounds keep it from matching inside a longer digit run ("1234-56").
+_FY_IN_TEXT_RE = re.compile(r"(?<![\d])((?:20)?\d{2})\s*-\s*((?:20)?\d{2})(?![\d])")
+
+
+def normalize_fy(value) -> Optional[str]:
+    """Normalise a financial year to ``YY-YY``, else None.
+
+    Accepts "25-26", "25/26", "2025-26", "2025/2026" (and stray spaces) and
+    returns "25-26". The two years must be CONSECUTIVE ("25-26" is a financial
+    year, "25-27" is a typo), otherwise None is returned and the caller falls
+    back to the current financial year.
+    """
+    match = _FY_RE.match(str(value or ""))
+    if not match:
+        return None
+    start = int(match.group(1)) % 100
+    end = int(match.group(2)) % 100
+    if end != (start + 1) % 100:
+        return None
+    return f"{start:02d}-{end:02d}"
+
+
+def fy_from_text(value) -> Optional[str]:
+    """The financial year inside a reference, e.g. "RS/DC/25-26/123" -> "25-26".
+
+    Used for the document's "Delivery Note No." and for the download's file
+    name (which usually carries the same reference). Returns None when the
+    text holds no plausible year pair.
+    """
+    text = str(value or "")
+    direct = normalize_fy(text)
+    if direct:
+        return direct
+    for match in _FY_IN_TEXT_RE.finditer(text):
+        candidate = normalize_fy(f"{match.group(1)}-{match.group(2)}")
+        if candidate:
+            return candidate
+    return None
+
+
+def fy_options(now: Optional[datetime.date] = None, include=None,
+               back: int = 2, forward: int = 1) -> list:
+    """The financial years a popup offers, newest-relevant first.
+
+    The document's own year (``include``) comes first when it is known, then
+    the current one, then the previous ``back`` years and the next ``forward``
+    year — e.g. for Aug 2026: ["26-27", "25-26", "24-25", "27-28"] (with
+    "25-26" first when the document says so).
+    """
+    today = now or datetime.date.today()
+    current_start = today.year % 100 if today.month >= 4 else (today.year - 1) % 100
+    years = []
+    wanted = []
+    known = normalize_fy(include) if include else None
+    if known:
+        wanted.append(known)
+    wanted.append(f"{current_start:02d}-{(current_start + 1) % 100:02d}")
+    for offset in range(1, back + 1):
+        start = (current_start - offset) % 100
+        wanted.append(f"{start:02d}-{(start + 1) % 100:02d}")
+    for offset in range(1, forward + 1):
+        start = (current_start + offset) % 100
+        wanted.append(f"{start:02d}-{(start + 1) % 100:02d}")
+    for value in wanted:
+        if value not in years:
+            years.append(value)
+    return years
 
 
 def material_code(name: str, stored: Optional[str] = None) -> str:
@@ -121,6 +199,7 @@ def build_filename(
     extension: str,
     now: Optional[datetime.date] = None,
     initials_map: Optional[dict] = None,
+    fy: Optional[str] = None,
 ) -> str:
     """Assemble the fully formatted file name.
 
@@ -132,10 +211,17 @@ def build_filename(
     ``initials_map`` optionally maps a company name to its short initials used
     in the filename (otherwise initials are derived from the name).
 
+    ``fy`` is the financial year the DOCUMENT belongs to — read from its
+    "Delivery Note No." ("RS/DC/25-26/123" -> "25-26") and shown in the
+    popup, so a note from the previous year is filed as 25-26 instead of
+    whatever today's date would give. Anything that is not a consecutive
+    year pair is ignored and :func:`financial_year` (today) is used instead,
+    so a bad value can never reach the filename.
+
     The Received/Submitted ``status`` is intentionally absent: it lives only
     in the destination folder (``.../<Doc Type>/<Received or Submitted>/``).
     """
-    fy = financial_year(now)
+    fy = normalize_fy(fy) or financial_year(now)
     codes = material_shortcodes(selected_materials, materials_map)
     company_code = company_initials(company, initials_map)
 

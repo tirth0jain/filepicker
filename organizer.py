@@ -56,6 +56,10 @@ class OrganizeRequest:
     root: Path
     replace: bool = False          # overwrite existing destination files
     initials_map: Optional[dict] = None   # company name -> initials override
+    # Financial year for the filename, read from the document's "Delivery
+    # Note No." ("RS/DC/25-26/123" -> "25-26") and editable in the popup.
+    # None (or an invalid value) means "use today's financial year".
+    fy: Optional[str] = None
 
 
 def _destination_for(root: Path, company: str, client: str, site: str,
@@ -89,6 +93,7 @@ def output_paths(request: OrganizeRequest) -> List[Path]:
         serial=request.serial,
         extension=ext,
         initials_map=request.initials_map,
+        fy=request.fy,
     )
     paths = [
         _destination_for(

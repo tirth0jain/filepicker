@@ -17,8 +17,8 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   popup. Simultaneous downloads are queued and handled one at a time.
 - **Metadata popup** — a top-most modal dialog showing the target file banner,
   Company / Site dropdowns (with an inline *Add New Site* flow), Document Type,
-  Material multi-select (with *Add Material*), Serial Number, a *Received Copy*
-  checkbox, and a live filename preview.
+  Material multi-select (with *Add Material*), Financial Year, Serial Number, a
+  *Received Copy* checkbox, and a live filename preview.
 - **File preview** — a **👁 Preview** button in the popup expands the window to
   the right and shows the file preview **embedded in the same window** (no
   separate window). Click **✕ Close Preview** to collapse it back:
@@ -35,8 +35,12 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   The Received/Submitted status is deliberately *not* in the filename — it is
   reflected only in the destination folder
   (`.../[Doc Type]/[Received or Submitted]/`).
-- **Financial Year** auto-calculated for the Indian fiscal year (Apr 1–Mar 31):
-  Aug 2026 → `26-27`, Feb 2026 → `25-26`.
+- **Financial Year** — read from the **Delivery Note No.** the document
+  prints (`RS/DC/25-26/123` → `25-26`) and shown in an editable *Financial
+  Year* dropdown, so a note from the previous year is filed as `25-26`
+  instead of whatever today's date would give. The Indian fiscal year
+  (Apr 1–Mar 31) is only the default: Aug 2026 → `26-27`, Feb 2026 → `25-26`,
+  and the menu always offers the two previous years and the next one.
 - **Directory routing** — copies the file (once) into:
   `[root]/[Company]/[Client]/[Site]/[Doc Type]/[Received or Submitted]/[filename]`,
   plus an extra copy into `[root]/[Company]/All DC/[Received or Submitted]/` whenever the
@@ -60,7 +64,10 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   work. Question
   dialogs (duplicate file, site of another client) show a letter on every
   option — press **Ctrl+Y / Ctrl+N / Ctrl+M** to answer instantly, or move the
-  selection with the **arrow keys** and press **Enter**.
+  selection with the **arrow keys** and press **Enter**. In the *site of
+  another client* dialog the **Move its sites here** option is the blue,
+  Enter-selected one (merging the other client into this one is the usual
+  answer); *Keep here* and *Cancel* stay neutral, and Escape cancels.
   The popup also verifies a moment after opening that it is really on screen
   and re-shows itself if Windows left it hidden, so a popup can never be
   silently missing while the queue waits for it.
@@ -162,6 +169,16 @@ waits. While a read is in flight the popup shows
 `OCR: reading document… (N files read together)`.
 
 **What the model reads, and what the app matches:** the model is asked to
+**Catalog edits are instant.** Adding a site or a client (or a 🗺 mapping)
+writes to `config.json` and is pushed to GitHub straight away, and every popup
+on screen — including the ones that open next in a 10-file batch — picks it up
+immediately: the new site is searchable in the dropdown, selectable in the
+field and offered as a target in the 🗺 Map dialog of the very popup that added
+it, and a mapping made in one popup is already applied to the next file's
+fields (whose OCR was read before the mapping existed). A site can only be
+added once a Client is chosen — without one it would land under an empty
+client name and never be found again.
+
 **copy the printed values** — nothing else. The catalog is deliberately *not*
 part of the prompt (it used to list every known site and client and order the
 model to "output the Known Site name exactly as listed", which turned reading
@@ -194,8 +211,19 @@ whatever order the catalog happens to be in, and a catalog holding both
 A name that matches nothing stays exactly as printed so you can review it (and
 optionally *Add* it) before saving. The Serial Number is read from the
 **Delivery Note No.** field (e.g. `RS/DC/26-27/6` → `6`) and, when OCR can't
-read it, is back-filled from the file name (`RS-DC-26-27-6.pdf` → `6`). The
-key never lands in `config.json`, so it can't leak to the public repo.
+read it, is back-filled from the file name (`RS-DC-26-27-6.pdf` → `6`); the
+**Financial Year** comes from the same value (`RS/DC/25-26/123` → `25-26`,
+falling back to the file name and then to today's year). The key never lands
+in `config.json`, so it can't leak to the public repo.
+
+A **facility** written inside a project counts as a unit designator, exactly
+like a tower or a penthouse: `Lodha Palava -Fire Station` is the site `Lodha
+Palava`, and a catalog entry an older build saved with that tail
+(`Lodha Palava -Fire Station`, `Lodha Nibm -T6 Pent`) is resolved to its clean
+name instead of pulling the value back to the long spelling. Only that
+facility tail behaves this way — a site you have been filing under for years
+(`Kalpataru Vivant Tower`, `Lodha Woods Club House`) keeps its name and its
+folder.
 
 **A new document at an old file name is read again.** The OCR cache is keyed by
 the file *and its content identity* (size + modified time), not by the path
@@ -369,9 +397,13 @@ No other file needs changing — the rest all import `VERSION`.
 
 ## Filename rules
 
-- **Financial Year (FY)** — Indian fiscal year (Apr 1 – Mar 31).
-  - Month ≥ April: `YY-(YY+1)` (e.g. Aug 2026 → `26-27`).
-  - Month < April: `(YY-1)-YY` (e.g. Feb 2026 → `25-26`).
+- **Financial Year (FY)** — the year the *document* belongs to, read from its
+  **Delivery Note No.** (`RS/DC/25-26/123` → `25-26`) and editable in the
+  popup. When the read has no year pair, the file name (`RS-DC-25-26-7.pdf`)
+  is used, and only then today's Indian fiscal year (Apr 1 – Mar 31: month ≥
+  April → `YY-(YY+1)`, e.g. Aug 2026 → `26-27`; month < April → `(YY-1)-YY`,
+  e.g. Feb 2026 → `25-26`). A value that is not a consecutive year pair is
+  ignored, so a typo can never reach a filename.
 - **Material shortcodes** — multiple materials joined with `+`, e.g. `A+C`.
 - **Status** — `Received` when *Received Copy* is checked, else `Submitted`.
 - **Sanitisation** — illegal Windows characters `\ / : * ? " < > |` are removed,

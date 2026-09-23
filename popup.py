@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import tkinter as tk
+import weakref
 import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import ttk
@@ -383,7 +384,7 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     if overlay:
         try:
             parent.update_idletasks()
-            w, h = 560, 330
+            w, h = 620, 330
             px = parent.winfo_rootx() + max((parent.winfo_width() - w) // 2, 0)
             py = parent.winfo_rooty() + max((parent.winfo_height() - h) // 2, 0)
             dialog.geometry(f"{w}x{h}+{max(px, 0)}+{max(py, 0)}")
@@ -392,7 +393,7 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     if not overlay:
         try:
             sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-            dialog.geometry(f"560x330+{max((sw - 560) // 2, 0)}+{max((sh - 330) // 3, 0)}")
+            dialog.geometry(f"620x330+{max((sw - 620) // 2, 0)}+{max((sh - 330) // 3, 0)}")
         except tk.TclError:
             pass
 
@@ -417,10 +418,14 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
                       for other, other_site in conflicts[:6])
     if len(conflicts) > 6:
         lines += f"\n•  … and {len(conflicts) - 6} more"
+    # Button labels stay SHORT: the client names can be long enough to be
+    # clipped by the button ("Move Larsen and Toubro Limited - Realty
+    # Division's sites here" never fitted — the user could not read it). The
+    # names are spelled out in the body text above instead.
     if len(others) == 1:
-        transfer_text = f"Move {others[0]}'s sites here"
+        transfer_text = "Move its sites here"
     else:
-        transfer_text = f"Move all {len(others)} clients' sites here"
+        transfer_text = f"Move all {len(others)} clients' sites"
 
     ctk.CTkLabel(
         dialog, text="⚠ This site is already used by another client",
@@ -430,8 +435,10 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
         dialog,
         text=f"\"{site}\" is the same place as a site of another client:\n"
              f"{lines}\n\n"
-             f"Saving keeps this file under \"{client}\". Nothing is moved\n"
-             f"automatically — choose what to do:\n\n"
+             f"Nothing is moved automatically — choose what to do:\n"
+             f"  •  Keep here — save under \"{client}\" only\n"
+             f"  •  Move its sites here — merge every site of\n"
+             f"     {' and '.join(others)} into \"{client}\", then save\n\n"
              f"Ctrl+Y = keep  •  Ctrl+M = move sites  •  Ctrl+N = cancel\n"
              f"Arrows + Enter also work",
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
@@ -441,15 +448,18 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
     btn_row.pack(fill="x", padx=18, pady=(0, 16))
     keep_btn = ctk.CTkButton(
-        btn_row, text=f"Keep under {client}  (Y)", command=lambda: choose("continue"),
-        fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
-        font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff",
-    )
-    keep_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
-    move_btn = ctk.CTkButton(
-        btn_row, text=f"{transfer_text}  (M)", command=lambda: choose("transfer"),
+        btn_row, text="Keep here  (Y)", command=lambda: choose("continue"),
         fg_color=_BG_FIELD, hover_color="#33334a", height=38,
         font=ctk.CTkFont(size=12), text_color=_TEXT,
+    )
+    keep_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+    # The MOVE is the highlighted (blue) choice — the user's request: "have the
+    # move all clients highlighted in blue and not 'add only this client to
+    # the site'". It is also the Enter default below.
+    move_btn = ctk.CTkButton(
+        btn_row, text=f"{transfer_text}  (M)", command=lambda: choose("transfer"),
+        fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
+        font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff",
     )
     move_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
     cancel_btn = ctk.CTkButton(
@@ -464,9 +474,11 @@ def _cross_client_dialog_ui(parent, client: str, site: str, conflicts) -> tuple:
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
     dialog.bind("<Escape>", lambda _e: choose("cancel"))
     # Arrow selection + the letters shown on the buttons: Y = keep this file
-    # here, M = move the other client's sites, N = cancel.
+    # here, M = move the other client's sites, N = cancel. The default follows
+    # the blue highlight (M) — Escape and the window close still cancel, which
+    # is what changes nothing.
     _wire_dialog_choices(
-        dialog, [keep_btn, move_btn, cancel_btn], ["y", "m", "n"], default_index=0)
+        dialog, [keep_btn, move_btn, cancel_btn], ["y", "m", "n"], default_index=1)
 
     # Re-raise once mapped: topmost + transient can lose the race against the
     # popup's own topmost flag on the first map, which put this dialog behind
@@ -507,6 +519,50 @@ def ask_cross_client_site(parent, client: str, site: str, conflicts) -> str:
     dialog, callback = _cross_client_dialog_ui(parent, client, site, conflicts)
     dialog.wait_window()
     return callback["value"] or "cancel"
+
+# Every popup that is on screen right now (weak refs, pruned on use). A
+# catalog change made in one popup — a 🗺 mapping, a new site/client — is
+# applied to all of them immediately, so the popup that opens next can never
+# show the old name ("When 10 files together are added and I change mapping in
+# one, next file doesnt have it" — the OCR of every file in the batch was
+# already read, so the fields of the next popup are filled from a cached
+# result and must be re-resolved when a mapping appears).
+_LIVE_POPUPS: List["weakref.ref"] = []
+
+
+def _live_popups() -> List["FilePickerPopup"]:
+    """The popups currently on screen (dead references dropped)."""
+    alive: List["FilePickerPopup"] = []
+    for ref in list(_LIVE_POPUPS):
+        popup = ref()
+        if popup is None:
+            try:
+                _LIVE_POPUPS.remove(ref)
+            except ValueError:
+                pass
+        else:
+            alive.append(popup)
+    return alive
+
+
+def notify_catalog_changed(kind: str = "") -> None:
+    """Re-apply mappings + reload dropdowns in every popup on screen.
+
+    Called after a 🗺 mapping is added/removed and after a site/client is
+    added, so the change is live in the popup that made it AND in the ones
+    that open afterwards (the catalog is read from config.json, which is
+    already written by then).
+    """
+    for popup in _live_popups():
+        try:
+            popup._apply_mapping_to_current(kind)
+        except Exception as exc:
+            print(f"[filepicker] popup mapping refresh error: {exc}")
+        try:
+            popup.refresh_from_config()
+        except Exception as exc:
+            print(f"[filepicker] popup config refresh error: {exc}")
+
 
 # File types the preview viewer can render (see viewer.py).
 _SUPPORTED_PREVIEW_EXTS = {
@@ -1037,12 +1093,30 @@ class MappingDialog:
         self._error_label.configure(
             text="✓ Mapping saved — applied from the next OCR read."
                  if changed else "✓ Mapping already set.")
+        if changed:
+            # A mapping is a deliberate catalog edit, so it goes to GitHub
+            # NOW instead of waiting for the next saved file: the next popup
+            # (and every other machine) must have it immediately.
+            self._push_now("mapping")
         self._refresh_list()
         if self._on_changed is not None:
             try:
                 self._on_changed()
             except Exception:
                 pass
+
+    def _push_now(self, what: str) -> None:
+        """Publish the change to GitHub straight away (never blocks).
+
+        The deferred push exists so a half-filled popup that is skipped cannot
+        touch the repo — a mapping (and an explicitly added site/client) is not
+        half-filled, it is a finished catalog edit, so it is flushed now.
+        """
+        try:
+            self.config.flush_pending_push(
+                force_reason=f"FilePicker: {what} updated")
+        except Exception as exc:
+            print(f"[filepicker] mapping push error: {exc}")
 
     def _refresh_list(self) -> None:
         rows = [(str(k), str(v)) for k, v in self._alias_map().items()]
@@ -1067,7 +1141,8 @@ class MappingDialog:
         if not sel or not self._rows:
             return
         source = self._rows[sel[0]][0]
-        self._remove_alias(source)
+        if self._remove_alias(source):
+            self._push_now("unmapping")
         self._refresh_list()
         if self._on_changed is not None:
             try:
@@ -1125,6 +1200,12 @@ class FilePickerPopup:
         self._company_var = tk.StringVar()
         self._client_var = tk.StringVar()
         self._doc_type_var = tk.StringVar(value="DC")
+        # Financial year: the DOCUMENT's own year is filled in by OCR from its
+        # "Delivery Note No." ("RS/DC/25-26/123" -> 25-26); the current year is
+        # only the starting default (the user can always pick another).
+        self._fy_var = tk.StringVar(value=fn.financial_year())
+        # True once the user picks a year by hand: OCR never replaces that.
+        self._fy_touched = False
         self._serial_var = tk.StringVar()
         # Received Copy is UNCHECKED by default (unchecked = Submitted).
         self._received_var = tk.BooleanVar(value=False)
@@ -1152,6 +1233,10 @@ class FilePickerPopup:
         # Raw Company/Client/Site values the OCR returned (before any
         # canonicalization) — shown highlighted in yellow in the preview.
         self._ocr_highlight_terms: List[str] = []
+        # The values the LAST read actually returned (pre-mapping,
+        # pre-near-match), so a mapping added later can be re-applied to them
+        # even though the field now shows a resolved spelling.
+        self._ocr_raw: Dict[str, str] = {}
         # Live OCR status line: `_ocr_progress_after` is the pending
         # after()-tick that refreshes the "reading document…" counters, and
         # `_ocr_poll_done` stops it once the outcome has been applied.
@@ -1168,6 +1253,8 @@ class FilePickerPopup:
         self._build_ui()
         self._reload_config_state()
         self._set_banner()
+        # Track this popup so a mapping/site added in ANY popup reaches it.
+        _LIVE_POPUPS.append(weakref.ref(self))
 
         # Preview open by default: "preview_open_by_default": true (default)
         # opens the preview with the popup; false starts with the form only
@@ -1178,6 +1265,7 @@ class FilePickerPopup:
 
         # Live-update the preview when the serial or checkbox changes.
         self._serial_var.trace_add("write", lambda *_: self._refresh_preview())
+        self._fy_var.trace_add("write", lambda *_: self._refresh_preview())
         self._received_var.trace_add("write", lambda *_: self._refresh_preview())
 
         # Keep the popup on top of everything AND give it the keyboard: the
@@ -1519,6 +1607,16 @@ class FilePickerPopup:
         # the Received Copy checkbox used to be the casualty (a 2px sliver at
         # 1366x768, gone entirely below ~700). Pinned, the chip panel gives up
         # rows instead. On tall screens they stay in the normal top-down flow.
+        fy_label = ctk.CTkLabel(f, text="Financial Year",
+                                font=ctk.CTkFont(size=13, weight="bold"),
+                                text_color=_TEXT_MUTED,
+                                height=self._h(28, 20))
+        self.fy_combo = ctk.CTkOptionMenu(
+            f, values=fn.fy_options(include=self._fy_var.get()),
+            variable=self._fy_var, command=self._on_fy_change,
+            fg_color=_BG_FIELD, button_color=_ACCENT,
+            button_hover_color=_ACCENT, height=self._h(28, 24),
+        )
         serial_label = ctk.CTkLabel(f, text="Serial Number",
                                     font=ctk.CTkFont(size=13, weight="bold"),
                                     text_color=_TEXT_MUTED,
@@ -1536,13 +1634,18 @@ class FilePickerPopup:
         )
         if self._compact:
             # side="bottom" stacks bottom-up: pack the checkbox first so it
-            # ends up ABOVE the preview, then the entry, then its label.
+            # ends up ABOVE the preview, then the entry, then its label, then
+            # the Financial Year row above them.
             self.received_check.pack(side="bottom", anchor="w",
                                      pady=(0, self._sp(6)))
             self.serial_entry.pack(side="bottom", fill="x",
                                    pady=(0, self._sp(6)))
             serial_label.pack(side="bottom", anchor="w",
                               pady=(0, self._sp(1, 1)))
+            self.fy_combo.pack(side="bottom", fill="x",
+                               pady=(0, self._sp(6)))
+            fy_label.pack(side="bottom", anchor="w",
+                          pady=(0, self._sp(1, 1)))
 
         # -- Target file banner -----------------------------------------
         self._banner = ctk.CTkFrame(f, fg_color=_BG_SECONDARY, corner_radius=10)
@@ -1754,6 +1857,8 @@ class FilePickerPopup:
         # with side="bottom". On tall screens they flow normally, here, below
         # the material panel.)
         if not self._compact:
+            fy_label.pack(anchor="w", pady=(0, 1))
+            self.fy_combo.pack(fill="x", pady=(0, 6))
             serial_label.pack(anchor="w", pady=(0, 1))
             self.serial_entry.pack(fill="x", pady=(0, 6))
             self.received_check.pack(anchor="w", pady=(0, 6))
@@ -2499,6 +2604,23 @@ class FilePickerPopup:
         self._reload_company_options()
         self._company_var.set(company)
         self._refresh_preview()
+        self._publish_catalog_change("company")
+
+    def _publish_catalog_change(self, what: str) -> None:
+        """Make a just-added company/client/site live everywhere at once.
+
+        The new entry is already in config.json (add_* saves it), so every
+        popup's dropdowns — and the 🗺 Map dialogs' target lists — can offer it
+        right away, and the push to GitHub is flushed now instead of waiting
+        for the next saved file ("Add site+client should be instantly added to
+        config and take effect from same popup").
+        """
+        notify_catalog_changed(what)
+        try:
+            self.config.flush_pending_push(
+                force_reason=f"FilePicker: add {what}")
+        except Exception as exc:
+            print(f"[filepicker] catalog push error: {exc}")
 
     def _reload_company_options(self) -> None:
         companies = self.config.companies
@@ -2537,6 +2659,7 @@ class FilePickerPopup:
         self.client_dropdown.set(effective)
         self._populate_sites(effective)
         self._refresh_preview()
+        self._publish_catalog_change("client")
 
     def _reload_client_options(self) -> None:
         clients = self.config.clients
@@ -2544,9 +2667,51 @@ class FilePickerPopup:
         if clients:
             self.client_dropdown.set(next(iter(clients)))
 
+    def _on_fy_change(self, fy: str) -> None:
+        """The user picked a financial year by hand (never OCR's to change)."""
+        self._fy_touched = True
+        if fn.normalize_fy(fy):
+            self._fy_var.set(fn.normalize_fy(fy))
+        self._refresh_preview()
+
+    def _add_fy_option(self, fy: str) -> None:
+        """Make sure *fy* is selectable in the Financial Year dropdown.
+
+        A document can carry a year outside the offered window ("23-24" on an
+        old note), and the value read from it must be visible — and re-pickable
+        — in the menu, not just typed into the variable.
+        """
+        fy = fn.normalize_fy(fy)
+        if not fy:
+            return
+        try:
+            values = list(self.fy_combo.cget("values"))
+        except Exception:
+            return
+        if fy in values:
+            return
+        values = fn.fy_options(include=fy)
+        try:
+            self.fy_combo.configure(values=values)
+        except Exception:
+            pass
+
     def _on_site_change(self, site: str) -> None:
         if site == ADD_NEW_SITE_OPTION:
-            client = self._client_var.get()
+            client = self._client_var.get().strip()
+            if not client:
+                # A site belongs to a client: without one the new site would
+                # land under an empty client name and never show up in the
+                # dropdown again. Ask for the client first.
+                self.preview_label.configure(
+                    text="⚠ Pick a Client first, then add the Site",
+                    text_color=_DANGER)
+                try:
+                    self.client_dropdown.entry.focus_set()
+                except Exception:
+                    pass
+                self._populate_sites("")
+                return
             self._ask_text(
                 "Add New Site",
                 f"New site name for {client}:",
@@ -2567,9 +2732,18 @@ class FilePickerPopup:
         # add_site dedupes near-same sites and returns the name to use
         # (existing canonical spelling, or the newly added one).
         effective = self.config.add_site(client, site)
+        if not effective:
+            # add_site refuses a bare designator ("Tower B") and a missing
+            # client — say so instead of silently clearing the field.
+            self.preview_label.configure(
+                text="⚠ Could not add that site — pick a Client first and "
+                     "give the site a real name", text_color=_DANGER)
+            self._populate_sites(client)
+            return
         self._populate_sites(client)
         self.site_dropdown.set(effective)
         self._refresh_preview()
+        self._publish_catalog_change("site")
 
     # ------------------------------------------------------------------
     # Name MAPPING (the 🗺 Map buttons next to Client/Site)
@@ -2597,7 +2771,7 @@ class FilePickerPopup:
         MappingDialog(
             self.window, kind=kind, config=self.config,
             names=names, current=current,
-            on_changed=lambda k=kind: self._apply_mapping_to_current(k),
+            on_changed=lambda k=kind: notify_catalog_changed(k),
         )
 
     def _apply_mapping_to_current(self, kind: str) -> None:
@@ -2605,17 +2779,22 @@ class FilePickerPopup:
         shows the (now mapped) source name.
 
         The mapping is "the name this document has → the name to use", so a
-        just-mapped source visible in the current popup switches to the
-        target right away — the same rule OCR will follow for future popups.
+        just-mapped source visible in the popup switches to the target right
+        away — the same rule OCR follows. The RAW value the OCR read is tried
+        first: the field may already show a catalog spelling that the mapping
+        was made for ("Lodha Developer" mapped while the field shows the
+        near-matched "LODHA"), and the mapping must still land.
         """
-        if kind == "material":
+        if kind not in ("client", "site"):
             # Material mappings affect future OCR reads of the goods
-            # description; there is no popup field to switch right now.
+            # description, and a company/site ADD has no mapped source to
+            # switch — nothing to do in the fields.
             return
         try:
             if kind == "client":
                 cur = self.client_dropdown.get().strip()
-                mapped = self.config.resolve_client(cur)
+                mapped = self.config.resolve_client(
+                    self._ocr_raw.get("client") or cur)
                 if mapped and mapped != cur:
                     self.client_dropdown.set(mapped)
                     self._client_var.set(mapped)
@@ -2623,7 +2802,8 @@ class FilePickerPopup:
                     self._refresh_preview()
             else:
                 cur = self._current_site().strip()
-                mapped = self.config.resolve_site(cur)
+                mapped = self.config.resolve_site(
+                    self._ocr_raw.get("site") or cur)
                 if mapped and mapped != cur:
                     client = self._client_var.get().strip()
                     # Read-only resolution: a mapped target that isn't in
@@ -2953,11 +3133,12 @@ class FilePickerPopup:
             self.client_dropdown.entry.get().strip(),
             self.site_dropdown.entry.get().strip(),
             self._serial_var.get().strip(),
+            self._fy_var.get().strip(),
             tuple(self._selected_materials),
         )
 
     def _clear_ocr_values(self, fields=("company", "client", "site", "serial",
-                                        "materials")) -> bool:
+                                        "fy", "materials")) -> bool:
         """Drop everything OCR itself filled in (never the user's own edits).
 
         Used when a re-read comes back empty or fails: the values the rejected
@@ -2972,17 +3153,23 @@ class FilePickerPopup:
             changed = True
         if "client" in fields and "client" in self._ocr_filled:
             self._ocr_filled.pop("client", None)
+            self._ocr_raw.pop("client", None)
             self.client_dropdown.set("")
             self._client_var.set("")
             self._populate_sites("")
             changed = True
         if "site" in fields and "site" in self._ocr_filled:
             self._ocr_filled.pop("site", None)
+            self._ocr_raw.pop("site", None)
             self.site_dropdown.set("")
             changed = True
         if "serial" in fields and "serial" in self._ocr_filled:
             self._ocr_filled.pop("serial", None)
             self._serial_var.set("")
+            changed = True
+        if "fy" in fields and "fy" in self._ocr_filled:
+            self._ocr_filled.pop("fy", None)
+            self._fy_var.set(fn.financial_year())
             changed = True
         if "materials" in fields and self._ocr_materials:
             self._selected_materials = [
@@ -3028,6 +3215,8 @@ class FilePickerPopup:
             # again after a failed retry cleared it.
             from_name = (not self._serial_var.get().strip()
                          and self._apply_serial_from_filename())
+            if self._apply_fy_from_filename():
+                from_name = True
             if err:
                 message = self._short_ocr_error(err)
                 if cleared:
@@ -3050,8 +3239,11 @@ class FilePickerPopup:
             return
         changed = self._apply_ocr_result(result)
         # OCR missed the "Delivery Note No." field but the file name usually
-        # carries the serial — back-fill it as a fallback (never clobbers).
+        # carries the serial and its financial year — back-fill them as a
+        # fallback (never clobbers).
         if not self._serial_var.get().strip() and self._apply_serial_from_filename():
+            changed = True
+        if self._apply_fy_from_filename():
             changed = True
         took = self._ocr_seconds()
         if changed:
@@ -3087,6 +3279,23 @@ class FilePickerPopup:
         before = self._snapshot_fields()
         log_bits: List[str] = []
 
+        # Financial Year (dropdown) — the year pair of the document's own
+        # "Delivery Note No." ("RS/DC/25-26/123" -> 25-26). It replaces the
+        # current-year default (and an earlier read's year), but never a year
+        # the user picked by hand. A read without one falls back to the year
+        # in the file name, then to today's.
+        fy = fn.normalize_fy(result.get("fy"))
+        if not self._fy_touched:
+            if fy:
+                self._add_fy_option(fy)
+                self._fy_var.set(fy)
+                self._ocr_filled["fy"] = fy
+                log_bits.append(f"FY {fy}")
+            elif self._ocr_filled.pop("fy", None) is not None:
+                # This read found no year: drop the one WE filled before and
+                # fall back to today's.
+                self._fy_var.set(fn.financial_year())
+
         # Serial Number (free-text field) — digits only, 1-4 chars, already
         # normalised by the OCR parser.
         serial = (result.get("serial") or "").strip()
@@ -3107,6 +3316,7 @@ class FilePickerPopup:
         company = (result.get("company") or "").strip()
         client = (result.get("client") or "").strip()
         site = (result.get("site") or "").strip()
+        self._ocr_raw = {"client": client, "site": site}
 
         # Remember the RAW OCR values (incl. the serial) so the preview can
         # highlight exactly what the model read off the document — even when
@@ -3259,6 +3469,28 @@ class FilePickerPopup:
         self._serial_var.set(serial)
         return True
 
+    def _apply_fy_from_filename(self) -> bool:
+        """Fill the Financial Year from the download file name (fallback).
+
+        Most delivery notes carry their "Delivery Note No." in the file name
+        ("RS-DC-25-26-7.pdf" -> "25-26"). Only applied while the field still
+        shows the year WE put there (the default or an earlier read), never a
+        year the user picked. Returns True when the field changed.
+        """
+        if self._fy_touched:
+            return False
+        try:
+            from ocr import fy_from_filename
+            fy = fy_from_filename(self.file_path)
+        except Exception:
+            return False
+        if not fy or fy == self._fy_var.get().strip():
+            return False
+        self._add_fy_option(fy)
+        self._fy_var.set(fy)
+        self._ocr_filled["fy"] = fy
+        return True
+
     @staticmethod
     def _ci_canonical(values: List[str], name: str) -> Optional[str]:
         """The catalog spelling matching *name* case-insensitively, if any."""
@@ -3392,6 +3624,7 @@ class FilePickerPopup:
                 materials_map=self._materials_map,
                 serial=self._serial_var.get(),
                 extension=ext,
+                fy=self._fy_var.get(),
             )
         except Exception:
             name = ""
@@ -3522,6 +3755,7 @@ class FilePickerPopup:
             "doc_type": self._doc_type_var.get(),
             "materials": list(self._selected_materials),
             "serial": self._serial_var.get(),
+            "fy": self._fy_var.get(),
             "status": status,
         }
         self._release()
@@ -3559,6 +3793,13 @@ class FilePickerPopup:
             print(f"[filepicker] skip-all error: {exc}")
 
     def _release(self) -> None:
+        # This popup is done: stop receiving catalog-change notifications.
+        for ref in list(_LIVE_POPUPS):
+            if ref() is self or ref() is None:
+                try:
+                    _LIVE_POPUPS.remove(ref)
+                except ValueError:
+                    pass
         # Stop live config polling first so no after() fires on a destroyed window.
         try:
             self._stop_config_poll()
