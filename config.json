@@ -68,7 +68,9 @@
     "DUVILLE ESTATES PVT LTD": [],
     "ESKAY CONSTRUCTION": [],
     "ESPLANCE": [],
-    "FACADE PROFESSIONAL FITTERS PRIVATE LIMITED": [],
+    "FACADE PROFESSIONAL FITTERS PRIVATE LIMITED": [
+      "FACADE PROFESSIONAL"
+    ],
     "FIRSTLIGHT PROPERTIES PVT LTD": [
       "Eon One"
     ],
@@ -363,6 +365,16 @@
     ],
     "SWAYAM REALTORS AND TRADERS LLP": [
       "Monte South -TB"
+    ],
+    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": [
+      "Monte South"
+    ],
+    "Larsen & Toubro Limited": [
+      "Navi Mumbai International Airport",
+      "Nmial Dapoli",
+      "Elixir Reserve",
+      "L & T Powai",
+      "L & T (Retail)"
     ]
   },
   "client_aliases": {
@@ -395,8 +407,6 @@
   "removed_clients": [
     "Alder Residency Pvt Ltd",
     "LODHA",
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
-    "Larsen & Toubro Limited",
-    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH"
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD"
   ]
 }
