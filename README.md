@@ -168,7 +168,6 @@ has not been sent yet reads it immediately, so the file on screen never
 waits. While a read is in flight the popup shows
 `OCR: reading document… (N files read together)`.
 
-**What the model reads, and what the app matches:** the model is asked to
 **Catalog edits are instant.** Adding a site or a client (or a 🗺 mapping)
 writes to `config.json` and is pushed to GitHub straight away, and every popup
 on screen — including the ones that open next in a 10-file batch — picks it up
@@ -179,6 +178,7 @@ fields (whose OCR was read before the mapping existed). A site can only be
 added once a Client is chosen — without one it would land under an empty
 client name and never be found again.
 
+**What the model reads, and what the app matches:** the model is asked to
 **copy the printed values** — nothing else. The catalog is deliberately *not*
 part of the prompt (it used to list every known site and client and order the
 model to "output the Known Site name exactly as listed", which turned reading
