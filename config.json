@@ -357,13 +357,6 @@
     "ALUMAYER INDIA PVT LTD": [],
     "LODHA -LODHA DEVELOPERS LIMITED": [],
     "LODHA- world One Co operative Housing Society Limited": [],
-    "Larsen and Toubro Limited - Realty Division": [
-      "Navi Mumbai International Airport",
-      "Nmial Dapoli",
-      "Elixir Reserve",
-      "L & T Powai",
-      "L & T (Retail)"
-    ],
     "SWAYAM REALTORS AND TRADERS LLP": [
       "Monte South -TB"
     ],
@@ -410,6 +403,7 @@
   "removed_clients": [
     "Alder Residency Pvt Ltd",
     "LODHA",
-    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD"
+    "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
+    "Larsen and Toubro Limited - Realty Division"
   ]
 }
