@@ -329,7 +329,9 @@
       "Lodha Nibm -T6 Pent",
       "Bradbury",
       "Lodha SitalBuag",
-      "LODHA DIVINO"
+      "LODHA DIVINO",
+      "Lodha Nibmt",
+      "Lodha Matunga (Matunga Rehab)"
     ],
     "Arimas Real Estate Private Limited": [
       "Kalpataru Elitus"
@@ -358,7 +360,11 @@
     "SWAYAM REALTORS AND TRADERS LLP": [
       "Monte South -TB"
     ],
-    "Larsen & Toubro Limited": [
+    "DLF LTD": [],
+    "LARSEN & TOUBRO LTD": [
+      "Elixir Reserve"
+    ],
+    "Larsen and Toubro Limited - Realty Division": [
       "Navi Mumbai International Airport",
       "Nmial Dapoli",
       "Elixir Reserve",
@@ -378,7 +384,8 @@
     "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": "SWAYAM REALTORS AND TRADERS LLP",
     "Larsen and Toubro Limited - Realty Division": "Larsen & Toubro Limited",
     "DLF LTD": "DLF Limited",
-    "LARSEN & TOUBRO LTD": "Larsen & Toubro Limited"
+    "LARSEN & TOUBRO LTD": "Larsen & Toubro Limited",
+    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -400,9 +407,7 @@
     "Alder Residency Pvt Ltd",
     "LODHA",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
-    "Larsen and Toubro Limited - Realty Division",
-    "DLF LTD",
-    "LARSEN & TOUBRO LTD",
-    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH"
+    "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH",
+    "Larsen & Toubro Limited"
   ]
 }
