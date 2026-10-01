@@ -362,10 +362,6 @@
     "SWAYAM REALTORS AND TRADERS LLP": [
       "Monte South -TB"
     ],
-    "DLF LTD": [],
-    "LARSEN & TOUBRO LTD": [
-      "Elixir Reserve"
-    ],
     "Larsen and Toubro Limited - Realty Division": [
       "Navi Mumbai International Airport",
       "Nmial Dapoli",
@@ -385,9 +381,8 @@
     "ALUMAYER INDIA PVT LTD": "Cowtown Infotech Services Limited",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD": "Cowtown Infotech Services Limited",
     "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": "SWAYAM REALTORS AND TRADERS LLP",
-    "Larsen and Toubro Limited - Realty Division": "Larsen & Toubro Limited",
     "DLF LTD": "DLF Limited",
-    "LARSEN & TOUBRO LTD": "Larsen & Toubro Limited",
+    "LARSEN & TOUBRO LTD": "Larsen and Toubro Limited - Realty Division",
     "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division"
   },
   "site_aliases": {
@@ -411,6 +406,9 @@
     "LODHA",
     "LODHA -COWTOWN INFOTECH SERVICES PVT LTD",
     "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH",
-    "Larsen & Toubro Limited"
-  ]
+    "Larsen & Toubro Limited",
+    "DLF LTD",
+    "LARSEN & TOUBRO LTD"
+  ],
+  "re_added_clients": []
 }
