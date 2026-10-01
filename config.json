@@ -22,7 +22,8 @@
     "Abs": "AB",
     "Railing": "RA",
     "Screw": "SC",
-    "Other": "OT"
+    "Other": "OT",
+    "paints": "PA"
   },
   "companies": [
     "Ruby Steel",
