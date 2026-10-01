@@ -204,6 +204,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # ("manish@pc-02") or "pc-02\\manish"; anyone not listed is asked once, on
     # their own machine, and their answer is remembered locally.
     "watch_directories": {},
+    # Warn when the document being saved carries a serial number that already
+    # exists in the Doc Type folder it is going to (see
+    # organizer.serial_duplicate_paths). The same delivery note scanned twice
+    # often produces a slightly different filename — another material picked,
+    # a different financial year, the other status folder — which the
+    # exact-name check cannot see. The popup then asks the user:
+    # keep both / replace the old one / skip this file.
+    "check_serial_duplicates": True,
 }
 
 
@@ -2306,6 +2314,19 @@ class ConfigManager:
         if legacy in ("high", "max", "medium", "xhigh"):
             return "high" if legacy in ("medium", "xhigh") else legacy
         return OCR_THINKING
+
+    @property
+    def check_serial_duplicates(self) -> bool:
+        """Whether to warn about an existing file with the same SERIAL number.
+
+        ``check_serial_duplicates`` in config.json (default true). The check is
+        scoped to the Doc Type folder the document is going to; set it to false
+        to file by name only (the exact-filename check stays either way).
+        """
+        value = self.load().get("check_serial_duplicates", True)
+        if isinstance(value, str):
+            return value.strip().lower() not in ("0", "false", "no", "off")
+        return bool(value)
 
     @property
     def popup_delay_seconds(self) -> float:

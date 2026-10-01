@@ -30,7 +30,8 @@ import customtkinter as ctk
 
 from config import ConfigManager
 from ocr import MAX_CONCURRENT_OCR as _OCR_MAX
-from organizer import OrganizeRequest, organize, output_paths
+from organizer import (OrganizeRequest, organize, output_paths,
+                       serial_duplicate_paths)
 from popup import FilePickerPopup, ask_duplicate_action
 from version import VERSION
 from watcher import DownloadWatcher
@@ -500,12 +501,16 @@ class FilePickerController:
 
     # ------------------------------------------------------------------
     def _handle_submit(self, payload: dict) -> None:
-        # De-dup: if the exact output filename already exists in the sorted
-        # folders, ask the user BEFORE organizing — Skip New File (keep the
-        # old file, leave the new download in the watch folder) or Replace
-        # Old with New (overwrite). Runs on the main thread while
-        # _popup_active is still True, so no other popup can appear above
-        # the question dialog.
+        # De-dup, BEFORE organizing — two questions, one dialog:
+        #   * the exact output filename already exists in the sorted folders;
+        #   * another file in the SAME Doc Type folder already carries this
+        #     serial number ("check for duplicates based on serial number
+        #     alone") — the same delivery note scanned twice usually lands on
+        #     a slightly different name (another material, a wrong FY, the
+        #     other status folder), which the exact-name check cannot see.
+        # The user answers: Keep Both / Replace Old / Skip New File. Runs on
+        # the main thread while _popup_active is still True, so no other popup
+        # can appear above the question dialog.
         request = OrganizeRequest(
             source=payload["file_path"],
             company=payload["company"],
@@ -522,30 +527,58 @@ class FilePickerController:
             root=Path(self.config.root_directory),
             initials_map=self.config.company_initials,
         )
+        targets = []
         try:
-            existing = [p for p in output_paths(request) if p.exists()]
+            targets = output_paths(request)
+            existing = [p for p in targets if p.exists()]
         except Exception as exc:
             print(f"[filepicker] duplicate check error (proceeding): {exc}")
             existing = []
-        if existing:
-            choice = ask_duplicate_action(self._root, request.source.name, existing[0])
-            if choice != "replace":
-                # Skip New File: the old sorted copy wins, and the new
-                # download is removed from the watch folder (the popup
-                # already released the file, so nothing holds it open).
+        same_serial = []
+        if getattr(self.config, "check_serial_duplicates", True):
+            try:
+                same_serial = [p for p in serial_duplicate_paths(request)
+                               if p not in existing]
+            except Exception as exc:
+                print(f"[filepicker] serial duplicate check error "
+                      f"(proceeding): {exc}")
+                same_serial = []
+        duplicates = existing + same_serial
+        if duplicates:
+            reason = "name" if existing else "serial"
+            print(f"[filepicker] duplicate {reason} for {request.source.name}: "
+                  + "; ".join(str(p) for p in duplicates[:5]))
+            choice = ask_duplicate_action(
+                self._root, request.source.name, duplicates[0],
+                reason=reason, serial=request.serial, duplicates=duplicates,
+            )
+            if choice == "skip":
+                # Skip New File: the filed copy wins, and the new download is
+                # removed from the watch folder (the popup already released the
+                # file, so nothing holds it open).
                 if self._delete_original(request.source):
                     self._set_status(
-                        f"Skipped — '{existing[0].name}' already exists in "
-                        "sorted folders; new download deleted from watch folder."
+                        f"Skipped — '{duplicates[0].name}' is already filed "
+                        f"({reason}); new download deleted from watch folder."
                     )
                 else:
                     self._set_status(
-                        f"Skipped — '{existing[0].name}' already exists in "
-                        "sorted folders; could not delete the new download "
+                        f"Skipped — '{duplicates[0].name}' is already filed "
+                        f"({reason}); could not delete the new download "
                         "(still locked) — remove it manually."
                     )
                 return
-            request.replace = True
+            if choice == "replace":
+                # Delete the serial duplicates that are NOT one of the paths we
+                # are about to write: those are overwritten in place, so the
+                # old copy only disappears once the new file is safely there.
+                victims = [p for p in duplicates if p not in targets] if targets else []
+                if victims:
+                    self._remove_duplicates(victims)
+                request.replace = True
+            # "keep": nothing is deleted — the filed copy keeps its name and
+            # this one is written alongside it (resolve_collision adds _1 when
+            # the name is identical).
 
         self._organize_active = True
 
@@ -631,6 +664,27 @@ class FilePickerController:
             self._set_status(f"Saved to {n} folder(s): {', '.join(str(d) for d in result.destinations)}")
         else:
             self._set_status("ERROR: " + "; ".join(result.errors))
+
+    def _remove_duplicates(self, paths: List[Path]) -> None:
+        """Delete the already-filed files the user chose to REPLACE.
+
+        Called only from the duplicate dialog's "Replace" answer, and only for
+        files that are not one of the paths about to be written (those are
+        overwritten in place, so the old copy disappears only once the new one
+        is safely there). A file that cannot be deleted (locked, read-only) is
+        reported and left alone — the new file is still saved, so nothing is
+        lost, but the user is told what remains.
+        """
+        for path in paths:
+            try:
+                path.unlink()
+                print(f"[filepicker] replaced (deleted) {path}")
+            except OSError as exc:
+                print(f"[filepicker] could not delete the duplicate {path}: {exc}")
+                self._set_status(
+                    f"Could not delete the old copy {path.name} ({exc}) — "
+                    "the new file is saved next to it"
+                )
 
     @staticmethod
     def _delete_original(source: Path) -> bool:

@@ -239,6 +239,76 @@ def build_filename(
     return f"{stem}.{ext}" if ext else stem
 
 
+# A collision suffix that resolve_collision() may have added ("...-AL1_1.pdf").
+_COLLISION_SUFFIX_RE = re.compile(r"_\d+$")
+
+
+def _serial_tail(stem: str) -> Optional[str]:
+    """Everything from the serial onwards in a FilePicker filename stem.
+
+    The stem is ``{Company}-{Doc Type}-{FY}-{Serial}-{Site}-{Materials}`` and
+    the FY is the ONLY part with a guaranteed, recognisable shape
+    (``YY-YY``, two consecutive years — see :func:`normalize_fy`), so the
+    serial is found by POSITION: the first consecutive year pair in the name,
+    with at least one part (company code, doc type) in front of it and a serial
+    part behind it. That is what makes the check independent of the site name,
+    the material codes and even a wrong financial year — a file filed last year
+    with the same serial is still recognised.
+
+    Returns the remainder of the stem (serial + site + materials) or None when
+    the name is not in FilePicker's shape (a hand-made or foreign file name).
+    """
+    tokens = stem.split("-")
+    for i in range(len(tokens) - 2):
+        first, second = tokens[i].strip(), tokens[i + 1].strip()
+        if not (first.isdigit() and second.isdigit()):
+            continue
+        if len(first) not in (2, 4) or len(second) not in (2, 4):
+            continue
+        start, end = int(first) % 100, int(second) % 100
+        if end != (start + 1) % 100:
+            continue
+        if i < 1:              # a company code and a doc type come first
+            continue
+        if i + 2 >= len(tokens):   # nothing left for the serial itself
+            continue
+        return "-".join(tokens[i + 2:]).strip()
+    return None
+
+
+def serial_in_filename(name: str) -> Optional[str]:
+    """The serial part of a FilePicker filename, or None when not in our shape.
+
+    ``"RS-DC-26-27-00123-Lodha Nibm-AL1.pdf"`` -> ``"00123-Lodha Nibm-AL1"``
+    (the serial and everything after it), which is all
+    :func:`filename_has_serial` needs to compare one document's serial.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return None
+    stem = text.rsplit(".", 1)[0] if "." in text else text
+    stem = _COLLISION_SUFFIX_RE.sub("", stem)
+    return _serial_tail(stem)
+
+
+def filename_has_serial(name: str, serial: str) -> bool:
+    """True when *name* is a FilePicker name built with this *serial*.
+
+    Compared on the dash boundary, so serial ``123`` does not match a file
+    whose serial is ``1234`` (the two are different documents), while a serial
+    that itself contains a dash (``DC-123``) still matches exactly. Case is
+    ignored, like everywhere else in the app.
+    """
+    want = sanitize(str(serial or "")).strip().casefold()
+    if not want:
+        return False
+    tail = serial_in_filename(name)
+    if not tail:
+        return False
+    got = tail.casefold()
+    return got == want or got.startswith(want + "-")
+
+
 def resolve_collision(destination_dir, filename: str, replace: bool = False) -> str:
     """Resolve a name clash at ``destination_dir``.
 

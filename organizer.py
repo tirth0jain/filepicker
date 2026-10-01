@@ -113,6 +113,61 @@ def output_paths(request: OrganizeRequest) -> List[Path]:
     return paths
 
 
+def serial_scan_dirs(request: OrganizeRequest) -> List[Path]:
+    """The folders a same-serial duplicate can be hiding in.
+
+    The "respective Doc Type folder" — ``.../<Company>/<Client>/<Site>/<Doc
+    Type>/`` — is scanned as a WHOLE, so a document filed as *Received* is
+    found when the same one arrives as *Submitted* (the status is a folder, not
+    a document property). For a ``DC`` the ``All DC`` copy of the same document
+    counts too: it holds the same serial for the same company.
+    """
+    root = Path(request.root)
+    dirs = [
+        root
+        / fn.sanitize(request.company)
+        / fn.sanitize(request.client)
+        / fn.sanitize(request.site)
+        / fn.sanitize(request.doc_type),
+    ]
+    if request.doc_type.strip().upper() == "DC":
+        dirs.append(root / fn.sanitize(request.company) / "All DC")
+    return dirs
+
+
+def serial_duplicate_paths(request: OrganizeRequest) -> List[Path]:
+    """Existing files that already carry this document's serial number.
+
+    The name-based de-dup in :func:`output_paths` only catches a file with the
+    EXACT same name. The same delivery note scanned again often lands on a
+    different name — a material picked differently, a wrong financial year, a
+    re-spelled site, or the other status folder — so the serial number is
+    checked on its own, inside the Doc Type folder the document is going to.
+
+    Returns the matching files (sorted, stable), empty when there is nothing to
+    warn about. It never touches the disk.
+    """
+    serial = fn.sanitize(str(request.serial or "")).strip()
+    if not serial:
+        return []      # nothing to compare on
+    found: List[Path] = []
+    for folder in serial_scan_dirs(request):
+        try:
+            if not folder.is_dir():
+                continue
+            for path in folder.rglob("*"):
+                try:
+                    if not path.is_file():
+                        continue
+                except OSError:
+                    continue
+                if fn.filename_has_serial(path.name, serial):
+                    found.append(path)
+        except OSError as exc:
+            print(f"[organizer] serial duplicate scan failed in {folder}: {exc}")
+    return sorted(found)
+
+
 def organize(request: OrganizeRequest) -> OrganizeResult:
     """Copy the source file into all required destination folders.
 

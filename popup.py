@@ -221,27 +221,43 @@ def _wire_dialog_choices(dialog, buttons, letters, default_index: int = 0) -> di
     return state
 
 
-def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
-    """Build the "file already exists" question dialog.
+def _duplicate_dialog_ui(root, filename: str, existing_path: Path,
+                         reason: str = "name", serial: str = "",
+                         duplicates=None) -> tuple:
+    """Build the "this document is already filed" question dialog.
+
+    Two situations reach this dialog:
+
+    * ``reason="name"`` — the exact output filename already exists (the
+      original check);
+    * ``reason="serial"`` — a DIFFERENT filename in the same Doc Type folder
+      carries the same serial number (a second scan of the same delivery note,
+      filed with another material / financial year / status).
 
     Returns ``(dialog, callback)`` where ``callback["value"]`` is set to
-    ``"skip"`` or ``"replace"`` when a button is pressed (the dialog is
-    destroyed with it). Closing the window counts as "skip".
+    ``"keep"`` (save this one too), ``"replace"`` (delete the old one, save
+    this one) or ``"skip"`` (keep the old one, drop this download) when a
+    button is pressed (the dialog is destroyed with it). Closing the window
+    counts as ``"skip"``.
 
     Answering by keyboard: the arrow keys select an option (Enter/Space
-    presses it) and Ctrl+Y = Yes (replace) / Ctrl+N = No (skip) act
-    immediately — as do the older Ctrl+S (replace) and Ctrl+Delete (skip).
+    presses it) and Ctrl+K = keep both, Ctrl+Y = Yes (replace), Ctrl+N = No
+    (skip) act immediately — as do the older Ctrl+S (replace) and
+    Ctrl+Delete (skip).
     """
     dialog = ctk.CTkToplevel(root)
-    dialog.title("File already exists")
+    dialog.title("Already filed — same serial"
+                 if reason == "serial" else "File already exists")
     dialog.configure(fg_color=_BG)
     dialog.attributes("-topmost", True)
     dialog.resizable(False, False)
 
     # Center over the popup/screen, like every other FilePicker window.
     try:
+        height, width = 330, 570
         sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-        dialog.geometry(f"520x266+{max((sw - 520) // 2, 0)}+{max((sh - 266) // 3, 0)}")
+        dialog.geometry(f"{width}x{height}+{max((sw - width) // 2, 0)}"
+                        f"+{max((sh - height) // 3, 0)}")
     except tk.TclError:
         pass
 
@@ -276,48 +292,72 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
         except tk.TclError:
             pass
 
+    # Every file already carrying this serial (the exact-name hit first, when
+    # there is one), so "replace" removes all of them and the user can see what
+    # they are deciding about.
+    hits = [Path(p) for p in (duplicates or [existing_path])]
+    if reason == "serial":
+        headline = ("⚠ A file with serial number "
+                    f"\"{serial or '?'}\" is already filed here")
+        where = "in this Doc Type folder"
+    else:
+        headline = "⚠ This document is already filed (same filename)"
+        where = "at this exact path"
+    listing = "\n".join(f"•  {p.name}\n     {p.parent}" for p in hits[:3])
+    if len(hits) > 3:
+        listing += f"\n•  … and {len(hits) - 3} more"
+
     ctk.CTkLabel(
-        dialog, text="⚠ This filename already exists in the sorted folders",
+        dialog, text=headline,
         font=ctk.CTkFont(size=15, weight="bold"), text_color=_TEXT,
     ).pack(anchor="w", padx=18, pady=(18, 6))
     ctk.CTkLabel(
         dialog,
-        text=f"\"{filename}\" already exists at:\n{existing_path.parent}\n\n"
-             "Replace the old file with this new download?\n\n"
-             "Ctrl+Y = Yes (replace)  •  Ctrl+N = No (skip)\n"
-             "Arrows + Enter also work  •  Ctrl+S = replace  •  Ctrl+Delete = skip",
+        text=f"Saving: {filename}\n\n"
+             f"Already {where}:\n{listing}\n\n"
+             "Keep Both = save this one alongside it  (Ctrl+K)\n"
+             "Replace = delete the old file(s), save this one  (Ctrl+Y)\n"
+             "Skip = keep the filed copy, drop this download  (Ctrl+N)",
         font=ctk.CTkFont(size=12), text_color=_TEXT_MUTED, justify="left",
-        wraplength=480,
+        wraplength=530,
     ).pack(anchor="w", padx=18, pady=(0, 12))
 
     btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
     btn_row.pack(fill="x", padx=18, pady=(0, 16))
     skip_btn = ctk.CTkButton(
-        btn_row, text="No — Skip New File  (N)", command=lambda: choose("skip"),
+        btn_row, text="Skip New File  (N)", command=lambda: choose("skip"),
         fg_color=_BG_FIELD, hover_color="#33334a", height=38,
         font=ctk.CTkFont(size=13), text_color=_TEXT,
     )
     skip_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+    keep_btn = ctk.CTkButton(
+        btn_row, text="Keep Both  (K)", command=lambda: choose("keep"),
+        fg_color=_BG_FIELD, hover_color="#33334a", height=38,
+        font=ctk.CTkFont(size=13), text_color=_TEXT,
+    )
+    keep_btn.pack(side="left", expand=True, fill="x", padx=(6, 6))
     replace_btn = ctk.CTkButton(
-        btn_row, text="Yes — Replace Old with New  (Y)",
-        command=lambda: choose("replace"),
+        btn_row, text="Replace Old  (Y)", command=lambda: choose("replace"),
         fg_color=_ACCENT, hover_color=_ACCENT_HOVER, height=38,
         font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff",
     )
     replace_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
-    # Safe default: closing the dialog (or pressing Enter) keeps the old file.
+    # Safe default: closing the dialog (or pressing Enter) keeps the filed copy
+    # and touches nothing in the sorted folders.
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose("skip"))
     # Ctrl shortcuts keep working while this dialog is open (they were dead
     # from an older build because the dialog owned all keyboard input):
-    # Ctrl+S = "save", i.e. Replace Old with New; Ctrl+Delete = Skip.
+    # Ctrl+S = "save", i.e. Replace Old; Ctrl+Delete = Skip; Ctrl+K = keep both.
     _bind_letter_shortcut(dialog, "<Control-s>", lambda _e: choose("replace"))
+    _bind_letter_shortcut(dialog, "<Control-k>", lambda _e: choose("keep"))
     dialog.bind("<Control-Delete>", lambda _e: choose("skip"))
     dialog.bind("<Escape>", lambda _e: choose("skip"))
     # Arrow selection + the letters shown on the buttons (Y = replace, N =
-    # skip); the safe option (skip) is selected first, so a stray Enter never
-    # overwrites an existing file.
-    _wire_dialog_choices(dialog, [skip_btn, replace_btn], ["n", "y"], default_index=0)
+    # skip, K = keep both); the safe option (skip) is selected first, so a
+    # stray Enter never overwrites an already-filed document.
+    _wire_dialog_choices(dialog, [skip_btn, keep_btn, replace_btn],
+                         ["n", "k", "y"], default_index=0)
     # Give the question the keyboard the moment it appears (the popup was
     # dismissed, so Windows may have handed focus back to another program).
     try:
@@ -327,15 +367,26 @@ def _duplicate_dialog_ui(root, filename: str, existing_path: Path) -> tuple:
     return dialog, callback
 
 
-def ask_duplicate_action(root, filename: str, existing_path: Path) -> str:
-    """Ask what to do when the output filename already exists in sorted.
+def ask_duplicate_action(root, filename: str, existing_path: Path,
+                         reason: str = "name", serial: str = "",
+                         duplicates=None) -> str:
+    """Ask what to do when this document already looks filed.
 
-    Blocks (modal) until the user answers. Returns ``"skip"`` — keep the old
-    file (the caller deletes the new download from the watch folder) — or
-    ``"replace"`` — overwrite the old file with the new one. Closing the
+    Blocks (modal) until the user answers. Returns:
+
+    * ``"keep"`` — save this one too (the filed copy keeps its name, the new
+      one goes alongside it, suffixed ``_1`` when the name is identical);
+    * ``"replace"`` — delete the old file(s) and save this one;
+    * ``"skip"`` — keep the filed copy and drop the new download.
+
+    ``reason`` is ``"name"`` (the exact filename exists) or ``"serial"``
+    (another file in the same Doc Type folder carries this serial). Closing the
     dialog counts as ``"skip"`` (the safe default).
     """
-    dialog, callback = _duplicate_dialog_ui(root, filename, existing_path)
+    dialog, callback = _duplicate_dialog_ui(
+        root, filename, existing_path, reason=reason, serial=serial,
+        duplicates=duplicates,
+    )
     dialog.wait_window()
     return callback["value"] or "skip"
 

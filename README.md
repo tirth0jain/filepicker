@@ -46,6 +46,10 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   plus an extra copy into `[root]/[Company]/All DC/[Received or Submitted]/` whenever the
   Doc Type is `DC`. Collisions are handled with a `_1`, `_2`, … suffix (never
   blindly overwritten).
+- **Duplicate check** — before saving, FilePicker looks in the Doc Type folder
+  for the exact filename **and** for another file with the same **serial
+  number** (the Delivery Note No.), even under a different name, and asks:
+  *Keep Both* / *Replace Old* / *Skip New File*.
 - **Config persistence** — all companies, clients, sites, materials and doc
   types are read from and written back to `config.json` dynamically.
 - **OCR auto-fill (optional)** — set `"enable_ocr": true` in `config.json` and
@@ -63,14 +67,43 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   (and the Alt chord is case-folded) — Caps Lock on or off, the same keys
   work. Question
   dialogs (duplicate file, site of another client) show a letter on every
-  option — press **Ctrl+Y / Ctrl+N / Ctrl+M** to answer instantly, or move the
-  selection with the **arrow keys** and press **Enter**. In the *site of
-  another client* dialog the **Move its sites here** option is the blue,
+  option — press **Ctrl+Y / Ctrl+N / Ctrl+M / Ctrl+K** to answer instantly, or
+  move the selection with the **arrow keys** and press **Enter**. In the *site
+  of another client* dialog the **Move its sites here** option is the blue,
   Enter-selected one (merging the other client into this one is the usual
   answer); *Keep here* and *Cancel* stay neutral, and Escape cancels.
   The popup also verifies a moment after opening that it is really on screen
   and re-shows itself if Windows left it hidden, so a popup can never be
   silently missing while the queue waits for it.
+
+---
+
+**Already filed? (duplicate check):** before a file is copied anywhere,
+FilePicker looks in the Doc Type folder it is going to and asks if this
+document is already there — in **two** ways:
+
+* the **exact filename** it is about to write already exists;
+* **another file carries the same serial number** (the Delivery Note No.), even
+  under a different name — the same note scanned twice usually lands on a
+  slightly different filename (another material picked, a different financial
+  year, the other status folder), which a name check cannot see. The scan covers
+  the whole Doc Type folder, so a document filed as *Received* is found when the
+  same one arrives as *Submitted*; for a **DC** the company's `All DC` copy
+  counts too. Nothing else is searched — not another site, not another client,
+  not another Doc Type.
+
+The question then offers three answers:
+
+| Answer | What happens |
+|---|---|
+| **Keep Both** (Ctrl+K) | the filed copy keeps its name, the new one is saved alongside it (`…_1` when the name is identical) — use it for extra pages/copies of the same note |
+| **Replace Old** (Ctrl+Y) | the old file(s) with that serial are deleted and this one is saved in their place |
+| **Skip New File** (Ctrl+N) | the filed copy stays, the new download is dropped from the watch folder |
+
+Closing the dialog (or Escape, or Enter on the selected option — *Skip* is
+selected first) means **Skip**, so a stray keypress never overwrites a filed
+document. Set `"check_serial_duplicates": false` in `config.json` to file by
+name only (the exact-filename check stays either way).
 
 ---
 
