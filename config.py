@@ -65,6 +65,11 @@ CATALOG_KEYS = (
     "site_aliases",
     "material_aliases",
     "removed_clients",
+    # Names a user deliberately ADDED BACK after a removal. Without this the
+    # union merge cannot tell a deliberate re-add from a machine that simply
+    # has not pulled the removal yet — and the stale copy resurrected the
+    # client on every push (the removal never stuck). See _merge_for_push.
+    "re_added_clients",
 )
 
 # Remote live config — single source of truth for clients/sites.
@@ -159,6 +164,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # a moved-away client needs an explicit tombstone to stay gone on every
     # machine. Cleared automatically when the client is explicitly re-added.
     "removed_clients": [],
+    # The other half of removed_clients: names a user deliberately ADDED BACK
+    # after they had been removed/moved away. A tombstone normally wins over a
+    # machine that still has the old client (otherwise the removal comes back
+    # on that machine's next push), and this list is what makes an explicit
+    # re-add win instead. Cleared automatically once the tombstone is gone
+    # everywhere, so it never grows forever.
+    "re_added_clients": [],
     # Model + endpoint used by the OCR feature (OpenCode Go catalog,
     # OpenAI-compatible API). Overridable per machine in config.json; a value
     # that is merely an OLD DEFAULT (see ocr.LEGACY_OCR_MODELS) is upgraded to
@@ -213,6 +225,35 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # keep both / replace the old one / skip this file.
     "check_serial_duplicates": True,
 }
+
+
+def _mark_re_added(data: Dict[str, Any], client: str) -> None:
+    """Record that *client* was deliberately ADDED BACK after a removal.
+
+    Clears the local tombstone (the user's wish wins on this machine) and notes
+    the name in ``re_added_clients`` — the union merge uses that list to tell a
+    real re-add from a machine that simply has not pulled the removal yet, so
+    the tombstone can never be undone by a stale copy (which is exactly how a
+    removed client used to come back on every push).
+    """
+    name = str(client or "").strip()
+    if not name:
+        return
+    removed = data.get("removed_clients")
+    was_removed = False
+    if isinstance(removed, list):
+        was_removed = any(str(r).strip().lower() == name.lower() for r in removed)
+        removed[:] = [r for r in removed
+                      if str(r).strip().lower() != name.lower()]
+    if not was_removed:
+        return
+    re_added = data.get("re_added_clients")
+    if not isinstance(re_added, list):
+        re_added = []
+        data["re_added_clients"] = re_added
+    if not any(str(n).strip().lower() == name.lower() for n in re_added):
+        re_added.append(name)
+    print(f"[config] '{name}' was removed earlier — re-adding it explicitly")
 
 
 def default_config_path() -> Path:
@@ -1401,9 +1442,7 @@ class ConfigManager:
             return None
         with self._lock:
             changed = False
-            for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases", "material_aliases",
-                        "removed_clients"):
+            for key in CATALOG_KEYS:
                 if key not in remote or remote[key] == self._data.get(key):
                     continue
                 if key == "clients" and isinstance(remote[key], dict):
@@ -1414,12 +1453,13 @@ class ConfigManager:
                     removed = {str(r).strip().lower()
                                for r in (self._data.get("removed_clients") or [])
                                if str(r).strip()}
-                    local_names = {str(k).strip().lower()
-                                   for k in (self._data.get("clients") or {})}
+                    re_added = {str(r).strip().lower()
+                                for r in (self._data.get("re_added_clients") or [])
+                                if str(r).strip()}
                     pruned = {
                         k: v for k, v in remote[key].items()
                         if str(k).strip().lower() not in removed
-                        or str(k).strip().lower() in local_names
+                        or str(k).strip().lower() in re_added
                     }
                     self._data[key] = deepcopy(pruned)
                     changed = True
@@ -1465,9 +1505,7 @@ class ConfigManager:
             # disappear when you moved to the next field).
             merged = self._merge_for_push(remote, self._data)
             changed = False
-            for key in ("companies", "company_initials", "clients", "materials",
-                        "doc_types", "client_aliases", "site_aliases", "material_aliases",
-                        "removed_clients"):
+            for key in CATALOG_KEYS:
                 if key in merged and merged[key] != self._data.get(key):
                     self._data[key] = merged[key]
                     changed = True
@@ -1587,9 +1625,7 @@ class ConfigManager:
             merged = self._merge_for_push(remote_data, local_data)
             # If nothing to push (remote already has our catalog), skip
             # Compare only the catalog keys for cheap equality
-            catalog_keys = ("companies", "company_initials", "clients", "materials",
-                            "doc_types", "client_aliases", "site_aliases", "material_aliases",
-                            "removed_clients")
+            catalog_keys = CATALOG_KEYS
             if all(merged.get(k) == remote_data.get(k) for k in catalog_keys):
                 # For a brand-new file (remote_data empty) this is never true
                 if remote_data:
@@ -1865,10 +1901,10 @@ class ConfigManager:
         # tombstoned client is dropped from BOTH sides here. The tombstones
         # themselves are union-merged further down, so every machine honours
         # the removal.
-        def _tombstones(*sources) -> set:
+        def _names(*sources, field: str) -> set:
             out = set()
             for src in sources:
-                vals = src.get("removed_clients", []) if isinstance(src, dict) else []
+                vals = src.get(field, []) if isinstance(src, dict) else []
                 if not isinstance(vals, list):
                     continue
                 for v in vals:
@@ -1877,16 +1913,22 @@ class ConfigManager:
                         out.add(name)
             return out
 
-        removed_names = _tombstones(remote, local)
-        # A name that the LOCAL config still has is not removed: an explicit
-        # re-add (add_client/add_site, which also clears the local tombstone)
-        # always wins over a stale tombstone that other machines still carry.
-        local_names = {str(k).strip().lower() for k in loc_clients}
+        removed_names = _names(remote, local, field="removed_clients")
+        # A name the user deliberately ADDED BACK (add_client/add_site, which
+        # also clears the local tombstone and records it in re_added_clients)
+        # wins over a tombstone other machines still carry. A machine that has
+        # merely NOT PULLED the removal yet is not a re-add — it used to
+        # resurrect the client on every push, so the deletion never stuck.
+        re_added_names = _names(remote, local, field="re_added_clients")
+
+        def _keep(low: str) -> bool:
+            """False when the client was removed and not explicitly re-added."""
+            return not (low in removed_names and low not in re_added_names)
 
         for k, v in rem_clients.items():
             key = str(k)
             low = key.strip().lower()
-            if low in removed_names and low not in local_names:
+            if not _keep(low):
                 continue  # moved away — never resurrect it from the remote
             lower_to_key[key.lower()] = key
             merged_clients[key] = list(v) if isinstance(v, list) else []
@@ -1894,6 +1936,12 @@ class ConfigManager:
         for k, v in loc_clients.items():
             key = str(k)
             low = key.lower()
+            if not _keep(low):
+                # A stale local copy of a removed client: dropped, so this
+                # machine's push cannot bring it back for everybody.
+                print(f"[config] client '{key}' was removed on another machine "
+                      f"— not re-publishing it (add it again to bring it back)")
+                continue
             canon = lower_to_key.get(low)
             if canon is None:
                 # New client from local
@@ -1921,6 +1969,22 @@ class ConfigManager:
             if str(r).strip().lower() not in present
         ]
 
+        # re_added_clients — the markers that let an explicit re-add win over a
+        # tombstone. A marker lives exactly as long as its client does: it must
+        # OUTLIVE the tombstone (the tombstone is dropped from the file the
+        # moment the client is back, and a machine that still carries it would
+        # otherwise delete the client again on its next sync), and it is
+        # forgotten when the client is removed again (move_client_sites clears
+        # it), so the list stays bounded by the catalog.
+        rem_re = remote.get("re_added_clients", [])
+        loc_re = local.get("re_added_clients", [])
+        merged["re_added_clients"] = [
+            n for n in _merge_list_str(
+                rem_re if isinstance(rem_re, list) else [],
+                loc_re if isinstance(loc_re, list) else [])
+            if str(n).strip().lower() in present
+        ]
+
         # materials — dict union, local wins
         rem_mat = dict(remote.get("materials", {}))
         loc_mat = dict(local.get("materials", {}))
@@ -1937,6 +2001,16 @@ class ConfigManager:
             loc_al = dict(local.get(alias_key, {}))
             merged_al = dict(rem_al)
             merged_al.update({str(k): str(v) for k, v in loc_al.items()})
+            if alias_key == "client_aliases":
+                # A client mapping must never point at a client that is not in
+                # the catalog: a move-away tombstones the old client, and an
+                # alias still pointing at it would silently send every later
+                # document to a name that no longer exists (the reverse half of
+                # a circular move pair used to survive exactly like this).
+                merged_al = {
+                    src: tgt for src, tgt in merged_al.items()
+                    if str(tgt).strip().lower() in present
+                }
             merged[alias_key] = merged_al
 
         # doc_types — union list
@@ -2172,6 +2246,12 @@ class ConfigManager:
             if not any(str(r).strip().lower() == str(src_key).strip().lower()
                        for r in removed):
                 removed.append(str(src_key))
+            # It is a REMOVAL again: forget any earlier re-add marker, or the
+            # merge would keep the moved-away client alive forever.
+            re_added = data.get("re_added_clients")
+            if isinstance(re_added, list):
+                re_added[:] = [n for n in re_added
+                               if str(n).strip().lower() != str(src_key).strip().lower()]
             # Map the old client name to the new one for FUTURE cases: a
             # later document that still says "LODHA" is filed under the client
             # it was merged into.
@@ -2186,6 +2266,17 @@ class ConfigManager:
                     break
             if aliases.get(alias_key) != str(tgt_key):
                 aliases[alias_key] = str(tgt_key)
+            # …and any mapping that pointed AT the client we just moved away
+            # from is now dead (it would send documents to a name that is not
+            # in the catalog), so it goes with it. This is also what breaks the
+            # circular pair two opposite moves used to leave behind.
+            for k in list(aliases):
+                if str(aliases[k]).strip().lower() == str(src_key).strip().lower():
+                    del aliases[k]
+            # The client the sites moved INTO is the survivor: if an earlier
+            # move had tombstoned it, that tombstone is now wrong (it would
+            # delete the very client holding these sites).
+            _mark_re_added(data, str(tgt_key))
             self.save()
             result = list(target_sites)
         if changed:
@@ -2450,11 +2541,11 @@ class ConfigManager:
                     print(f"[config] client '{client}' is the same client as '{canonical}' — reusing existing name")
                 return canonical
             clients[client] = list(sites or [])
-            # An explicit re-add WINS over an earlier move-away tombstone.
-            removed = data.get("removed_clients")
-            if isinstance(removed, list):
-                removed[:] = [r for r in removed
-                              if str(r).strip().lower() != client.lower()]
+            # An explicit re-add WINS over an earlier move-away tombstone — and
+            # it is RECORDED (re_added_clients), because the tombstone still
+            # lives on other machines and would otherwise delete the client
+            # again on their next sync.
+            _mark_re_added(data, client)
             self.save()
             changed = True
         if changed:
@@ -2500,12 +2591,10 @@ class ConfigManager:
                 if near is not None:
                     key = str(near)
             if key not in clients:
-                # This save creates the client: an explicit re-add WINS over
-                # an earlier move-away tombstone.
-                removed = data.get("removed_clients")
-                if isinstance(removed, list):
-                    removed[:] = [r for r in removed
-                                  if str(r).strip().lower() != str(key).lower()]
+                # This save creates the client: an explicit re-add WINS over an
+                # earlier move-away tombstone (and is recorded, so the other
+                # machines' tombstones cannot delete it again).
+                _mark_re_added(data, key)
             sites = clients.setdefault(key, [])
             # Clean-preferring match: the catalog may hold only a
             # designator-suffixed STRAY for this place ("Lodha Palava -Fire

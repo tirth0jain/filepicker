@@ -224,7 +224,12 @@ file and on nobody else.
   `%LOCALAPPDATA%\FilePicker\settings.json`.)
 * Two people saving at the same moment cannot lose each other's work: the write
   takes a short lock next to `config.json` and **union-merges** the catalog
-  (nothing is lost; deletions still delete through `removed_clients`).
+  (nothing is lost; deletions still delete through `removed_clients`). A client
+  somebody **removed** stays removed even on a machine that has not seen the
+  removal yet — a copy that still has it cannot re-publish it, while a
+  deliberate re-add (adding it again in the popup) always wins and is recorded
+  in `re_added_clients`. A client mapping can never point at a client that is
+  no longer in the catalog.
 * A shared install **never updates itself** — replacing the exe everybody is
   running from is the admin's job. Tray → *Check for updates* reports what is
   available; install it by replacing the files in the share when nobody is
