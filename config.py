@@ -1025,46 +1025,203 @@ def _peel_to_name(candidate, clean_name) -> bool:
 
 # How long a copy waits for another copy's write into the shared config.json,
 # and when a lock file left behind by a crash is considered stale.
-_SHARED_LOCK_TIMEOUT = 5.0
-_SHARED_LOCK_STALE = 30.0
+_SHARED_LOCK_TIMEOUT = 10.0
+# A stale lock is broken ONLY when its owner is provably gone (this machine, and
+# the pid is not running). The age alone has to be long enough that a slow write
+# over a network share is never mistaken for a crash: breaking a LIVE writer's
+# lock is precisely how two copies come to write the same file at once.
+_SHARED_LOCK_STALE = 120.0
+
+# ---------------------------------------------------------------------------
+# Config safety
+#
+# The catalog is one small JSON file that several people read and write, so it
+# needs the same care as any shared document:
+#
+#   * a SNAPSHOT is taken before every write (``backups/`` next to config.json
+#     and in this person's own settings folder, so a copy survives the share);
+#   * one line per catalog change goes to ``changes/<user>@<machine>.jsonl`` —
+#     one file per person, so two people never write the same file, and it is
+#     the half a backup cannot give: who changed what, and when;
+#   * a save that cannot take the lock is QUEUED in this person's settings
+#     folder and applied by the next save, instead of being written anyway;
+#   * a catalog that cannot be parsed is never written over (see
+#     ``_on_unreadable_catalog``) — that is how one JSON typo would otherwise
+#     replace 195 clients with the placeholders in DEFAULT_CONFIG.
+# ---------------------------------------------------------------------------
+_BACKUP_DIR_NAME = "backups"
+_CHANGE_DIR_NAME = "changes"
+_BACKUP_KEEP = 50           # newest snapshots kept in every backup folder
+_BACKUP_KEEP_DAYS = 30      # plus the first snapshot of each day, this long
+_JOURNAL_MAX_BYTES = 1_000_000
+_PENDING_FILE_NAME = "pending-catalog.json"
+
+
+def _app_version() -> str:
+    """The running version, for the change journal (never fatal)."""
+    try:
+        from version import VERSION
+        return str(VERSION)
+    except Exception:
+        return ""
+
+
+def _catalog_delta(before: Dict[str, Any],
+                   after: Dict[str, Any]) -> Dict[str, Any]:
+    """What changed between two catalog snapshots, journal-sized.
+
+    Dict keys (clients, aliases, materials) report added/removed entries — and
+    for ``clients`` also the sites added to or removed from a client that
+    existed before, which is the change people actually make all day.
+    """
+    added: Dict[str, Any] = {}
+    removed: Dict[str, Any] = {}
+    for key in CATALOG_KEYS:
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        if isinstance(new, dict) and isinstance(old, dict):
+            a = {k: v for k, v in new.items() if k not in old}
+            r = {k: v for k, v in old.items() if k not in new}
+            for k, v in new.items():
+                if k in old and isinstance(v, list) and isinstance(old[k], list):
+                    extra = [s for s in v if s not in old[k]]
+                    gone = [s for s in old[k] if s not in v]
+                    if extra:
+                        a[k] = extra
+                    if gone:
+                        r[k] = gone
+            if a:
+                added[key] = a
+            if r:
+                removed[key] = r
+        elif isinstance(new, list) and isinstance(old, list):
+            a = [x for x in new if x not in old]
+            r = [x for x in old if x not in new]
+            if a:
+                added[key] = a
+            if r:
+                removed[key] = r
+        else:
+            if new is not None:
+                added[key] = new
+            if old is not None:
+                removed[key] = old
+    return {"added": added, "removed": removed}
+
+
+def _pid_running(pid: int) -> bool:
+    """Whether *pid* is a live process on THIS machine."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _lock_owner_info() -> str:
+    """What goes inside the lock file, so the next copy in line can tell a live
+    writer from one that crashed."""
+    try:
+        from localsettings import current_machine, current_user
+        user, machine = current_user(), current_machine()
+    except Exception:
+        user, machine = "", ""
+    return json.dumps({
+        "user": user,
+        "machine": machine,
+        "pid": os.getpid(),
+        "time": time.time(),
+        "iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+def _lock_owner_alive(lock: Path) -> bool:
+    """True when the lock's owner is THIS machine and its process still runs.
+
+    A writer on another machine cannot be checked from here, so only its age
+    decides. For our own machine a live pid is proof the writer is still working
+    and its lock is never broken early.
+    """
+    try:
+        info = json.loads(lock.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return False
+    if not isinstance(info, dict):
+        return False
+    try:
+        from localsettings import current_machine
+        if str(info.get("machine", "")).lower() != current_machine().lower():
+            return False
+        return _pid_running(int(info.get("pid") or 0))
+    except Exception:
+        return False
 
 
 @contextmanager
 def _shared_write_lock(path: Path, timeout: float = _SHARED_LOCK_TIMEOUT):
-    """Serialise writes into a shared config.json (best effort).
+    """Serialise writes into a shared config.json.
 
     Two copies running from the same server folder can save at the same moment.
     A lock file next to config.json makes them take turns, so the read-merge-
     write in :meth:`ConfigManager.save` always sees the colleague's completed
     write instead of a half-applied one. Creating the file with ``O_EXCL`` is
-    atomic (SMB included). A lock older than 30s is treated as stale — a crash
-    left it behind — and broken. If the lock still cannot be taken in time the
-    save goes ahead: a slightly racy write beats refusing the user's edit.
+    atomic (SMB included), and the file names its owner so a lock left behind by
+    a crash can be told apart from one held by a live writer.
+
+    Yields True when the caller may write. **False means another copy is writing
+    right now** — the caller must then QUEUE its change (``save`` does) rather
+    than write without the lock: writing anyway is what silently drops the other
+    person's site. The one case that still yields True is a folder where the lock
+    cannot be created at all (a read-only share); there the write itself reports
+    the real error.
     """
     lock = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + timeout
     fd: Optional[int] = None
+    lock_unwritable = False
     while fd is None:
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
             try:
-                if time.time() - lock.stat().st_mtime > _SHARED_LOCK_STALE:
-                    lock.unlink(missing_ok=True)
-                    continue
+                os.write(fd, _lock_owner_info().encode("utf-8"))
             except OSError:
                 pass
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > _SHARED_LOCK_STALE and not _lock_owner_alive(lock):
+                print(f"[config] breaking a stale config.json lock "
+                      f"({age:.0f}s old, owner is gone)")
+                try:
+                    lock.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
             if time.monotonic() >= deadline:
-                print("[config] shared config.json is locked by another copy "
-                      "— saving without the lock")
                 break
             time.sleep(0.05)
         except OSError:
             # No permission to create the lock (read-only folder, odd share):
             # let the write itself report the real error.
+            lock_unwritable = True
             break
     try:
-        yield fd is not None
+        yield fd is not None or lock_unwritable
     finally:
         if fd is not None:
             try:
@@ -1115,6 +1272,22 @@ class ConfigManager:
         # shared install whether the file on disk moved on without us (a
         # colleague's save), which is what triggers the union merge.
         self._saved_catalog: Dict[str, Any] = {}
+        # Config safety. ``write_blocked_reason`` non-empty means the catalog on
+        # disk is not something this copy may write over (it could not be read);
+        # main.py shows it to the user once. ``_parsed_existing`` is whether the
+        # file we are about to replace was one we successfully read, and
+        # ``_seeded_defaults`` marks a file this copy invented on first run (the
+        # write re-checks that it has not appeared since).
+        self.write_blocked_reason: str = ""
+        self.last_write_error: str = ""
+        self._parsed_existing = True
+        self._seeded_defaults = False
+        self._snapshot_taken: Optional[Path] = None
+        # What the change journal diffs against: the catalog as it stood BEFORE
+        # the current save. It cannot be ``self._data`` (the mutation has already
+        # been applied by the time save() runs), and it is advanced past a
+        # colleague's merge so their entry is not journalled as ours.
+        self._journal_baseline: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Shared install
@@ -1234,9 +1407,15 @@ class ConfigManager:
         if not self.path.exists():
             # No config yet: seed the file from DEFAULT_CONFIG (first run) so
             # the user has a file to edit, then treat that file as the source.
+            # ``_seeded_defaults`` makes the write itself re-check that the file
+            # did not appear in the meantime: a server share that mounts a moment
+            # late must not be seeded over the real catalog.
             self._data = deepcopy(DEFAULT_CONFIG)
             self._saved_catalog = self._catalog_snapshot()
-            self.save()
+            self._journal_baseline = self._catalog_snapshot()
+            self._seeded_defaults = True
+            self._parsed_existing = False
+            self.save(reason="first run: seeded config.json")
             return
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
@@ -1256,6 +1435,10 @@ class ConfigManager:
             if not self._shared_forced:
                 self._shared = None
             self._saved_catalog = self._catalog_snapshot()
+            self._journal_baseline = self._catalog_snapshot()
+            self._parsed_existing = True
+            self._seeded_defaults = False
+            self.write_blocked_reason = ""
             # Baseline: the mtime of the app's last write (persisted), so a
             # hand edit made while the app was closed is still detected and
             # never clobbered by the auto-sync. Falls back to the current
@@ -1264,9 +1447,51 @@ class ConfigManager:
             if self._last_write_mtime is None:
                 self._last_write_mtime = self._file_mtime(self.path)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
-            # Fall back to defaults but never crash the watcher.
-            self._data = deepcopy(DEFAULT_CONFIG)
-            print(f"[config] Could not read {self.path}: {exc}")
+            self._on_unreadable_catalog(exc)
+
+    def _on_unreadable_catalog(self, exc: Exception) -> None:
+        """The catalog exists but cannot be parsed — never write over it.
+
+        Falling back to DEFAULT_CONFIG and carrying on is how ONE json typo (or
+        a half-written file) destroys the catalog: the next mutation would write
+        the placeholders over 195 clients, and on a shared install there is no
+        GitHub history to recover from. So the app keeps running — from the
+        newest SNAPSHOT when there is one, read-only — and refuses to write until
+        a human fixes or removes the file. Changes made in the meantime are
+        queued and applied by the first save that can write again.
+        """
+        self._parsed_existing = False
+        self._seeded_defaults = False
+        recovered, source = self._load_newest_snapshot()
+        self._data = recovered if recovered is not None else deepcopy(DEFAULT_CONFIG)
+        self._saved_catalog = self._catalog_snapshot()
+        self._journal_baseline = self._catalog_snapshot()
+        self._last_write_mtime = self._file_mtime(self.path)
+        self.write_blocked_reason = (
+            f"{self.path} could not be read ({exc}). Nothing will be written "
+            f"over it."
+            + (f" The catalog is running from the newest backup ({source})."
+               if source is not None else
+               " No backup was found, so the catalog is empty until it is fixed.")
+            + " Fix or delete the file, then restart FilePicker; changes made "
+              "now are queued and applied automatically."
+        )
+        print(f"[config] REFUSING TO WRITE — {self.write_blocked_reason}")
+
+    def _load_newest_snapshot(self) -> tuple:
+        """The newest usable snapshot, as ``(data, path)`` — ``(None, None)``
+        when there is none. Used both to recover a catalog that cannot be read
+        and to put one back after a write that failed to verify."""
+        for folder in self._backup_dirs():
+            for candidate in reversed(self._snapshots(folder)):
+                try:
+                    with open(candidate, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict) and "clients" in data:
+                    return data, candidate
+        return None, None
 
     def _migrate_old_defaults(self) -> None:
         """Upgrade config values that are merely an OLD DEFAULT of this app.
@@ -1872,24 +2097,32 @@ class ConfigManager:
                     seen[key] = item
             return out
 
-        rem_companies = list(remote.get("companies", []))
-        loc_companies = list(local.get("companies", []))
+        # Every catalog key is read through these two: a hand-edited file (or an
+        # older one) may be MISSING a key entirely, and ``dict(None)`` /
+        # ``list(None)`` is how a merge used to blow up with a TypeError instead
+        # of treating the missing half as simply empty.
+        def _as_list(src: Dict[str, Any], key: str) -> List[Any]:
+            value = src.get(key) if isinstance(src, dict) else None
+            return list(value) if isinstance(value, list) else []
+
+        def _as_dict(src: Dict[str, Any], key: str) -> Dict[str, Any]:
+            value = src.get(key) if isinstance(src, dict) else None
+            return dict(value) if isinstance(value, dict) else {}
+
+        rem_companies = _as_list(remote, "companies")
+        loc_companies = _as_list(local, "companies")
         merged["companies"] = _merge_list_str(rem_companies, loc_companies)
 
         # company_initials — merge dicts, local wins on conflict (new override)
-        rem_init = dict(remote.get("company_initials", {}))
-        loc_init = dict(local.get("company_initials", {}))
+        rem_init = _as_dict(remote, "company_initials")
+        loc_init = _as_dict(local, "company_initials")
         merged_init = dict(rem_init)
         merged_init.update({str(k): str(v) for k, v in loc_init.items()})
         merged["company_initials"] = merged_init
 
         # clients — union keys, and for each client union sites
-        rem_clients = remote.get("clients", {})
-        loc_clients = local.get("clients", {})
-        if not isinstance(rem_clients, dict):
-            rem_clients = {}
-        if not isinstance(loc_clients, dict):
-            loc_clients = {}
+        rem_clients = _as_dict(remote, "clients")
+        loc_clients = _as_dict(local, "clients")
         # Map lower -> canonical key + sites
         # Build from remote first
         merged_clients: Dict[str, List[str]] = {}
@@ -1959,13 +2192,11 @@ class ConfigManager:
         # minus any name that exists in the merged catalog: a tombstone never
         # outlives an explicit re-add, and it is dropped from the published
         # list as soon as the client is back.
-        rem_tomb = remote.get("removed_clients", [])
-        loc_tomb = local.get("removed_clients", [])
+        rem_tomb = _as_list(remote, "removed_clients")
+        loc_tomb = _as_list(local, "removed_clients")
         present = {str(k).strip().lower() for k in merged_clients}
         merged["removed_clients"] = [
-            r for r in _merge_list_str(
-                rem_tomb if isinstance(rem_tomb, list) else [],
-                loc_tomb if isinstance(loc_tomb, list) else [])
+            r for r in _merge_list_str(rem_tomb, loc_tomb)
             if str(r).strip().lower() not in present
         ]
 
@@ -1976,18 +2207,16 @@ class ConfigManager:
         # otherwise delete the client again on its next sync), and it is
         # forgotten when the client is removed again (move_client_sites clears
         # it), so the list stays bounded by the catalog.
-        rem_re = remote.get("re_added_clients", [])
-        loc_re = local.get("re_added_clients", [])
+        rem_re = _as_list(remote, "re_added_clients")
+        loc_re = _as_list(local, "re_added_clients")
         merged["re_added_clients"] = [
-            n for n in _merge_list_str(
-                rem_re if isinstance(rem_re, list) else [],
-                loc_re if isinstance(loc_re, list) else [])
+            n for n in _merge_list_str(rem_re, loc_re)
             if str(n).strip().lower() in present
         ]
 
         # materials — dict union, local wins
-        rem_mat = dict(remote.get("materials", {}))
-        loc_mat = dict(local.get("materials", {}))
+        rem_mat = _as_dict(remote, "materials")
+        loc_mat = _as_dict(local, "materials")
         merged_mat = dict(rem_mat)
         merged_mat.update({str(k): str(v) for k, v in loc_mat.items()})
         merged["materials"] = merged_mat
@@ -1997,8 +2226,8 @@ class ConfigManager:
         # lost when the remote is still stale).
         for alias_key in ("client_aliases", "site_aliases",
                              "material_aliases"):
-            rem_al = dict(remote.get(alias_key, {}))
-            loc_al = dict(local.get(alias_key, {}))
+            rem_al = _as_dict(remote, alias_key)
+            loc_al = _as_dict(local, alias_key)
             merged_al = dict(rem_al)
             merged_al.update({str(k): str(v) for k, v in loc_al.items()})
             if alias_key == "client_aliases":
@@ -2014,8 +2243,8 @@ class ConfigManager:
             merged[alias_key] = merged_al
 
         # doc_types — union list
-        rem_docs = list(remote.get("doc_types", []))
-        loc_docs = list(local.get("doc_types", []))
+        rem_docs = _as_list(remote, "doc_types")
+        loc_docs = _as_list(local, "doc_types")
         merged["doc_types"] = _merge_list_str(rem_docs, loc_docs)
 
         return merged
@@ -2023,40 +2252,112 @@ class ConfigManager:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
-    def save(self) -> None:
+    def save(self, reason: str = "") -> bool:
         """Write the current in-memory config to disk atomically.
 
         On a SHARED install the file may have been written by a colleague since
         this copy last read it; the write is then union-merged (and serialised
         with a lock file) so two people adding a client/site at the same moment
         never lose each other's change.
+
+        Returns True when the file was written. **False means the write was
+        refused or queued and the catalog on disk was left exactly as it was** —
+        the caller must not assume the change is persisted. The three cases are a
+        catalog this copy could not read (:attr:`write_blocked_reason`), a
+        colleague writing right now, and a shared file that changed under us into
+        something unreadable. In all of them the change is parked in this
+        person's own pending file and written by the next save that can write.
         """
         with self._lock:
             # Persist the old-default upgrade (e.g. the OCR model) with the
             # next normal write instead of writing during load.
             self._migrate_old_defaults()
+            if self.write_blocked_reason:
+                self._queue_pending(reason)
+                print(f"[config] not saving ({reason or 'change'}): "
+                      f"{self.write_blocked_reason}")
+                return False
             if self.shared_install:
-                with _shared_write_lock(self.path):
-                    self._merge_external_changes()
-                    self._write_file()
-                return
-            self._write_file()
+                with _shared_write_lock(self.path) as may_write:
+                    if not may_write:
+                        self._queue_pending(reason)
+                        print("[config] another copy is writing the shared "
+                              "config.json right now — this change is queued "
+                              "locally and applied by the next save")
+                        return False
+                    if not self._merge_external_changes():
+                        self._queue_pending(reason)
+                        print("[config] the shared config.json changed under us "
+                              "and cannot be read — this change is queued "
+                              "instead of overwriting it")
+                        return False
+                    return self._write_file(reason)
+            return self._write_file(reason)
 
-    def _write_file(self) -> None:
-        """The actual atomic write (unique temp name: several copies may write)."""
+    def _write_file(self, reason: str = "") -> bool:
+        """The actual atomic write (unique temp name: several copies may write).
+
+        Refuses in the two cases where the bytes on disk are something this copy
+        never read: a file that exists but could not be parsed, and a file that
+        appeared where a first-run seed had just decided there was none. Takes a
+        snapshot first and reads the result back, so a write the share dropped
+        halfway is replaced by the snapshot instead of being left behind for the
+        next start to choke on.
+        """
+        if self.path.exists() and not self._parsed_existing:
+            self.write_blocked_reason = (
+                f"{self.path} exists but could not be read — refusing to "
+                f"overwrite it")
+            print(f"[config] REFUSING TO WRITE — {self.write_blocked_reason}")
+            return False
+        if self._seeded_defaults and self.path.exists():
+            # The share mounted (or a colleague created the file) between the
+            # "no config yet" decision and this write: theirs is the real one.
+            print("[config] a config.json appeared while this copy was starting "
+                  "— not seeding over it, reloading it instead")
+            self._seeded_defaults = False
+            self._loaded = False
+            self._read_from_disk()
+            self._loaded = True
+            return False
+        pending = self._read_pending()
+        if pending:
+            self._merge_catalog_from(pending)
+            print("[config] applying a change that was queued earlier")
+        # What the journal diffs against is the catalog BEFORE this save — never
+        # the in-memory copy, which already holds the change being written.
+        before = dict(self._journal_baseline) or self._catalog_snapshot()
+        snapshot = self._snapshot()
         tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2, ensure_ascii=False)
             os.replace(tmp, self.path)
-            self._last_write_mtime = self._file_mtime(self.path)
-            self._write_mtime_marker(self._last_write_mtime)
-            self._saved_catalog = self._catalog_snapshot()
         except OSError as exc:
-            print(f"[config] Could not write {self.path}: {exc}")
+            self.last_write_error = f"could not write {self.path}: {exc}"
+            print(f"[config] {self.last_write_error}")
+            return False
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                json.load(fh)
+        except (OSError, ValueError) as exc:
+            self.last_write_error = f"the write did not verify ({exc})"
+            print(f"[config] {self.last_write_error} — putting the snapshot back")
+            self._restore_snapshot(snapshot)
+            return False
+        self._parsed_existing = True
+        self._seeded_defaults = False
+        self.last_write_error = ""
+        self._last_write_mtime = self._file_mtime(self.path)
+        self._write_mtime_marker(self._last_write_mtime)
+        self._saved_catalog = self._catalog_snapshot()
+        self._journal_baseline = self._catalog_snapshot()
+        self._journal_change(before, reason)
+        self._clear_pending()
+        return True
 
-    def _merge_external_changes(self) -> None:
+    def _merge_external_changes(self) -> bool:
         """Union-merge the shared file when another copy wrote it first.
 
         Last-writer-wins is fine for one machine, but with everybody running the
@@ -2069,18 +2370,21 @@ class ConfigManager:
         against a timestamp: on a server folder two saves can land inside the
         same second, and the 1s mtime epsilon used for hand-edit detection would
         miss exactly the case this exists for.
+
+        Returns False when the file exists but cannot be read — the caller must
+        then refuse to write rather than replace a catalog it could not parse.
         """
         if not self.path.exists():
-            return
+            return True
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 disk = json.load(fh)
         except (OSError, json.JSONDecodeError, ValueError):
-            return
+            return False
         if not isinstance(disk, dict):
-            return
+            return False
         if {k: disk.get(k) for k in CATALOG_KEYS} == self._saved_catalog:
-            return  # the file still holds what this copy last saw
+            return True  # the file still holds what this copy last saw
         merged = self._merge_for_push(disk, self._data)
         new_data = dict(disk)
         for key in CATALOG_KEYS:
@@ -2090,8 +2394,254 @@ class ConfigManager:
             if key not in new_data:
                 new_data[key] = value
         self._data = new_data
+        # A colleague's entries are in the catalog now; move the journal baseline
+        # past them so this save does not report THEIR change as this person's.
+        self._journal_baseline = {k: new_data.get(k) for k in CATALOG_KEYS}
         print("[config] shared config.json was written by another copy — "
               "union-merged before saving")
+        return True
+
+    # ------------------------------------------------------------------
+    # Config safety: snapshots, the change journal, the queued change
+    # ------------------------------------------------------------------
+    def _person_directory(self) -> Optional[Path]:
+        """This person's own folder (the one holding settings.json), else None."""
+        path = getattr(self._local, "path", None)
+        return Path(path).parent if path else None
+
+    def _backup_dirs(self) -> List[Path]:
+        """Where snapshots go: ``backups/`` next to config.json (where the admin
+        looks) and in this person's own folder (the copy that survives the share
+        itself)."""
+        dirs = [self.path.parent / _BACKUP_DIR_NAME]
+        person = self._person_directory()
+        if person is not None:
+            local = person / _BACKUP_DIR_NAME
+            if local not in dirs:
+                dirs.append(local)
+        return dirs
+
+    def _pending_path(self) -> Path:
+        person = self._person_directory()
+        if person is not None:
+            return person / _PENDING_FILE_NAME
+        return self.path.with_name(f"config.{_PENDING_FILE_NAME}")
+
+    def _snapshot(self) -> Optional[Path]:
+        """Copy the catalog aside before it is replaced.
+
+        Cheap (the file is ~13 KB) and the only way back from a bad catalog edit,
+        so it runs before every write. The same bytes are never snapshotted
+        twice, and the folder is pruned to the newest ``_BACKUP_KEEP`` plus the
+        first snapshot of each of the last ``_BACKUP_KEEP_DAYS`` days — so a
+        mistake made this morning is still there next month without keeping every
+        save forever.
+        """
+        if not self.path.exists():
+            return None
+        try:
+            blob = self.path.read_bytes()
+        except OSError:
+            return None
+        stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        first: Optional[Path] = None
+        for folder in self._backup_dirs():
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                newest = self._newest_snapshot(folder)
+                if newest is not None and self._same_bytes(newest, blob):
+                    if first is None:
+                        first = newest
+                    continue
+                target = folder / f"config-{stamp}.json"
+                n = 1
+                while target.exists():
+                    n += 1
+                    target = folder / f"config-{stamp}-{n}.json"
+                target.write_bytes(blob)
+                self._prune_snapshots(folder)
+                if first is None:
+                    first = target
+            except OSError as exc:
+                print(f"[config] could not snapshot the catalog into {folder}: {exc}")
+        self._snapshot_taken = first
+        return first
+
+    @staticmethod
+    def _snapshots(folder: Path) -> List[Path]:
+        """The snapshots in *folder*, oldest first.
+
+        Ordered by mtime, NOT by name: several saves inside the same second share
+        the ``config-<stamp>`` prefix, and the extra ones get a ``-N`` suffix that
+        sorts BEFORE the bare name — so filename order is not write order, and
+        treating it as such would prune the newest snapshot and restore the
+        oldest.
+        """
+        try:
+            files = list(folder.glob("config-*.json"))
+        except OSError:
+            return []
+
+        def _key(path: Path):
+            try:
+                stat = path.stat()
+                return (stat.st_mtime_ns, path.name)
+            except OSError:
+                return (0, path.name)
+
+        return sorted(files, key=_key)
+
+    @staticmethod
+    def _newest_snapshot(folder: Path) -> Optional[Path]:
+        files = ConfigManager._snapshots(folder)
+        return files[-1] if files else None
+
+    @staticmethod
+    def _same_bytes(path: Path, blob: bytes) -> bool:
+        try:
+            return path.read_bytes() == blob
+        except OSError:
+            return False
+
+    @staticmethod
+    def _prune_snapshots(folder: Path) -> None:
+        files = ConfigManager._snapshots(folder)
+        if len(files) <= _BACKUP_KEEP:
+            return
+        keep = set(files[-_BACKUP_KEEP:])
+        cutoff = time.time() - _BACKUP_KEEP_DAYS * 86400
+        # Days already represented among the newest N — the daily rule exists to
+        # stop a whole day vanishing, so it only adds a day that would otherwise
+        # be gone entirely.
+        seen_days = set()
+        for path in keep:
+            try:
+                seen_days.add(time.strftime("%Y-%m-%d",
+                                            time.localtime(path.stat().st_mtime)))
+            except OSError:
+                pass
+        for path in reversed(files):
+            if path in keep:
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            day = time.strftime("%Y-%m-%d", time.localtime(mtime))
+            if day not in seen_days:
+                seen_days.add(day)
+                keep.add(path)
+        for path in files:
+            if path in keep:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _restore_snapshot(self, snapshot: Optional[Path]) -> None:
+        """Put a snapshot back over a write that did not verify."""
+        source = snapshot
+        if source is None or not source.exists():
+            _data, source = self._load_newest_snapshot()
+        if source is None or not source.exists():
+            print("[config] no snapshot to restore — the catalog may need a human")
+            return
+        try:
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.restore")
+            tmp.write_bytes(source.read_bytes())
+            os.replace(tmp, self.path)
+            print(f"[config] restored the catalog from {source}")
+        except OSError as exc:
+            print(f"[config] could not restore {source}: {exc}")
+
+    def _journal_change(self, before: Dict[str, Any], reason: str) -> None:
+        """Append one line per catalog change, in THIS person's own file.
+
+        ``changes/<user>@<machine>.jsonl`` — one file per person, so two people
+        saving at the same moment never write the same file (the same trick the
+        colleague registry uses). This is the half a backup cannot give: who
+        changed what, and when. Never fatal: a journal that cannot be written
+        must not fail the save.
+        """
+        delta = _catalog_delta(before, self._catalog_snapshot())
+        if not delta["added"] and not delta["removed"]:
+            return
+        try:
+            from localsettings import current_machine, current_user
+            who = f"{current_user() or 'unknown'}@{current_machine() or 'unknown'}"
+        except Exception:
+            who = "unknown@unknown"
+        safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in who)
+        folder = self.path.parent / _CHANGE_DIR_NAME
+        path = folder / f"{safe}.jsonl"
+        line = json.dumps({
+            "t": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "who": who,
+            "version": _app_version(),
+            "reason": reason or "",
+            "added": delta["added"],
+            "removed": delta["removed"],
+        }, ensure_ascii=False)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            try:
+                if path.stat().st_size > _JOURNAL_MAX_BYTES:
+                    path.replace(path.with_name(path.name + ".1"))
+            except OSError:
+                pass
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError as exc:
+            print(f"[config] could not append to the change journal: {exc}")
+
+    def _merge_catalog_from(self, other: Dict[str, Any]) -> None:
+        """Union another catalog (a queued change) into this one."""
+        merged = self._merge_for_push(other, self._data)
+        for key in CATALOG_KEYS:
+            if key in merged:
+                self._data[key] = merged[key]
+
+    def _queue_pending(self, reason: str) -> None:
+        """Park a change that could not be written, in this person's own folder.
+
+        Kept as a catalog snapshot and union-merged into the shared file by the
+        next save that can write, so nothing a person did is lost because a
+        colleague was writing at that instant — or because the catalog needs a
+        human's attention first.
+        """
+        path = self._pending_path()
+        try:
+            existing = self._read_pending() or {}
+            merged = self._merge_for_push(existing, self._catalog_snapshot())
+            payload = {key: merged[key] for key in CATALOG_KEYS if key in merged}
+            payload["_queued"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            payload["_reason"] = reason or ""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+            print(f"[config] change queued in {path} — the next save that can "
+                  f"write applies it")
+        except OSError as exc:
+            print(f"[config] could not queue the change ({exc}) — it is NOT saved")
+
+    def _read_pending(self) -> Optional[Dict[str, Any]]:
+        try:
+            with open(self._pending_path(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _clear_pending(self) -> None:
+        try:
+            self._pending_path().unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Typed accessors
@@ -2514,7 +3064,7 @@ class ConfigManager:
             companies = self.load().setdefault("companies", [])
             if not self._ci_matches(companies, company):
                 companies.append(company)
-                self.save()
+                self.save(reason=f"add company '{company}'")
                 changed = True
         if changed:
             self._mark_push_pending(reason=f"add company '{company}'")
@@ -2546,7 +3096,7 @@ class ConfigManager:
             # lives on other machines and would otherwise delete the client
             # again on their next sync.
             _mark_re_added(data, client)
-            self.save()
+            self.save(reason=f"add client '{client}'")
             changed = True
         if changed:
             self._mark_push_pending(reason=f"add client '{client}'")
@@ -2623,7 +3173,7 @@ class ConfigManager:
                         print(f"[config] site '{site}' is the same site as '{canonical}' — reusing existing name")
                     return canonical
             sites.append(effective)
-            self.save()
+            self.save(reason=f"add site '{effective}' to '{key}'")
             changed = True
         if changed:
             self._mark_push_pending(reason=f"add site '{effective}' to '{key}'")
@@ -2648,7 +3198,7 @@ class ConfigManager:
             materials = self.load().setdefault("materials", {})
             if materials.get(name) != shortcode:
                 materials[name] = shortcode
-                self.save()
+                self.save(reason=f"add material '{name}'")
                 changed = True
         if changed:
             self._mark_push_pending(reason=f"add material '{name}'")
@@ -2659,7 +3209,7 @@ class ConfigManager:
             doc_types = self.load().setdefault("doc_types", [])
             if not self._ci_matches(doc_types, doc_type):
                 doc_types.append(doc_type)
-                self.save()
+                self.save(reason=f"add doc type '{doc_type}'")
                 changed = True
         if changed:
             self._mark_push_pending(reason=f"add doc type '{doc_type}'")
@@ -2693,7 +3243,7 @@ class ConfigManager:
                     break
             if aliases.get(canon) != target:
                 aliases[canon] = target
-                self.save()
+                self.save(reason=f"map {label} '{source}' -> '{target}'")
                 changed = True
         if changed:
             self._mark_push_pending(reason=f"map {label} '{source}' -> '{target}'")
@@ -2723,7 +3273,7 @@ class ConfigManager:
                 for k in list(aliases):
                     if str(k).lower() == source.lower():
                         del aliases[k]
-                        self.save()
+                        self.save(reason=f"remove {label} mapping '{source}'")
                         changed = True
                         break
         if changed:

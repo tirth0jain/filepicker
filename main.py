@@ -202,6 +202,9 @@ class FilePickerController:
         self._tray = None
         self._root = None
         self._current_popup = None  # the popup currently on screen (so live config can refresh it)
+        # Last "config cannot be written" reason the user was shown (see
+        # _warn_config_blocked): shown once per distinct reason, never nagging.
+        self._config_blocked_warned = ""
         self._ocr_pool = None  # OcrPool — reads every download at once (see _OCR_MAX)
         self._watcher = None     # DownloadWatcher, started once the folder exists
         self._file_order: list = []  # completed files in arrival order
@@ -384,7 +387,28 @@ class FilePickerController:
                 finally:
                     self._popup_active = False
         self._maybe_install_update()
+        self._warn_config_blocked()
         self._root.after(_POPUP_POLL_MS, self._poll_popups)
+
+    def _warn_config_blocked(self) -> None:
+        """Tell the user — once — when the catalog cannot be written.
+
+        A refused write is the one failure the app must never hide: the popups
+        keep working, so without this a person would go on filing documents while
+        every catalog change waited in the queue (see ConfigManager.save). The
+        change is not lost — the first save that can write applies it — but
+        somebody has to fix the file, and only the person at the screen can.
+        """
+        reason = str(getattr(self.config, "write_blocked_reason", "") or "")
+        if not reason or reason == self._config_blocked_warned:
+            return
+        self._config_blocked_warned = reason
+        print(f"[filepicker] CONFIG NOT WRITABLE: {reason}")
+        try:
+            import tkinter.messagebox as mb
+            mb.showwarning("FilePicker — config not writable", reason)
+        except Exception:
+            pass
 
     def _show_popup(self, path: Path) -> None:
         self._popups_shown += 1
