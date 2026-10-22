@@ -1,6 +1,6 @@
 {
-  "watch_directory": "Z:/Unsorted",
-  "root_directory": "Z:/Sorted",
+  "watch_directory": "X:/Manish-D/1 SCANNER/1--RUBY STEEL/5- DELIVERY CHALLAN FILE/tally-dc-source",
+  "root_directory": "X:/Sorted",
   "doc_types": [
     "DC"
   ],
@@ -376,6 +376,9 @@
     ],
     "Luxora Realtors Private Limited": [
       "Crystal Antras"
+    ],
+    "Bowen Developers Llp": [
+      "PRABHAKAR KUNTE (Esquina)"
     ]
   },
   "client_aliases": {
