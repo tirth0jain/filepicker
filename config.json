@@ -6,24 +6,24 @@
   ],
   "materials": {
     "Aluminium": "A",
-    "Fastner": "F",
+    "Fastener": "F",
     "Stainless Steel": "SS",
     "Mild Steel": "MS",
     "Glass": "G",
     "Consumables": "CO",
     "Packing": "PA",
-    "fitting": "FI",
-    "silicon": "SI",
-    "EPDM RUBBER": "ER",
+    "Fitting": "FI",
+    "Silicone": "SI",
+    "EPDM Rubber": "ER",
     "ad": "AD",
-    "GI SHEET": "GS",
+    "GI Sheet": "GS",
     "Carbon": "CA",
     "Galvanized Iron": "GI",
-    "Abs": "AB",
+    "ABS": "AB",
     "Railing": "RA",
     "Screw": "SC",
     "Other": "OT",
-    "paints": "PA"
+    "Paints": "PT"
   },
   "companies": [
     "Ruby Steel",
@@ -101,9 +101,9 @@
     "JOYNEST PREMISES PVT LTD": [],
     "JUHU REAL ESTATE DEVELOPERS PVT LTD": [],
     "KALPATARU": [
-      "Kalpaturu Advay",
+      "Kalpataru Advay",
       "Kalpataru Elitus",
-      "Kalpataru Vivant Tower",
+      "Kalpataru Vivant",
       "Kalpataru Amoda Reserve",
       "Kalpataru Oceana",
       "Kalpataru Magnus",
@@ -174,15 +174,12 @@
     "RAHEJA UNIVERSAL LTD": [
       "Raheja Verona &Sienna",
       "Raheja Exotica",
-      "Raheja Solaris",
-      "Raheja Solaris (Tower-B)",
-      "Raheja Solaris (Tower-A)"
+      "Raheja Solaris"
     ],
     "RAJESH SALUJA": [],
     "RAK ITALIANO OVERSEAS LLP": [],
     "Raymond Limited": [
-      "Raymond Primium",
-      "Raymond Ten X"
+      "Raymond Premium"
     ],
     "Reliance Industries Ltd- MHA": [],
     "RENNY THOMAS": [],
@@ -225,7 +222,6 @@
     "SIDDHI KRISH DEVELOPERS": [],
     "SIDDHI PROPERTIES DEVELOPERS PVT LTD": [],
     "SRIAS DEVELOPERS LLP": [],
-    "SUBHASH RUNWAL": [],
     "SULOCHANA PITTIE": [],
     "SUMER BUILDER": [],
     "SUMER TRINTY TOWER CHS LTD": [],
@@ -269,7 +265,6 @@
       "DLF Dahlias"
     ],
     "Cowtown Infotech Services Limited": [
-      "LODHA - MULUND BAYA- Regalia",
       "Lodha Sital Baug",
       "LODHA - BRADBURY-bellevue",
       "Lodha Regalia",
@@ -277,7 +272,6 @@
       "Lodha Nibm",
       "Lodha Kolshet",
       "Lodha Matunga",
-      "Lodha Olp",
       "Lodha Baner",
       "Lodha Kharadi",
       "LODHA - AMRUT TARA SALES TOWER Versova",
@@ -291,7 +285,6 @@
       "LODHA - DWELLERS PVT LTD",
       "LODHA - ETERNIS",
       "LODHA - FIORENZA",
-      "LODHA - Fiorenza-PO No. - 4400049003",
       "LODHA - G Corp Homes Pvt. Ltd-banglore",
       "LODHA - GOLD CREST-LONAVALA",
       "LODHA - HEALTHY CONSTRUCTIONS & DEVELOPERS PVT LTD",
@@ -325,23 +318,10 @@
       "LODHA- GITANJALI",
       "Lodha Sahana Worli",
       "Mirabelle",
-      "Acme Ozobe(Bellavista)",
+      "Acme Ozone (Bellavista)",
       "Lodha Palava -Fire Station",
       "Lodha Altamount",
-      "LODHA - BRADBURY-benellevue",
-      "Lodha Nibm -T6 Pent",
-      "Bradbury",
-      "Lodha SitalBuag",
-      "LODHA DIVINO",
-      "Lodha Nibmt",
-      "Lodha Matunga (Matunga Rehab)",
-      "LODHA DIVINO T-2&3",
-      "Acme Ozone T-2 (Bellavista)",
-      "Lodha Olp Level 33,34 &37",
-      "Lodha Matunga T-9 & 10"
-    ],
-    "Arimas Real Estate Private Limited": [
-      "Kalpataru Elitus"
+      "LODHA DIVINO"
     ],
     "Agile Real Estate Pvt Ltd": [
       "Bayer Infra"
@@ -370,11 +350,8 @@
     ],
     "Larsen and Toubro Limited - Realty Division": [
       "Navi Mumbai International Airport",
-      "Nmial Dapoli",
       "Elixir Reserve",
-      "L & T Powai",
       "L & T (Retail)",
-      "l& t Elixir Reserve",
       "L & T The Gateway"
     ],
     "Luxora Realtors Private Limited": [
@@ -402,23 +379,41 @@
     "SWAYAM REALTORS AND TRADERS LLP -MONTE SOUTH": "SWAYAM REALTORS AND TRADERS LLP",
     "DLF LTD": "DLF Limited",
     "LARSEN & TOUBRO LTD": "Larsen and Toubro Limited - Realty Division",
-    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division"
+    "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division",
+    "SUBHASH RUNWAL": "RUNWAL"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
-    "Raymond Ten X": "Raymond Primium",
+    "Raymond Ten X": "Raymond Premium",
     "L & T Powai": "L & T (Retail)",
     "L & T (T-10)": "L & T (Retail)",
     "Mirabella-T5 & 7": "Mirabelle",
-    "Raymond T-A & B": "Raymond Primium",
-    "Lodha Woods Club House": "LODHA - WOOD-kandivali"
+    "Raymond T-A & B": "Raymond Premium",
+    "Lodha Woods Club House": "LODHA - WOOD-kandivali",
+    "Lodha SitalBuag": "Lodha Sital Baug",
+    "Lodha Nibmt": "Lodha Nibm",
+    "Lodha Nibm -T6 Pent": "Lodha Nibm",
+    "LODHA - BRADBURY-benellevue": "LODHA - BRADBURY-bellevue",
+    "Bradbury": "LODHA - BRADBURY-bellevue",
+    "LODHA - Fiorenza-PO No. - 4400049003": "LODHA - FIORENZA",
+    "Lodha Olp": "LODHA - W ONE LODHA PLACE -OLP",
+    "Lodha Olp Level 33,34 &37": "LODHA - W ONE LODHA PLACE -OLP",
+    "Lodha Matunga (Matunga Rehab)": "Lodha Matunga",
+    "Lodha Matunga T-9 & 10": "Lodha Matunga",
+    "LODHA DIVINO T-2&3": "LODHA DIVINO",
+    "LODHA - MULUND BAYA- Regalia": "Lodha Regalia",
+    "Acme Ozone T-2 (Bellavista)": "Acme Ozone (Bellavista)",
+    "l& t Elixir Reserve": "Elixir Reserve",
+    "Raheja Solaris (Tower-A)": "Raheja Solaris",
+    "Raheja Solaris (Tower-B)": "Raheja Solaris"
   },
   "material_aliases": {
     "consumable goods": "Consumables",
-    "stud": "Fastner",
-    "Spigot": "fitting",
+    "stud": "Fastener",
+    "Spigot": "Fitting",
     "Washer": "Screw",
-    "Ply": "Consumables"
+    "Ply": "Consumables",
+    "Fastner": "Fastener"
   },
   "removed_clients": [
     "Alder Residency Pvt Ltd",
