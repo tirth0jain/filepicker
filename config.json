@@ -134,7 +134,9 @@
     "MEDITRINA DINING PVT. LTD": [],
     "MERAKI HABITATS LLP": [],
     "MERO ASIA PACIFIC ENGINEERING PVT LTD": [],
-    "Millennium Engineers & Contractors Pvt. Ltd": [],
+    "Millennium Engineers & Contractors Pvt. Ltd": [
+      "LODHA GIARDINO"
+    ],
     "MODERN INTERIOR": [],
     "MOKSH CONSTRUCTION": [],
     "MUMBAI INTERNATIONAL AIRPORT LTD": [],
@@ -345,8 +347,7 @@
     "LODHA -LODHA DEVELOPERS LIMITED": [],
     "LODHA- world One Co operative Housing Society Limited": [],
     "SWAYAM REALTORS AND TRADERS LLP": [
-      "Monte South -TB",
-      "Monte South T-8 (External & Internal)"
+      "Monte South -TB"
     ],
     "Larsen and Toubro Limited - Realty Division": [
       "Navi Mumbai International Airport",
@@ -362,9 +363,6 @@
     ],
     "ROYAL MINERVA REALTY LLP": [
       "Courtyard"
-    ],
-    "Millennium Engineers and Contractors Private Limited": [
-      "LODHA GIARDINO"
     ]
   },
   "client_aliases": {
@@ -380,7 +378,8 @@
     "DLF LTD": "DLF Limited",
     "LARSEN & TOUBRO LTD": "Larsen and Toubro Limited - Realty Division",
     "Larsen & Toubro Limited": "Larsen and Toubro Limited - Realty Division",
-    "SUBHASH RUNWAL": "RUNWAL"
+    "SUBHASH RUNWAL": "RUNWAL",
+    "Millennium Engineers and Contractors Private Limited": "Millennium Engineers & Contractors Pvt. Ltd"
   },
   "site_aliases": {
     "Nmial Dapoli": "Navi Mumbai International Airport",
@@ -405,7 +404,8 @@
     "Acme Ozone T-2 (Bellavista)": "Acme Ozone (Bellavista)",
     "l& t Elixir Reserve": "Elixir Reserve",
     "Raheja Solaris (Tower-A)": "Raheja Solaris",
-    "Raheja Solaris (Tower-B)": "Raheja Solaris"
+    "Raheja Solaris (Tower-B)": "Raheja Solaris",
+    "Monte South T-8 (External & Internal)": "Monte South -TB"
   },
   "material_aliases": {
     "consumable goods": "Consumables",
