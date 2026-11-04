@@ -16,3 +16,10 @@ FilePicker.log
 CONTEXT.md
 .localtests/
 
+
+# OCR API keys (dropped in the app folder; never committed)
+*_api_key.txt
+commandcode*.txt
+api_key.txt
+apikey.txt
+key.txt

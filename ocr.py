@@ -41,16 +41,142 @@ from version import VERSION
 # name can never disagree about what "25-26" means.
 from filename import fy_from_text as _fy_from_text
 
-# OpenCode Go catalog endpoint (OpenAI-compatible). Both the OpenCode Go
-# subscription and the zen catalog share one key; the Go catalog is served
-# under /zen/go/v1.
-OCR_API_BASE = "https://opencode.ai/zen/go/v1"
+# --- Providers ------------------------------------------------------------
+#
+# OCR talks OpenAI-compatible chat completions either way, so one client serves
+# both: only the base URL, the path, the auth chain and the model ids differ.
+#
+#   commandcode  api.commandcode.ai/provider/v1 — the documented Provider API
+#                route. The SAME model is also reachable through the CLI
+#                transport (/alpha/generate), and that route is a trap for this
+#                job: it injects the Command Code CLI's own ~7 400-token
+#                scaffolding into every call (measured 2026-11-04), so even a
+#                one-line prompt prefilled slowly (4.6-22 s against 2.8-3.0 s
+#                on the Provider route). Measured through the Provider API with
+#                a real delivery note: 3 325 prompt tokens (2 378 of them
+#                image), first token at 3.25 s, 110 output tokens in 0.94 s
+#                => 117 tok/s decode, 4.19 s end to end. The model matters more
+#                than anything else: DeepSeek V4.1 Flash accepts
+#                reasoning_effort "off" and reads the same note in 3.9 s
+#                (145 tok/s, 0 reasoning tokens), while GLM-5.3 Flash cannot
+#                stop thinking and takes 37.8 s.
+#   opencode     opencode.ai/zen/go/v1 — the previous default.
+OCR_OPENCODE = "opencode"
+OCR_COMMANDCODE = "commandcode"
 
-# The model from the user's OpenCode Go subscription ("DeepSeek V4.1 Flash").
-# Multimodal (text + image input) and reasoning-capable: it needs a large
-# max_tokens budget or it runs out of room before producing the answer table
-# (see OCR_MAX_TOKENS).
-OCR_MODEL = "deepseek-v4.1-flash"
+OCR_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    OCR_COMMANDCODE: {
+        "label": "CommandCode",
+        "api_base": "https://api.commandcode.ai",
+        "chat_path": "/provider/v1/chat/completions",
+        # Measured on a real delivery note: DeepSeek V4.1 Flash with
+        # reasoning_effort "off" reads it in 3.9 s (111 tokens, 145 tok/s,
+        # 0 reasoning tokens); GLM-5.3 Flash takes 37.8 s because it cannot
+        # stop thinking (the API refuses "off" for it). Speed wins by default;
+        # GLM is one tray click away.
+        "default_model": "deepseek/deepseek-v4.1-flash",
+        # OpenCode Go needs a per-run session id for routing/prompt caching;
+        # CommandCode has no such requirement.
+        "session_header": False,
+        "token_env": ("FILEPICKER_COMMANDCODE_TOKEN", "COMMANDCODE_API_KEY"),
+        "token_file": "commandcode_token.txt",
+        "models": [
+            # GLM cannot turn thinking OFF at all (the Provider API rejects
+            # reasoning_effort "off" with "only models that can turn thinking
+            # off accept it"), so "low" is its floor. The DeepSeek models on
+            # this gateway DO take "off" — and it works: measured 1 completion
+            # token, 0 reasoning tokens, 2.1 s. That makes "off" the fastest
+            # read on CommandCode, and "none" is not even a valid value here
+            # (the API 400s with the accepted set: off|low|medium|high|xhigh|max).
+            {"id": "z-ai/glm-5.3-flash", "label": "GLM-5.3 Flash",
+             "vision": True,
+             "efforts": ["low", "medium", "high", "xhigh", "max"]},
+            {"id": "deepseek/deepseek-v4.1-flash",
+             "label": "DeepSeek V4.1 Flash", "vision": True,
+             "efforts": ["off", "low", "medium", "high", "xhigh", "max"]},
+            {"id": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro",
+             "vision": True,
+             "efforts": ["off", "low", "medium", "high", "xhigh", "max"]},
+            {"id": "deepseek/deepseek-v4-flash-vision-exp",
+             "label": "DeepSeek V4 Flash Vision (exp)", "vision": True,
+             "efforts": ["off", "low", "medium", "high", "xhigh", "max"]},
+        ],
+    },
+    OCR_OPENCODE: {
+        "label": "OpenCode Go",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "chat_path": "/chat/completions",
+        "default_model": "deepseek-v4.1-flash",
+        "session_header": True,
+        "token_env": ("FILEPICKER_OPENCODE_TOKEN", "OPENCODE_API_KEY"),
+        "token_file": "opencode_token.txt",
+        "models": [
+            {"id": "deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash",
+             "vision": True, "efforts": ["none", "low", "high", "max"]},
+            {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash",
+             "vision": True, "efforts": ["none", "low", "high", "max"]},
+            {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro",
+             "vision": True, "efforts": ["none", "low", "high", "max"]},
+        ],
+    },
+}
+
+# New installs read through CommandCode; a config that pins a model or a base
+# decides for itself (see config.ConfigManager.ocr_provider).
+OCR_DEFAULT_PROVIDER = OCR_COMMANDCODE
+OCR_API_BASE = OCR_PROVIDERS[OCR_DEFAULT_PROVIDER]["api_base"]
+OCR_MODEL = OCR_PROVIDERS[OCR_DEFAULT_PROVIDER]["default_model"]
+
+
+def provider_spec(provider: Optional[str] = None) -> Dict[str, Any]:
+    """The spec for *provider*, falling back to the default provider."""
+    name = str(provider or "").strip().lower()
+    return OCR_PROVIDERS.get(name) or OCR_PROVIDERS[OCR_DEFAULT_PROVIDER]
+
+
+def provider_for_base(api_base: Optional[str]) -> Optional[str]:
+    """Which provider serves *api_base*, when it is one we know."""
+    base = str(api_base or "").strip().rstrip("/").lower()
+    if not base:
+        return None
+    for name, spec in OCR_PROVIDERS.items():
+        if spec["api_base"].rstrip("/").lower() == base:
+            return name
+    return None
+
+
+def provider_for_model(model: Optional[str]) -> Optional[str]:
+    """Which provider serves *model*, when it is one we know."""
+    wanted = str(model or "").strip()
+    for name, spec in OCR_PROVIDERS.items():
+        if any(entry["id"] == wanted for entry in spec["models"]):
+            return name
+    return None
+
+
+def model_spec(model: Optional[str],
+               provider: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The catalog entry for *model* — *provider* first, then all providers."""
+    wanted = str(model or "").strip()
+    if not wanted:
+        return None
+    order = [str(provider).lower()] if provider else []
+    order += [p for p in OCR_PROVIDERS if p not in order]
+    for name in order:
+        for entry in OCR_PROVIDERS.get(name, {}).get("models", []):
+            if entry["id"] == wanted:
+                return entry
+    return None
+
+
+def ocr_models(provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The models the picker offers for *provider* (every provider if None)."""
+    if provider:
+        return list(provider_spec(provider)["models"])
+    out: List[Dict[str, Any]] = []
+    for spec in OCR_PROVIDERS.values():
+        out.extend(spec["models"])
+    return out
 
 # Model ids that OLDER builds wrote into config.json as the then-current
 # default. config.json is the source of truth for the model id (it is a
@@ -225,30 +351,53 @@ def _plan_key(plan: Dict[str, Any]) -> str:
     return "?"
 
 
-def _thinking_plans(level: Optional[str] = None) -> List[Dict[str, Any]]:
+def _thinking_plans(level: Optional[str] = None,
+                    model: Optional[str] = None) -> List[Dict[str, Any]]:
     """The ordered thinking plans to try for *level*, fastest first.
 
     The ladder always ends with "send nothing", so a gateway that knows none
     of these fields still reads the document (the model then uses its own
     default). *level* is one of :data:`OCR_THINKING_LEVELS`.
+
+    *model* makes the ladder model-aware, which matters because "off" is not
+    portable: DeepSeek answers `reasoning_effort: "none"`, while GLM 5.3 Flash
+    only accepts low/high/max, so asking it to stop thinking means asking for
+    "low". Sending "none" to a model that does not define it is at best ignored
+    and at worst a 400, and either way it costs a round trip to learn.
     """
     level = str(level if level is not None else OCR_THINKING).strip().lower()
     if level not in OCR_THINKING_LEVELS:
         level = OCR_THINKING
-    off = [
-        {"reasoning_effort": OCR_THINKING_OFF_EFFORT},
-        {"thinking": {"type": "disabled"}},
-    ]
-    graded = {
-        "low": [{"reasoning_effort": "low"}],
-        "high": [{"reasoning_effort": "high"}],
-        "max": [{"reasoning_effort": "max"}],
-    }
-    if level == "off":
-        return off + graded["low"] + [{}]
+    entry = model_spec(model) if model else None
+    efforts = list((entry or {}).get("efforts")
+                   or ["none", "low", "high", "max"])
+    plans: List[Dict[str, Any]] = []
+
+    def _add(plan: Dict[str, Any]) -> None:
+        if plan not in plans:
+            plans.append(plan)
+
     if level == "default":
         return [{}]
-    return graded[level] + [{}]
+    if level == "off":
+        if "off" in efforts:
+            # CommandCode's own spelling, and the only one that truly stops
+            # the thinking there (DeepSeek: 1 token, 0 reasoning, 2.1 s).
+            _add({"reasoning_effort": "off"})
+        elif "none" in efforts:
+            # OpenCode Go's spelling for the same thing.
+            _add({"reasoning_effort": OCR_THINKING_OFF_EFFORT})
+            _add({"thinking": {"type": "disabled"}})
+        # Next cheapest: the lowest graded level this model defines. For GLM
+        # that IS "off" (it defines low/medium/high/xhigh/max and rejects
+        # "off" outright); for DeepSeek it is the fallback if "off" is refused.
+        cheapest = "low" if "low" in efforts else efforts[0]
+        _add({"reasoning_effort": cheapest})
+    else:
+        _add({"reasoning_effort": level})
+    # The plain request last: the model's own default always works.
+    _add({})
+    return plans
 
 
 def _pick_plan(plans: List[Dict[str, Any]]) -> int:
@@ -657,13 +806,14 @@ def extract_delivery_note(
     file_path,
     token: str,
     model: str = OCR_MODEL,
-    api_base: str = OCR_API_BASE,
+    api_base: Optional[str] = None,
     prompt: str = OCR_PROMPT,
     max_tokens: int = OCR_MAX_TOKENS,
     timeout: float = OCR_TIMEOUT,
     on_error: Optional[Callable[[str], None]] = None,
     reasoning_effort: Optional[str] = None,
     thinking: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
     """Run OCR on *file_path* and return {company, client, site, serial, goods}.
 
@@ -703,15 +853,18 @@ def extract_delivery_note(
     if data_url is None:
         return None
 
-    endpoint = api_base.rstrip("/") + "/chat/completions"
+    spec = provider_spec(provider)
+    endpoint = (api_base or spec["api_base"]).rstrip("/") + spec["chat_path"]
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "User-Agent": _UA,
-        "x-opencode-session": OCR_SESSION_ID,
+        "Accept": "text/event-stream, application/json",
     }
+    if spec.get("session_header"):
+        headers["x-opencode-session"] = OCR_SESSION_ID
     level = _thinking_level(thinking if thinking is not None else reasoning_effort)
-    plans = _thinking_plans(level)
+    plans = _thinking_plans(level, model)
     payload_base = {
         "model": model,
         "messages": [{
@@ -874,6 +1027,79 @@ def _message_content(data: dict) -> str:
         return ""
 
 
+# Set once if a gateway rejects the `stream` fields: the read then falls back to
+# the plain buffered request, so streaming can never be the reason a read fails.
+_STREAM_DISABLED = False
+# Per-thread decode timing of the last streamed read (the pool runs one read per
+# worker thread, so the thread-local IS the read's own figure).
+_STREAM_STATS = threading.local()
+
+
+def _read_chat_response(req: urllib.request.Request, timeout: float) -> dict:
+    """Read one chat completion, assembling an SSE stream into the usual shape.
+
+    Returns the ordinary ``{"choices": [{"message": {"content": ...}}], ...}``
+    dict, so every caller downstream is unchanged. The payload asks for
+    ``stream: true`` (see ``_request_with_thinking``); a gateway that ignores the
+    flag answers with plain JSON, which this also handles.
+
+    Streaming is what the harness does for the same reason: the first token
+    arrives in ~3.2 s and the rest stream at the model's decode rate (measured
+    117 tok/s on GLM 5.3 Flash), so the read reports the rate instead of guessing
+    it and never waits on a buffered body.
+    """
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # A response object is not required to expose headers (a test double,
+        # or a transport that wraps urlopen): without them we cannot know it
+        # is a stream, so read the body as plain JSON instead of failing.
+        headers = getattr(resp, "headers", None)
+        try:
+            ctype = (headers.get("Content-Type") or "").lower() if headers else ""
+        except Exception:
+            ctype = ""
+        if "event-stream" not in ctype and "ndjson" not in ctype:
+            return json.loads(resp.read().decode("utf-8"))
+        text = ""
+        usage = None
+        finish = None
+        first_at = None
+        last_at = None
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                event = json.loads(chunk)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            choice = (event.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                if first_at is None:
+                    first_at = time.monotonic()
+                text += piece
+                last_at = time.monotonic()
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+            if isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+        _STREAM_STATS.decode_s = ((last_at - first_at)
+                                  if first_at and last_at else 0.0)
+        data: Dict[str, Any] = {
+            "choices": [{"message": {"content": text},
+                         "finish_reason": finish}],
+        }
+        if usage:
+            data["usage"] = usage
+        return data
+
+
 def _request_with_thinking(
     endpoint: str,
     headers: Dict[str, str],
@@ -897,6 +1123,9 @@ def _request_with_thinking(
         plan = plans[index]
         payload = dict(payload_base)
         payload.update(plan)
+        if not _STREAM_DISABLED:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             endpoint, data=body, headers=headers, method="POST")
@@ -910,8 +1139,7 @@ def _request_with_thinking(
 
         attempt_started = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = _read_chat_response(req, timeout=min(timeout, remaining))
             attempts.append((time.monotonic() - attempt_started, "ok"))
             return data, plan, attempts
         except urllib.error.HTTPError as e:
@@ -922,6 +1150,15 @@ def _request_with_thinking(
                 detail = e.read().decode("utf-8", errors="ignore")[:300]
             except Exception:
                 pass
+            # A gateway that does not know the `stream` fields rejects the whole
+            # body. Turn streaming off for the rest of the run and retry the same
+            # rung, so the fast path can never be the reason a read fails.
+            if (e.code == 400 and not _STREAM_DISABLED
+                    and "stream" in detail.lower()):
+                globals()["_STREAM_DISABLED"] = True
+                print("[ocr] gateway rejected the stream fields — "
+                      "retrying with a buffered request")
+                continue
             # ANY failure of a rung that carries a thinking field is treated as
             # "that field may be the problem": it is ruled out for the whole
             # run and the next rung is tried straight away, with no backoff.
@@ -1016,6 +1253,11 @@ def _log_timing(
         reasoning = _reasoning_tokens(data)
         bits.append(f"{tokens} tokens"
                     + (f" ({reasoning} reasoning)" if reasoning else ""))
+        # The model's own decode rate, measured between the first and the last
+        # streamed delta — the number "300 tok/s on GLM 5.3 Flash" refers to.
+        decode = float(getattr(_STREAM_STATS, "decode_s", 0.0) or 0.0)
+        if tokens > 1 and decode > 0.05:
+            bits.append(f"{tokens / decode:.0f} tok/s")
     try:
         name = Path(file_path).name
     except Exception:
@@ -1051,10 +1293,12 @@ class OcrPool:
         max_concurrent: int = MAX_CONCURRENT_OCR,
         reasoning_effort: Optional[str] = None,
         thinking: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> None:
         self._token = token
         self._model = model
         self._api_base = api_base
+        self._provider = provider
         self._max = max(1, max_concurrent)
         # How hard the model may think per read (see OCR_THINKING). "off" is
         # the default because thinking is what made a read take 30s+; the
@@ -1298,7 +1542,7 @@ class OcrPool:
             result = extract_delivery_note(
                 file_path, token=self._token, model=self._model,
                 api_base=self._api_base, on_error=errors.append,
-                thinking=level,
+                thinking=level, provider=getattr(self, "_provider", None),
             )
             elapsed = time.monotonic() - started
         except Exception as exc:  # belt & braces: extract never raises
@@ -1344,11 +1588,12 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: python ocr.py <file.pdf|file.png> [model] [api_base]")
         sys.exit(2)
-    from config import _read_opencode_token
+    from config import _read_ocr_token
 
-    token = _read_opencode_token()
+    token = _read_ocr_token()
     if not token:
-        print("No OpenCode Go API key found (env FILEPICKER_OPENCODE_TOKEN / OPENCODE_API_KEY / opencode_token.txt).")
+        print("No OCR API key found (env FILEPICKER_COMMANDCODE_TOKEN / "
+              "COMMANDCODE_API_KEY / commandcode_token.txt).")
         sys.exit(1)
     model = sys.argv[2] if len(sys.argv) > 2 else OCR_MODEL
     api_base = sys.argv[3] if len(sys.argv) > 3 else OCR_API_BASE

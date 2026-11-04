@@ -33,7 +33,9 @@ class TrayIcon:
     def __init__(self, on_check_update, on_quit, on_force_sync=None,
                  on_force_push=None, on_toggle_startup=None,
                  on_change_watch=None, startup_enabled=None,
-                 watch_label=None, shared_install=False) -> None:
+                 watch_label=None, shared_install=False,
+                 ocr_models=None, ocr_model=None,
+                 on_set_ocr_model=None) -> None:
         self._on_check_update = on_check_update
         self._on_quit = on_quit
         self._on_force_sync = on_force_sync
@@ -43,6 +45,12 @@ class TrayIcon:
         self._startup_enabled = startup_enabled
         self._watch_label = watch_label
         self._shared_install = bool(shared_install)
+        # Which vision model reads delivery notes. Deliberately in the tray:
+        # the app has no window of its own, so switching a model must not
+        # require hand-editing config.json and restarting.
+        self._ocr_models = list(ocr_models or [])
+        self._ocr_model = ocr_model
+        self._on_set_ocr_model = on_set_ocr_model
         self._icon = None
 
     def _startup_label(self, _item=None) -> str:
@@ -69,18 +77,91 @@ class TrayIcon:
                 folder = ""
         return f"Watching: {folder}" if folder else "Watching: (not set)"
 
+    # -- OCR model submenu ------------------------------------------------
+    def _current_model(self) -> str:
+        """The model id in force right now (never raises)."""
+        if self._ocr_model is None:
+            return ""
+        try:
+            return str(self._ocr_model())
+        except Exception:
+            return ""
+
+    def _model_text(self, entry) -> str:
+        """Menu label for one catalog entry.
+
+        Two providers can serve the same model id, so the provider stays in
+        the label: "GLM-5.3 Flash (CommandCode)" leaves no doubt which gateway
+        the read will hit.
+        """
+        if isinstance(entry, dict):
+            label = str(entry.get("label") or entry.get("id") or "")
+            provider = str(entry.get("provider_label")
+                           or entry.get("provider") or "")
+        else:
+            label, provider = str(entry), ""
+        return f"{label} ({provider})" if provider else label
+
+    def _ocr_text(self, _item=None) -> str:
+        """Submenu title that always shows the model in force."""
+        current = self._current_model()
+        for entry in self._ocr_models:
+            if isinstance(entry, dict) and entry.get("id") == current:
+                return f"OCR model: {self._model_text(entry)}"
+        return f"OCR model: {current or 'default'}"
+
+    def _model_checked(self, model_id):
+        return lambda _item: self._current_model() == model_id
+
+    def _model_action(self, model_id):
+        def _choose(_icon, _item) -> None:
+            if self._on_set_ocr_model is not None:
+                self._on_set_ocr_model(model_id)
+        return _choose
+
+    def _ocr_menu(self):
+        """The "OCR model" submenu, or None when there is nothing to offer."""
+        try:
+            from pystray import Menu, MenuItem
+        except Exception:
+            return None
+        entries = []
+        for entry in self._ocr_models:
+            model_id = entry.get("id") if isinstance(entry, dict) else entry
+            if not model_id:
+                continue
+            entries.append(MenuItem(
+                self._model_text(entry),
+                self._model_action(model_id),
+                checked=self._model_checked(model_id),
+                radio=True,
+            ))
+        if not entries:
+            return None
+        return MenuItem(self._ocr_text, Menu(*entries))
+
     def start(self) -> None:
         try:
             import pystray
             from pystray import Menu, MenuItem
-        except ImportError:
-            print("[filepicker] pystray not installed; tray icon disabled.")
+        except Exception as exc:
+            # Not just ImportError: on a headless machine pystray imports but
+            # cannot reach a display, and that must never kill the app.
+            print(f"[filepicker] tray icon disabled: {exc}")
             return
         items = [
             # Which folder this person watches — always visible, because on a
             # shared install "why did/didn't I get a popup?" is answered here.
             MenuItem(self._watch_text, None, enabled=False),
             MenuItem("Change watch folder…", self._change_watch),
+        ]
+        # Which model reads the delivery notes. Placed high in the menu
+        # because it is the one setting people actually change (a slower model
+        # when reads come back wrong, a faster one when they are fine).
+        ocr_menu = self._ocr_menu()
+        if ocr_menu is not None:
+            items.append(ocr_menu)
+        items += [
             MenuItem("Check for updates", self._check_update),
             MenuItem(self._startup_label, self._toggle_startup),
         ]
@@ -112,6 +193,15 @@ class TrayIcon:
                 self._icon.stop()
             except Exception:
                 pass
+
+    def refresh(self) -> None:
+        """Re-evaluate the callable labels/ticks now (model or folder changed)."""
+        if self._icon is None:
+            return
+        try:
+            self._icon.update_menu()
+        except Exception:
+            pass
 
     def _check_update(self, _icon, _item) -> None:
         self._on_check_update()

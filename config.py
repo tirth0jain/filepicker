@@ -30,6 +30,7 @@ from ocr import (
     LEGACY_OCR_MODELS,
     OCR_API_BASE,
     OCR_MODEL,
+    OCR_DEFAULT_PROVIDER,
     OCR_THINKING,
 )
 
@@ -40,6 +41,7 @@ from ocr import (
 # (see localsettings.py). On a normal single-machine install nothing changes:
 # the value is read from and written to config.json exactly as before.
 MACHINE_KEYS = (
+    "ocr_provider",
     "watch_directory",
     "root_directory",
     "auto_start",
@@ -176,6 +178,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # that is merely an OLD DEFAULT (see ocr.LEGACY_OCR_MODELS) is upgraded to
     # the current model on load, so switching the default reaches installs
     # whose config.json pinned the previous name.
+    "ocr_provider": OCR_DEFAULT_PROVIDER,
     "ocr_model": OCR_MODEL,
     "ocr_api_base": OCR_API_BASE,
     # How hard the OCR model may think before answering: "off" (default, by
@@ -323,6 +326,139 @@ def _read_opencode_token() -> Optional[str]:
                     return str(entry["key"]).strip() or None
     except Exception:
         pass
+    return None
+
+
+_TOKEN_SOURCES_LOGGED: set = set()
+
+
+def _note_token_source(path: Path) -> None:
+    """Say once, in the log, which file the OCR key came from.
+
+    Without this a wrong key and an unread key file look identical from the
+    outside ("OCR enabled but no API key found"), and the log is the only
+    place that can tell them apart.
+    """
+    try:
+        name = str(path)
+        if name in _TOKEN_SOURCES_LOGGED:
+            return
+        _TOKEN_SOURCES_LOGGED.add(name)
+        print(f"[filepicker] OCR API key read from {path.name}")
+    except Exception:
+        pass
+
+
+def _token_from_text(text: str) -> Optional[str]:
+    """Pull an API key out of whatever a hand-made key file contains.
+
+    People paste the key bare, as ``api_key = …``, as ``key: …``, or as the
+    whole JSON blob from another tool's auth store, and leave a stray quote or
+    a comment behind. All of that is one key, so accept all of it rather than
+    report "no API key found" and leave OCR silently off.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw[0] in "{[":
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            for key in ("apiKey", "api_key", "key", "token", "access_token"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw = value.strip().strip('"\' ')
+                    break
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            line = line.split("=", 1)[1]
+        elif ":" in line:
+            line = line.split(":", 1)[1]
+        line = line.strip().strip('"\' ,;')
+        # A key is one long unbroken token; anything shorter or with spaces is
+        # a heading ("API KEY"), a placeholder, or a note — keep looking.
+        if len(line) >= 20 and not any(ch.isspace() for ch in line):
+            return line
+    return None
+
+
+def _ocr_token_files(spec: Dict[str, Any],
+                     provider: Optional[str] = None) -> List[Path]:
+    """Key files to try, most specific first (see :func:`_read_ocr_token`).
+
+    ``<provider>_token.txt`` is the documented name; the rest exist because
+    "put the API key in the folder as a text file" is what people actually do,
+    and a file the app ignores looks exactly like a wrong key.
+    """
+    folder = app_directory()
+    name = str(provider or "").strip().lower()
+    names: List[str] = []
+    base = str(spec.get("token_file") or "").strip()
+    if base:
+        names.append(base)
+    if name:
+        names += [f"{name}_token.txt", f"{name}_api_key.txt",
+                  f"{name}_key.txt"]
+    names += ["api_key.txt", "apikey.txt"]
+    paths: List[Path] = []
+    seen = set()
+    for entry in names:
+        if entry.lower() not in seen:
+            seen.add(entry.lower())
+            paths.append(folder / entry)
+    if name:
+        try:
+            for entry in sorted(folder.glob(f"{name}*.txt")):
+                if entry.name.lower() not in seen:
+                    seen.add(entry.name.lower())
+                    paths.append(entry)
+        except OSError:
+            pass
+    return paths
+
+
+def _read_ocr_token(provider: Optional[str] = None) -> Optional[str]:
+    """The API key for an OCR *provider* (an ``ocr.OCR_PROVIDERS`` id), else None.
+
+    One chain per provider so a machine can be set up without editing
+    config.json: the provider's own env vars → a key file next to the exe →
+    (CommandCode) the official CLI's store ``~/.commandcode/auth.json``, which
+    is where ``cmd login`` leaves the key. The key is never written into
+    config.json: on a shared install that file is readable by everybody.
+    """
+    try:
+        from ocr import provider_spec
+        spec = provider_spec(provider)
+    except Exception:
+        return None
+    for env_key in spec.get("token_env") or ():
+        token = os.environ.get(env_key, "").strip()
+        if token:
+            return token
+    for path in _ocr_token_files(spec, provider):
+        try:
+            if not path.is_file():
+                continue
+            token = _token_from_text(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if token:
+            _note_token_source(path)
+            return token
+    if str(provider or "").strip().lower() == "commandcode":
+        try:
+            auth = Path.home() / ".commandcode" / "auth.json"
+            data = json.loads(auth.read_text(encoding="utf-8"))
+            key = data.get("apiKey") if isinstance(data, dict) else None
+            if isinstance(key, str) and key.strip():
+                return key.strip()
+        except Exception:
+            pass
     return None
 
 
@@ -2907,24 +3043,66 @@ class ConfigManager:
         return bool(self._machine_value("enable_ocr", False))
 
     @property
-    def ocr_model(self) -> str:
-        """The model id used for OCR (OpenCode Go catalog).
+    def ocr_provider(self) -> str:
+        """The OCR provider id (``commandcode`` or ``opencode``).
 
-        A value that is merely an OLD DEFAULT of this app (see
-        :data:`ocr.LEGACY_OCR_MODELS`) is upgraded to the current model, so an
-        install whose config.json pinned the previous name switches over
-        without the user editing anything. Any other value is a deliberate
-        per-machine override and is returned as-is.
+        An explicit ``ocr_provider`` wins. Otherwise it is inferred from the
+        model or the base URL the install already pins, so an existing OpenCode
+        setup keeps working instead of being pointed at a gateway that has never
+        heard of its model id.
         """
-        model = str(self._machine_value("ocr_model", OCR_MODEL)).strip()
+        from ocr import (OCR_DEFAULT_PROVIDER, provider_for_base,
+                         provider_for_model)
+        name = str(self._machine_value("ocr_provider", "") or "").strip().lower()
+        if name in ("", "auto"):
+            model = str(self._machine_value("ocr_model", "") or "").strip()
+            name = (provider_for_model(model)
+                    or provider_for_base(self._machine_value("ocr_api_base", ""))
+                    or OCR_DEFAULT_PROVIDER)
+        return name
+
+    @property
+    def ocr_model(self) -> str:
+        """The model id used for OCR, within :attr:`ocr_provider`.
+
+        A value that is merely an OLD DEFAULT (see
+        :data:`ocr.LEGACY_OCR_MODELS`) is upgraded, and a model belonging to the
+        OTHER provider is replaced by this provider's default rather than sent
+        to a gateway that would refuse it.
+
+        The check is scoped to the provider ON PURPOSE: ``ocr.model_spec``
+        searches every provider, so it would happily "confirm" the other
+        provider's id and hand it to a gateway that does not serve it.
+        """
+        from ocr import ocr_models, provider_for_model, provider_spec
+        provider = self.ocr_provider
+        model = str(self._machine_value("ocr_model", "") or "").strip()
         if not model or model in LEGACY_OCR_MODELS:
-            return OCR_MODEL
+            return provider_spec(provider)["default_model"]
+        if any(entry["id"] == model for entry in ocr_models(provider)):
+            return model
+        foreign = provider_for_model(model)
+        if foreign is not None:
+            # The input has a typo-free id the OTHER provider serves: this
+            # gateway would refuse it, so fall back to this one's default.
+            return provider_spec(provider)["default_model"]
+        # Unknown everywhere: a deliberate dev override, honour it.
         return model
 
     @property
     def ocr_api_base(self) -> str:
-        """The OpenAI-compatible endpoint base used for OCR."""
-        return str(self._machine_value("ocr_api_base", OCR_API_BASE))
+        """The endpoint base used for OCR, derived from :attr:`ocr_provider`.
+
+        An explicit provider decides the base: a stale ``ocr_api_base`` left
+        over from the previous provider must never be combined with the new
+        one's path. With no provider pinned, a stored base is honoured so older
+        configs keep working.
+        """
+        from ocr import provider_spec
+        if str(self._machine_value("ocr_provider", "") or "").strip():
+            return provider_spec(self.ocr_provider)["api_base"]
+        stored = str(self._machine_value("ocr_api_base", "") or "").strip()
+        return stored or provider_spec(self.ocr_provider)["api_base"]
 
     @property
     def ocr_thinking(self) -> str:
@@ -2996,6 +3174,10 @@ class ConfigManager:
         return self.ocr_thinking
 
     @property
+    def ocr_token(self) -> Optional[str]:
+        """The API key for the configured OCR provider."""
+        return _read_ocr_token(self.ocr_provider)
+
     def opencode_token(self) -> Optional[str]:
         """The OpenCode Go API key (env / opencode_token.txt / opencode auth store)."""
         return _read_opencode_token()
@@ -3057,6 +3239,53 @@ class ConfigManager:
         Windows entries on this machine.
         """
         self._set_machine_value("auto_start", bool(value))
+
+    def set_ocr_model(self, model: str) -> bool:
+        """Switch the vision model used for OCR (tray menu) and persist it.
+
+        The provider follows the model id (see ``ocr.provider_for_model``) and
+        the base URL is DERIVED from that provider rather than stored on its
+        own, so the three keys can never disagree — a stale base URL beside a
+        new model is exactly how a request reaches the wrong gateway. Written
+        to the local config.json (per person on a shared install), so one
+        colleague trying a model does not switch it for everyone else.
+
+        Returns False (writing nothing) for an id no catalog knows.
+        """
+        try:
+            from ocr import (model_spec, ocr_models, provider_for_model,
+                             provider_spec)
+        except Exception:
+            return False
+        wanted = str(model or "").strip()
+        if not wanted:
+            return False
+        provider = provider_for_model(wanted)
+        if provider is None:
+            # Still allow an id we do not list, but only on the CURRENT
+            # provider — otherwise nothing would know where to send it.
+            provider = self.ocr_provider
+            if not any(entry["id"] == wanted for entry in ocr_models(provider)):
+                return False
+        spec = provider_spec(provider)
+        values = {
+            "ocr_provider": provider,
+            "ocr_model": wanted,
+            "ocr_api_base": spec["api_base"],
+        }
+        with self._lock:
+            if self.shared_install:
+                for key, value in values.items():
+                    self._local.set(key, value)
+                saved = True
+            else:
+                self.load().update(values)
+                saved = bool(self.save("switch OCR model"))
+        if saved:
+            efforts = (model_spec(wanted, provider) or {}).get("efforts") or []
+            print(f"[filepicker] OCR model -> {wanted} "
+                  f"({spec['label']}, efforts={'/'.join(efforts) or 'default'})")
+        return saved
 
     def add_company(self, company: str) -> None:
         changed = False

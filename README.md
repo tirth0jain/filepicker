@@ -54,10 +54,12 @@ Built with **Python 3.10+**, **customtkinter** (modern dark UI) and **watchdog**
   types are read from and written back to `config.json` dynamically.
 - **OCR auto-fill (optional)** — set `"enable_ocr": true` in `config.json` and
   every download is read the moment it lands (PDF or image, all files at once)
-  with the **DeepSeek V4.1 Flash** model, pre-filling **Company (Supplier) /
-  Client (Buyer) / Site (Other References)** so you only have to verify and hit
-  *Save & Organize*. Uses your **OpenCode Go** subscription API key — see
-  [OCR setup](#ocr-setup-deepseek-v41-flash).
+  with **DeepSeek V4.1 Flash** on **CommandCode** (thinking **off**, ~4 s a
+  note), pre-filling **Company (Supplier) / Client (Buyer) / Site (Other
+  References)** so you only have to verify and hit *Save & Organize*. Uses your
+  **CommandCode** API key — see
+  [OCR setup](#ocr-setup-commandcode--deepseek-v41-flash). The model is switched
+  from the tray icon (right-click → **OCR model**), no config editing needed.
 - **Keyboard-first** — the popup takes the keyboard the moment it opens (no
   click needed), so its shortcuts work immediately: **Ctrl+S** Save & Organize,
   **Ctrl+Delete** Skip, **Ctrl+P** Preview, and **Alt + a material's 2-letter
@@ -167,8 +169,9 @@ file and on nobody else.
 ### Setting it up
 
 1. **Copy the whole FilePicker folder to the share** — `FilePicker.exe` plus
-   everything next to it, `config.json`, `github_token.txt`,
-   `opencode_token.txt`.
+   everything next to it, `config.json`, `github_token.txt`, and each person's
+   own `commandcode_token.txt` (the key file is never put in the shared
+   `config.json`).
 2. **Tell FilePicker it is a shared install** — in that `config.json`:
 
    ```json
@@ -240,41 +243,65 @@ file and on nobody else.
 Everybody needs read **and write** access to the share: `config.json` is
 written whenever somebody adds a site, client or mapping.
 
-## OCR setup (DeepSeek V4.1 Flash)
+## OCR setup (CommandCode + DeepSeek V4.1 Flash)
 
 When enabled, every new download opens the popup already pre-filled with the
 supplier / buyer / site read from the document — no manual typing.
 
-1. **Get the key** — the same API key your opencode CLI uses
-   (`opencode auth`). It is the OpenCode Go subscription key, *not* a GitHub
-   token.
-2. **Give it to FilePicker** — one of:
-   - create `opencode_token.txt` next to `FilePicker.exe` (first line: the
-     key, optionally `token = <key>`), or
-   - set the environment variable `FILEPICKER_OPENCODE_TOKEN` (or
-     `OPENCODE_API_KEY`). In dev, the key from
-     `~/.local/share/opencode/auth.json` is used automatically.
+1. **Get the key** — a CommandCode API key (`cmd login`, or the key from your
+   CommandCode dashboard). It is *not* a GitHub token.
+2. **Give it to FilePicker** — put the key in a text file **next to
+   `FilePicker.exe`**. All of these work, and so do the contents: the key bare,
+   `key = <key>`, `api_key: <key>`, or the whole JSON blob from another tool's
+   auth store:
+
+   `commandcode_token.txt` · `commandcode_api_key.txt` · `api_key.txt`
+
+   …or set the environment variable `FILEPICKER_COMMANDCODE_TOKEN` (or
+   `COMMANDCODE_API_KEY`). On a developer machine the key in
+   `~/.commandcode/auth.json` is picked up automatically. Swapping keys later
+   means replacing that file — nothing is hard-coded.
 3. **Turn the feature on** in `config.json`:
 
    ```json
    {
      "enable_ocr": true,
-     "ocr_model": "deepseek-v4.1-flash",
-     "ocr_api_base": "https://opencode.ai/zen/go/v1",
+     "ocr_provider": "commandcode",
+     "ocr_model": "deepseek/deepseek-v4.1-flash",
      "ocr_thinking": "off"
    }
    ```
 
-   `ocr_thinking` is the speed knob (`"off"` is the default and the fastest —
-   see [Speed](#ocr-setup-deepseek-v41-flash) below; `"low"`/`"high"`/`"max"`
-   force graded thinking, `"default"` sends nothing). It is **local-only**,
-   like `ocr_model` and `ocr_api_base`: never synced from GitHub, never pushed
-   back. `enable_ocr` is a **local-only** flag: it is never synced from the GitHub
-   config and never pushed back, because OCR needs this machine's own key.
-   The model/endpoint defaults above can be overridden per machine — a value
-   that is only an *old default* of the app (e.g.
-   `deepseek-v4-flash-vision-exp`) is upgraded to the current model
-   automatically, so an existing `config.json` switches over by itself.
+   `ocr_provider` picks the gateway (and therefore which key file is read);
+   `ocr_api_base` is derived from it, so the two can never disagree.
+
+**Switch models from the tray.** Right-click the FilePicker icon →
+**OCR model** → pick one. The tick shows the model in force, the title shows it
+too, and the choice is saved for this person only (never pushed to the shared
+config). The next download is read with the new model — no restart. Picking a
+model on another provider switches the key file with it. What is on offer:
+
+| Provider | Models |
+| --- | --- |
+| CommandCode (default) | DeepSeek V4.1 Flash · V4 Pro · V4 Flash Vision (exp) · GLM-5.3 Flash |
+| OpenCode Go | DeepSeek V4.1 Flash · V4 Flash · V4 Pro |
+
+`ocr_thinking` is the speed knob (`"off"` is the default and the fastest —
+see [Speed](#ocr-setup-commandcode--deepseek-v41-flash) below;
+`"low"`/`"high"`/`"max"` force graded thinking, `"default"` sends nothing).
+"Off" means what the *model itself* can do: DeepSeek takes
+`reasoning_effort: "off"` and answers in ~4 s; **GLM cannot turn thinking off
+at all** (the API refuses `off` for it), so its floor is `"low"` and a note
+takes ~38 s. That is why DeepSeek is the default — GLM is still one tray click
+away. It is **local-only**, like `ocr_model`, `ocr_provider` and
+`ocr_api_base`: never synced from GitHub, never pushed back. `enable_ocr` is a
+**local-only** flag too, because OCR needs this machine's own key.
+
+The old OpenCode setup still works: a `config.json` that pins
+`"ocr_model": "deepseek-v4.1-flash"` (or `"ocr_provider": "opencode"`) keeps
+reading through OpenCode Go with `opencode_token.txt`. A value that is only an
+*old default* of the app (e.g. `deepseek-v4-flash-vision-exp`) is upgraded to
+the current model automatically.
 
 The **first** file — the one whose popup opens first — is read on its own, so
 the popup you are looking at gets the whole gateway and fills in fastest. The
@@ -369,19 +396,30 @@ looking like your data. The log traces each read to the field it produced:
 
 **Speed (`ocr_thinking`):** a read is dominated by how long the model
 *thinks* before answering — not by the upload, the image or the prompt.
-Thinking mode is **on by default** on the DeepSeek API (effort `high`), and
+Thinking mode is **on by default** on these APIs (effort `high`), and
 `reasoning_effort` only *grades* it down: a delivery note that needs five
 fields copied out was spending thousands of reasoning tokens on a chain of
 thought first, which is where the 10-60 seconds per file went (and why reads
 were so variable). OCR is transcription, not reasoning, so every read now asks
-for thinking to be **off**:
+for thinking to be **off** — using the cheapest level the model actually
+defines, because "off" is not portable:
 
-1. `"reasoning_effort": "none"` — verified live against the OpenCode Go
-   gateway by another client ([opencode#27555](https://github.com/anomalyco/opencode/issues/27555));
-2. `{"thinking": {"type": "disabled"}}` — DeepSeek's documented OpenAI-format
-   toggle ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/));
-3. `"reasoning_effort": "low"` — graded thinking (the old default);
+1. `"reasoning_effort": "off"` — what CommandCode accepts for DeepSeek, and it
+   really works: measured **1 completion token, 0 reasoning tokens, 2.1 s** for
+   a trivial prompt and **3.9 s** for a full delivery note (145 tok/s);
+2. `"reasoning_effort": "none"` + `{"thinking": {"type": "disabled"}}` —
+   OpenCode Go's spelling of the same thing (verified live by another client,
+   [opencode#27555](https://github.com/anomalyco/opencode/issues/27555));
+3. `"reasoning_effort": "low"` — GLM 5.3 Flash **cannot** stop thinking (the
+   API rejects `off` with "only models that can turn thinking off accept it"),
+   so `low` is its floor — and the fallback for DeepSeek if `off` is ever
+   refused;
 4. nothing at all — the model's own default (the slow one).
+
+CommandCode's accepted set is `off | low | medium | high | xhigh | max`; a
+`"none"` is a **400** there (it is OpenCode's spelling), and the catalog
+records each model's set so the ladder never sends a value it knows the model
+rejects.
 
 The app walks that ladder, and — crucially — does **not** trust a `200 OK`: if
 the reply still contains reasoning tokens, that rung is dropped for the rest of
@@ -402,8 +440,16 @@ stage — total, render, image size, attempts, mode, tokens and how many of them
 were reasoning:
 
 ```
-[ocr] RS-DC-26-27-6.pdf: read in 3.1s, render 0.2s, image 0.36MB, mode=reasoning_effort=none, 214 tokens
+[ocr] RS-DC-26-27-6.pdf: read in 4.2s, render 0.2s, image 0.11MB, mode=reasoning_effort=low, 110 tokens, 117 tok/s
 ```
+
+`tok/s` is the measured decode rate (first streamed token → last). It is not
+the number to optimise: with thinking off, the wall clock is mostly **prefill**
+— a page rendered at 1600 px is ~2 400 image tokens and that is ~3 s of
+reading before the first token, whatever the decode rate. What made the old
+CLI transport slow was prefill too: it injects ~7 400 tokens of scaffolding
+into every call (4.6-22 s for a one-line prompt, against 2.8-3.0 s on the
+Provider API), which is why OCR uses `/provider/v1/chat/completions`.
 
 The popup shows the seconds too, counting up live while it waits
 (`OCR: reading document… 12s`) and reporting the total when the fields land
@@ -605,7 +651,7 @@ filepicker/
 ├── config.py        # ConfigManager (load/save config.json)
 ├── watcher.py       # watchdog-based folder watcher + lock debounce
 ├── popup.py         # customtkinter metadata popup
-├── ocr.py           # OCR auto-fill (OpenCode Go DeepSeek V4.1 Flash)
+├── ocr.py           # OCR auto-fill (CommandCode GLM-5.3 Flash by default)
 ├── winfocus.py      # Windows foreground/focus claim for popups & dialogs
 ├── viewer.py        # lightweight PDF / image / Excel preview window
 ├── filename.py      # filename formatting & collision resolution

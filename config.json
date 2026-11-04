@@ -36,8 +36,8 @@
   "enable_github_push": true,
   "auto_start": true,
   "enable_ocr": true,
-  "ocr_model": "deepseek-v4.1-flash",
-  "ocr_api_base": "https://opencode.ai/zen/go/v1",
+  "ocr_model": "deepseek/deepseek-v4.1-flash",
+  "ocr_api_base": "https://api.commandcode.ai",
   "clients": {
     "AAK KAMANI PVT LTD": [],
     "ACME HOUSING PVT LTD": [],
@@ -429,5 +429,6 @@
     "DLF LTD",
     "LARSEN & TOUBRO LTD"
   ],
-  "re_added_clients": []
+  "re_added_clients": [],
+  "ocr_provider": "commandcode"
 }

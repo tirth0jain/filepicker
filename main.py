@@ -370,6 +370,8 @@ class FilePickerController:
                 self._toggle_auto_start()
             elif cmd == "change_watch":
                 self._change_watch_folder()
+            elif cmd.startswith("set_ocr_model:"):
+                self._set_ocr_model_now(cmd.split(":", 1)[1])
             elif cmd == "quit":
                 self._root.destroy()
 
@@ -901,32 +903,7 @@ class FilePickerController:
         # together (up to _OCR_MAX simultaneous vision calls), so each popup
         # opens with its fields already filled.
         if self.config.enable_ocr:
-            try:
-                from ocr import OcrPool
-                self._ocr_pool = OcrPool(
-                    token=self.config.opencode_token,
-                    model=self.config.ocr_model,
-                    api_base=self.config.ocr_api_base,
-                    # How hard the model may think before answering. Thinking
-                    # is ON by default on the DeepSeek API and its chain of
-                    # thought is what made a read take 30s+ (see
-                    # ocr.OCR_THINKING); "off" is the default, and the read
-                    # degrades down a ladder if the gateway refuses the field.
-                    thinking=self.config.ocr_thinking,
-                )
-                if self._ocr_pool.available:
-                    self._set_status(
-                        f"OCR enabled — every delivery note is read on arrival "
-                        f"({_OCR_MAX} at once)")
-                else:
-                    self._set_status("OCR enabled but no API key found")
-                print(f"[filepicker] OCR pool ready (model={self.config.ocr_model}, "
-                      f"concurrent={_OCR_MAX}, "
-                      f"thinking={self.config.ocr_thinking}, "
-                      f"token={'yes' if self._ocr_pool.available else 'MISSING'})")
-            except Exception as exc:
-                print(f"[filepicker] OCR pool init error: {exc}")
-                self._ocr_pool = None
+            self._start_ocr_pool()
         else:
             # Never silent: a later "OCR didn't run" is diagnosable from the
             # log alone (this flag reads LOCAL config.json only).
@@ -1126,6 +1103,9 @@ class FilePickerController:
                 startup_enabled=self._auto_start_enabled,
                 watch_label=self._watch_label,
                 shared_install=_config_is_shared(getattr(self, "config", None)),
+                ocr_models=self._ocr_model_entries(),
+                ocr_model=lambda: self.config.ocr_model,
+                on_set_ocr_model=self._tray_set_ocr_model,
             )
             self._tray.start()
         except Exception as exc:
@@ -1144,6 +1124,99 @@ class FilePickerController:
                 self._tray.stop()
             except Exception:
                 pass
+
+    # -- OCR pool + model switching (tray menu) -----------------------------
+    def _ocr_model_entries(self) -> list:
+        """Every model the tray offers, each labelled with its provider."""
+        try:
+            from ocr import OCR_PROVIDERS, ocr_models
+        except Exception:
+            return []
+        entries = []
+        for name, spec in OCR_PROVIDERS.items():
+            for entry in ocr_models(name):
+                item = dict(entry)
+                item["provider"] = name
+                item["provider_label"] = spec.get("label") or name
+                entries.append(item)
+        return entries
+
+    def _start_ocr_pool(self) -> None:
+        """(Re)create the background OCR pool from the config as it is NOW.
+
+        Called at startup and again after the tray switches model, so the next
+        download is read by the new model without restarting the app.
+        """
+        try:
+            from ocr import OcrPool
+            pool = OcrPool(
+                token=self.config.ocr_token,
+                model=self.config.ocr_model,
+                api_base=self.config.ocr_api_base,
+                provider=self.config.ocr_provider,
+                # How hard the model may think before answering. Thinking is
+                # ON by default on these APIs and its chain of thought is what
+                # made a read take 30s+ (see ocr.OCR_THINKING); "off" is the
+                # default, and each model gets the cheapest effort IT defines
+                # (GLM has no "none", so off means "low" there).
+                thinking=self.config.ocr_thinking,
+            )
+        except Exception as exc:
+            print(f"[filepicker] OCR pool init error: {exc}")
+            self._ocr_pool = None
+            return
+        self._ocr_pool = pool
+        if pool.available:
+            self._set_status(
+                f"OCR enabled — every delivery note is read on arrival "
+                f"({_OCR_MAX} at once)")
+        else:
+            self._set_status("OCR enabled but no API key found")
+        print(f"[filepicker] OCR pool ready (provider={self.config.ocr_provider}, "
+              f"model={self.config.ocr_model}, concurrent={_OCR_MAX}, "
+              f"thinking={self.config.ocr_thinking}, "
+              f"token={'yes' if pool.available else 'MISSING'})")
+
+    def _stop_ocr_pool(self) -> None:
+        """Stop the old pool (in-flight reads finish, queued ones are dropped)."""
+        pool = getattr(self, "_ocr_pool", None)
+        self._ocr_pool = None
+        if pool is not None:
+            try:
+                pool.shutdown()
+            except Exception:
+                pass
+
+    def _tray_set_ocr_model(self, model_id: str) -> None:
+        # Called from the pystray thread; marshal onto the Tk main thread.
+        self._ui_commands.put(f"set_ocr_model:{model_id}")
+
+    def _set_ocr_model_now(self, model_id: str) -> None:
+        """Tray → switch the OCR model, then read with it immediately."""
+        try:
+            from ocr import model_spec, provider_for_model, provider_spec
+        except Exception as exc:
+            self._set_status(f"OCR model switch unavailable: {exc}")
+            return
+        provider = provider_for_model(model_id) or self.config.ocr_provider
+        if not self.config.set_ocr_model(model_id):
+            self._set_status(f"OCR model not changed: {model_id}")
+            print(f"[filepicker] OCR model switch refused: {model_id}")
+            return
+        label = (model_spec(model_id, provider) or {}).get("label") or model_id
+        efforts = (model_spec(model_id, provider) or {}).get("efforts") or []
+        self._stop_ocr_pool()
+        if self.config.enable_ocr:
+            self._start_ocr_pool()
+        self._set_status(f"OCR model → {label} ({provider_spec(provider)['label']})")
+        print(f"[filepicker] OCR model switched to {model_id} "
+              f"(provider={provider}, efforts={'/'.join(efforts) or 'default'}); "
+              f"next reads use it")
+        try:
+            if getattr(self, "_tray", None) is not None:
+                self._tray.refresh()
+        except Exception:
+            pass
 
     def _tray_check_update(self) -> None:
         # Called from the pystray thread; marshal onto the Tk main thread.
