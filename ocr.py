@@ -57,9 +57,10 @@ from filename import fy_from_text as _fy_from_text
 #                image), first token at 3.25 s, 110 output tokens in 0.94 s
 #                => 117 tok/s decode, 4.19 s end to end. The model matters more
 #                than anything else: DeepSeek V4.1 Flash accepts
-#                reasoning_effort "off" and reads the same note in 3.9 s
-#                (145 tok/s, 0 reasoning tokens), while GLM-5.3 Flash cannot
-#                stop thinking and takes 37.8 s.
+#                reasoning_effort "off" and reads the same note in 3.1-3.9 s
+#                (145-194 tok/s, 0 reasoning tokens). GLM-5.3 Flash cannot stop
+#                thinking (the API refuses "off" for it) and took 37.8 s, so it
+#                is no longer offered at all.
 #   opencode     opencode.ai/zen/go/v1 — the previous default.
 OCR_OPENCODE = "opencode"
 OCR_COMMANDCODE = "commandcode"
@@ -81,16 +82,15 @@ OCR_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "token_env": ("FILEPICKER_COMMANDCODE_TOKEN", "COMMANDCODE_API_KEY"),
         "token_file": "commandcode_token.txt",
         "models": [
-            # GLM cannot turn thinking OFF at all (the Provider API rejects
-            # reasoning_effort "off" with "only models that can turn thinking
-            # off accept it"), so "low" is its floor. The DeepSeek models on
-            # this gateway DO take "off" — and it works: measured 1 completion
-            # token, 0 reasoning tokens, 2.1 s. That makes "off" the fastest
-            # read on CommandCode, and "none" is not even a valid value here
-            # (the API 400s with the accepted set: off|low|medium|high|xhigh|max).
-            {"id": "z-ai/glm-5.3-flash", "label": "GLM-5.3 Flash",
-             "vision": True,
-             "efforts": ["low", "medium", "high", "xhigh", "max"]},
+            # Only models whose thinking can actually be turned OFF are
+            # offered. GLM-5.3 Flash cannot: the Provider API rejects
+            # reasoning_effort "off" for it ("only models that can turn
+            # thinking off accept it"), its floor is "low", and a read then
+            # took 37.8 s against 3.9 s here — so it is gone rather than
+            # offered as a slow trap. The DeepSeek models DO take "off":
+            # measured 1 completion token, 0 reasoning tokens, 2.1 s. "none"
+            # is not a valid value on this gateway at all (400; the accepted
+            # set is off|low|medium|high|xhigh|max).
             {"id": "deepseek/deepseek-v4.1-flash",
              "label": "DeepSeek V4.1 Flash", "vision": True,
              "efforts": ["off", "low", "medium", "high", "xhigh", "max"]},
@@ -185,7 +185,10 @@ def ocr_models(provider: Optional[str] = None) -> List[Dict[str, Any]]:
 # pinning the old name. config.py upgrades a stored value from this list to
 # OCR_MODEL when it loads (and persists it on the next save). Any OTHER value
 # is a deliberate per-machine override and is left untouched.
-LEGACY_OCR_MODELS = ("deepseek-v4-flash-vision-exp",)
+LEGACY_OCR_MODELS = ("deepseek-v4-flash-vision-exp",
+                    # Was the default for one build, then dropped: it cannot
+                    # stop thinking, so a read took ~38 s instead of ~4 s.
+                    "z-ai/glm-5.3-flash")
 
 # The model burns ~1500 tokens reasoning on a simple delivery note, and
 # harder documents (long tables, faint scans, the full known-sites/clients

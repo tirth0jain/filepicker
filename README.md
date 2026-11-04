@@ -283,17 +283,17 @@ model on another provider switches the key file with it. What is on offer:
 
 | Provider | Models |
 | --- | --- |
-| CommandCode (default) | DeepSeek V4.1 Flash · V4 Pro · V4 Flash Vision (exp) · GLM-5.3 Flash |
+| CommandCode (default) | DeepSeek V4.1 Flash · V4 Pro · V4 Flash Vision (exp) |
 | OpenCode Go | DeepSeek V4.1 Flash · V4 Flash · V4 Pro |
 
 `ocr_thinking` is the speed knob (`"off"` is the default and the fastest —
 see [Speed](#ocr-setup-commandcode--deepseek-v41-flash) below;
 `"low"`/`"high"`/`"max"` force graded thinking, `"default"` sends nothing).
 "Off" means what the *model itself* can do: DeepSeek takes
-`reasoning_effort: "off"` and answers in ~4 s; **GLM cannot turn thinking off
-at all** (the API refuses `off` for it), so its floor is `"low"` and a note
-takes ~38 s. That is why DeepSeek is the default — GLM is still one tray click
-away. It is **local-only**, like `ocr_model`, `ocr_provider` and
+`reasoning_effort: "off"` and answers in ~4 s. GLM-5.3 Flash **cannot turn
+thinking off at all** (the API refuses `off` for it): its floor is `"low"` and
+the same note took ~38 s, so it is not offered — a model that cannot stop
+thinking is a slow trap, not an option. It is **local-only**, like `ocr_model`, `ocr_provider` and
 `ocr_api_base`: never synced from GitHub, never pushed back. `enable_ocr` is a
 **local-only** flag too, because OCR needs this machine's own key.
 
@@ -410,10 +410,9 @@ defines, because "off" is not portable:
 2. `"reasoning_effort": "none"` + `{"thinking": {"type": "disabled"}}` —
    OpenCode Go's spelling of the same thing (verified live by another client,
    [opencode#27555](https://github.com/anomalyco/opencode/issues/27555));
-3. `"reasoning_effort": "low"` — GLM 5.3 Flash **cannot** stop thinking (the
-   API rejects `off` with "only models that can turn thinking off accept it"),
-   so `low` is its floor — and the fallback for DeepSeek if `off` is ever
-   refused;
+3. `"reasoning_effort": "low"` — the fallback for DeepSeek should `off` ever be
+   refused (GLM-5.3 Flash cannot stop thinking at all: the API rejects `off`
+   with "only models that can turn thinking off accept it", so it was dropped);
 4. nothing at all — the model's own default (the slow one).
 
 CommandCode's accepted set is `off | low | medium | high | xhigh | max`; a
@@ -651,7 +650,7 @@ filepicker/
 ├── config.py        # ConfigManager (load/save config.json)
 ├── watcher.py       # watchdog-based folder watcher + lock debounce
 ├── popup.py         # customtkinter metadata popup
-├── ocr.py           # OCR auto-fill (CommandCode GLM-5.3 Flash by default)
+├── ocr.py           # OCR auto-fill (CommandCode DeepSeek V4.1 Flash)
 ├── winfocus.py      # Windows foreground/focus claim for popups & dialogs
 ├── viewer.py        # lightweight PDF / image / Excel preview window
 ├── filename.py      # filename formatting & collision resolution
